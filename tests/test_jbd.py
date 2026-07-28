@@ -168,3 +168,40 @@ def test_protection_flags_are_named():
 
 def test_no_protection_means_an_empty_list_not_a_missing_key():
     assert jbd.parse_basic(basic_payload(), cell_count=4)["problem_flags"] == []
+
+
+# --- regression: a real frame captured from the pack ---------------------------
+
+# Basic-info frame read off AA:C2:37:0D:23:E6 (Washi 12V314AH, BMS DH04SC02-200A)
+# on 2026-07-28. Kept verbatim: it is the ground truth that showed the previous
+# implementation was reading the wrong bytes.
+REAL_BASIC_FRAME = bytes.fromhex(
+    "0522ffaf436d7aa80002347f000000000000353703040" "40b7e0b7c0b7c0b850080007aa8436d000000001900000000"
+)
+REAL_CELLS_FRAME = bytes.fromhex("0cd50cd60cd50cd6")
+
+
+def test_real_frame_decodes_exactly():
+    cells = jbd.parse_cells(REAL_CELLS_FRAME)
+    assert cells == [3.285, 3.286, 3.285, 3.286]
+
+    data = jbd.parse_basic(REAL_BASIC_FRAME, len(cells))
+    assert data["tail_located"] is True
+    assert data["tail_index"] == 21
+    assert data["pack_voltage"] == 13.14
+    assert data["current"] == -0.81
+    assert data["remaining_capacity"] == 172.61
+    assert data["nominal_capacity"] == 314.0
+    assert data["cycle_count"] == 2
+    assert data["cell_count"] == 4
+    assert data["charge_fet"] is True
+    assert data["discharge_fet"] is True
+    assert data["temperatures"] == [21.1, 20.9, 20.9, 21.8]
+    assert data["problem_flags"] == []
+
+
+def test_real_frame_soc_agrees_with_the_coulomb_counter():
+    """The contradiction that exposed the old bug: 47% reported against 60% counted."""
+    data = jbd.parse_basic(REAL_BASIC_FRAME, 4)
+    counted = data["remaining_capacity"] / data["nominal_capacity"] * 100
+    assert abs(data["soc"] - counted) < 1.0

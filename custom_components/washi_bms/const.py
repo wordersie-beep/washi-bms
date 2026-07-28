@@ -9,8 +9,12 @@ DOMAIN: Final = "washi_bms"
 CONF_ADDRESS: Final = "address"
 
 # Polling. The BMS answers a full basic+cells round trip in ~0.35 s, so 5 s
-# keeps the power-flow card live without hogging the BLE adapter.
+# keeps the power-flow card live without hogging the BLE adapter. A config
+# entry may carry its own `update_interval`; it is honoured within these bounds.
 SCAN_INTERVAL_SECONDS: Final = 5
+MIN_SCAN_INTERVAL: Final = 5
+MAX_SCAN_INTERVAL: Final = 600
+CONF_UPDATE_INTERVAL: Final = "update_interval"
 
 # A single request/response round trip. Generous enough for a busy adapter,
 # short enough that a wedged link is noticed within one poll.

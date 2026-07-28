@@ -23,11 +23,23 @@ from . import jbd
 from .const import (
     CHARACTERISTIC_CANDIDATES,
     COMMAND_TIMEOUT,
+    CONF_UPDATE_INTERVAL,
     DOMAIN,
+    MAX_SCAN_INTERVAL,
+    MIN_SCAN_INTERVAL,
     SCAN_INTERVAL_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _scan_interval(entry: ConfigEntry) -> int:
+    """Poll period in seconds, honouring the entry's own setting if it has one."""
+    try:
+        configured = int(entry.data.get(CONF_UPDATE_INTERVAL, SCAN_INTERVAL_SECONDS))
+    except (TypeError, ValueError):
+        return SCAN_INTERVAL_SECONDS
+    return min(max(configured, MIN_SCAN_INTERVAL), MAX_SCAN_INTERVAL)
 
 
 class WashiBmsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -38,7 +50,7 @@ class WashiBmsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hass,
             _LOGGER,
             name=f"{DOMAIN} {address}",
-            update_interval=timedelta(seconds=SCAN_INTERVAL_SECONDS),
+            update_interval=timedelta(seconds=_scan_interval(entry)),
             config_entry=entry,
         )
         self.address = address

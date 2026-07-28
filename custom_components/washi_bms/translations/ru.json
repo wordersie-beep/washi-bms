@@ -18,24 +18,69 @@
   },
   "entity": {
     "sensor": {
-      "pack_voltage": { "name": "Напряжение (BMS)" },
-      "current": { "name": "Ток (BMS)" },
-      "power": { "name": "Мощность (BMS)" },
-      "soc": { "name": "SOC по BMS (сырой)" },
-      "remaining_capacity": { "name": "Остаток ёмкости" },
-      "nominal_capacity": { "name": "Номинальная ёмкость" },
-      "cycle_count": { "name": "Циклов заряда" },
-      "temp_1": { "name": "Температура" },
-      "charge_fet": { "name": "Заряд FET" },
-      "discharge_fet": { "name": "Разряд FET" },
-      "cell_count": { "name": "Число ячеек" },
-      "cell_min_voltage": { "name": "Мин. ячейка" },
-      "cell_max_voltage": { "name": "Макс. ячейка" },
-      "cell_delta_voltage": { "name": "Разброс ячеек" },
-      "cell_1": { "name": "Ячейка 1" },
-      "cell_2": { "name": "Ячейка 2" },
-      "cell_3": { "name": "Ячейка 3" },
-      "cell_4": { "name": "Ячейка 4" }
+      "pack_voltage": {
+        "name": "Напряжение (BMS)"
+      },
+      "current": {
+        "name": "Ток (BMS)"
+      },
+      "power": {
+        "name": "Мощность (BMS)"
+      },
+      "soc": {
+        "name": "SOC по BMS (сырой)"
+      },
+      "remaining_capacity": {
+        "name": "Остаток ёмкости"
+      },
+      "nominal_capacity": {
+        "name": "Номинальная ёмкость"
+      },
+      "cycle_count": {
+        "name": "Циклов заряда"
+      },
+      "temp_1": {
+        "name": "Температура"
+      },
+      "charge_fet": {
+        "name": "Заряд FET"
+      },
+      "discharge_fet": {
+        "name": "Разряд FET"
+      },
+      "cell_count": {
+        "name": "Число ячеек"
+      },
+      "cell_min_voltage": {
+        "name": "Мин. ячейка"
+      },
+      "cell_max_voltage": {
+        "name": "Макс. ячейка"
+      },
+      "cell_delta_voltage": {
+        "name": "Разброс ячеек"
+      },
+      "cell_1": {
+        "name": "Ячейка 1"
+      },
+      "cell_2": {
+        "name": "Ячейка 2"
+      },
+      "cell_3": {
+        "name": "Ячейка 3"
+      },
+      "cell_4": {
+        "name": "Ячейка 4"
+      },
+      "temp_2": {
+        "name": "Температура 2"
+      },
+      "temp_3": {
+        "name": "Температура 3"
+      },
+      "temp_4": {
+        "name": "Температура 4"
+      }
     }
   }
 }

@@ -64,9 +64,12 @@ def _fet_state(key: str) -> Callable[[dict[str, Any]], str | None]:
     return _value
 
 
-def _first_temperature(data: dict[str, Any]) -> float | None:
-    temperatures = data.get("temperatures") or []
-    return temperatures[0] if temperatures else None
+def _temperature(index: int) -> Callable[[dict[str, Any]], float | None]:
+    def _value(data: dict[str, Any]) -> float | None:
+        temperatures = data.get("temperatures") or []
+        return temperatures[index] if index < len(temperatures) else None
+
+    return _value
 
 
 SENSORS: tuple[WashiSensorDescription, ...] = (
@@ -132,15 +135,22 @@ SENSORS: tuple[WashiSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda data: data.get("cycle_count"),
     ),
-    WashiSensorDescription(
-        key="temp_1",
-        translation_key="temp_1",
-        device_class=SensorDeviceClass.TEMPERATURE,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        suggested_display_precision=1,
-        icon="mdi:thermometer",
-        value_fn=_first_temperature,
+    # This pack carries four NTC probes. Only the first was ever exposed, so
+    # probes 2-4 are new entities; the first keeps its key, and with it its
+    # recorded history.
+    *(
+        WashiSensorDescription(
+            key=f"temp_{number}",
+            translation_key=f"temp_{number}",
+            device_class=SensorDeviceClass.TEMPERATURE,
+            state_class=SensorStateClass.MEASUREMENT,
+            native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+            suggested_display_precision=1,
+            icon="mdi:thermometer",
+            entity_category=None if number == 1 else EntityCategory.DIAGNOSTIC,
+            value_fn=_temperature(number - 1),
+        )
+        for number in range(1, 5)
     ),
     WashiSensorDescription(
         key="charge_fet",
