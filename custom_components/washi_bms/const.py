@@ -20,6 +20,11 @@ CONF_UPDATE_INTERVAL: Final = "update_interval"
 # short enough that a wedged link is noticed within one poll.
 COMMAND_TIMEOUT: Final = 4.0
 
+# How many failed polls in a row before the BLE session is torn down and
+# rebuilt. One is too eager: the pack occasionally misses a notification when
+# the adapter is busy, and a reconnect costs far more than skipping one poll.
+FAILURES_BEFORE_RECONNECT: Final = 2
+
 # GATT layout of the Washi 12V314AH (MINIBTS) pack, confirmed by service
 # discovery on AA:C2:37:0D:23:E6:
 #   service 0000fff0  ->  fff2 [write-without-response], fff1 [read, notify]

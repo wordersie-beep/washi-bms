@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -36,6 +37,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: WashiBmsConfigEntry) -> 
 
     entry.runtime_data = coordinator
     _register_device(hass, entry, coordinator)
+
+    # Recover as soon as the pack is heard again, instead of waiting for the
+    # next scheduled poll.
+    entry.async_on_unload(
+        bluetooth.async_register_callback(
+            hass,
+            coordinator.async_on_advertisement,
+            {"address": address, "connectable": True},
+            bluetooth.BluetoothScanningMode.PASSIVE,
+        )
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))

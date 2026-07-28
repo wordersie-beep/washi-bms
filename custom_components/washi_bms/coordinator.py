@@ -16,7 +16,7 @@ from bleak_retry_connector import (
 )
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from . import jbd
@@ -25,6 +25,7 @@ from .const import (
     COMMAND_TIMEOUT,
     CONF_UPDATE_INTERVAL,
     DOMAIN,
+    FAILURES_BEFORE_RECONNECT,
     MAX_SCAN_INTERVAL,
     MIN_SCAN_INTERVAL,
     SCAN_INTERVAL_SECONDS,
@@ -58,6 +59,7 @@ class WashiBmsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Read once on the first successful connection; None until then.
         self.model: str | None = None
         self._model_attempts = 0
+        self._failures = 0
         self._client: BleakClientWithServiceCache | None = None
         self._write_char: BleakGATTCharacteristic | None = None
         self._notify_char: BleakGATTCharacteristic | None = None
@@ -115,6 +117,21 @@ class WashiBmsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return client
 
+    @callback
+    def async_on_advertisement(
+        self,
+        service_info: bluetooth.BluetoothServiceInfoBleak,
+        change: bluetooth.BluetoothChange,
+    ) -> None:
+        """Reconnect the moment the pack is heard again after a dropout.
+
+        Without this, recovery waits for the next scheduled poll; with it, the
+        gap is as short as the pack's advertising interval.
+        """
+        if not self.last_update_success:
+            _LOGGER.debug("[%s] heard again, refreshing now", self.address)
+            self.hass.async_create_task(self.async_request_refresh())
+
     def _on_disconnect(self, _client: BleakClientWithServiceCache) -> None:
         """Drop our references so the next poll reconnects from scratch."""
         _LOGGER.debug("[%s] disconnected", self.address)
@@ -170,8 +187,14 @@ class WashiBmsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._pending is not None and not self._pending.done():
                 self._pending.set_result(frame)
 
-    async def _query(self, command: int) -> bytes:
-        """Send one command and wait for its reply."""
+    async def _query(self, command: int, *, may_retry: bool = True) -> bytes:
+        """Send one command and wait for its reply.
+
+        A single missed reply is not treated as a dead link: the pack
+        occasionally drops one notification when the adapter is busy. Retrying
+        once on the open connection keeps the session alive, where tearing it
+        down would cost a full reconnect every time.
+        """
         client = await self._async_connect()
         assert self._write_char is not None
 
@@ -185,6 +208,11 @@ class WashiBmsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             frame = await asyncio.wait_for(self._pending, COMMAND_TIMEOUT)
         except TimeoutError as err:
+            if may_retry and client.is_connected:
+                _LOGGER.debug(
+                    "[%s] no reply to 0x%02x, retrying once", self.address, command
+                )
+                return await self._query(command, may_retry=False)
             raise UpdateFailed(
                 f"no reply to command 0x{command:02x} within {COMMAND_TIMEOUT:g} s"
             ) from err
@@ -229,12 +257,20 @@ class WashiBmsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cells = jbd.parse_cells(await self._query(jbd.CMD_CELLS))
                 basic = jbd.parse_basic(await self._query(jbd.CMD_BASIC), len(cells))
             except UpdateFailed:
-                await self._async_teardown()
+                # Hold the session open through one bad poll; drop it only once
+                # the link has proved unusable, so a momentary stall does not
+                # cost a reconnect.
+                self._failures += 1
+                if self._failures >= FAILURES_BEFORE_RECONNECT:
+                    await self._async_teardown()
                 raise
             except (BleakNotFoundError, BleakError, ValueError, OSError) as err:
+                # A protocol or transport error means the link really is gone.
+                self._failures += 1
                 await self._async_teardown()
                 raise UpdateFailed(f"{type(err).__name__}: {err}") from err
 
+            self._failures = 0
             await self._async_read_model()
 
         data: dict[str, Any] = dict(basic)
