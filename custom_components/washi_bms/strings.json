@@ -1,0 +1,41 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "confirm": {
+        "description": "Add the battery pack {name}?"
+      },
+      "user": {
+        "data": {
+          "address": "Battery pack"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This battery pack is already set up",
+      "no_devices_found": "No Bluetooth battery packs are in range"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "pack_voltage": { "name": "Pack voltage" },
+      "current": { "name": "Current" },
+      "power": { "name": "Power" },
+      "soc": { "name": "State of charge" },
+      "remaining_capacity": { "name": "Remaining capacity" },
+      "nominal_capacity": { "name": "Nominal capacity" },
+      "cycle_count": { "name": "Cycle count" },
+      "temp_1": { "name": "Temperature" },
+      "charge_fet": { "name": "Charge FET" },
+      "discharge_fet": { "name": "Discharge FET" },
+      "cell_count": { "name": "Cell count" },
+      "cell_min_voltage": { "name": "Lowest cell" },
+      "cell_max_voltage": { "name": "Highest cell" },
+      "cell_delta_voltage": { "name": "Cell spread" },
+      "cell_1": { "name": "Cell 1" },
+      "cell_2": { "name": "Cell 2" },
+      "cell_3": { "name": "Cell 3" },
+      "cell_4": { "name": "Cell 4" }
+    }
+  }
+}
