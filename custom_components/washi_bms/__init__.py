@@ -7,7 +7,7 @@ import logging
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
@@ -33,13 +33,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: WashiBmsConfigEntry) -> 
         )
 
     coordinator = WashiBmsCoordinator(hass, entry, address)
-    await coordinator.async_config_entry_first_refresh()
-
     entry.runtime_data = coordinator
-    _register_device(hass, entry, coordinator)
 
-    # Recover as soon as the pack is heard again, instead of waiting for the
-    # next scheduled poll.
+    # Registered before the first poll, so a pack that is out of range right
+    # now is picked up the moment it advertises again rather than at the next
+    # scheduled poll.
     entry.async_on_unload(
         bluetooth.async_register_callback(
             hass,
@@ -48,6 +46,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: WashiBmsConfigEntry) -> 
             bluetooth.BluetoothScanningMode.PASSIVE,
         )
     )
+
+    # A pack that is asleep, out of range, or behind a Bluetooth proxy that has
+    # not reconnected yet must not take the whole entry down with it. Failing
+    # setup here removes every sensor from Home Assistant, which is strictly
+    # worse than an unavailable one: dashboards fall back to "entity not
+    # found", and any automation watching for the pack going unavailable — the
+    # one that restarts the BLE proxy to get it back — can no longer fire,
+    # because its trigger entity no longer exists. So set up regardless and let
+    # the entities read unavailable until the first successful poll.
+    await coordinator.async_refresh()
+    if not coordinator.last_update_success:
+        _LOGGER.warning(
+            "[%s] first poll failed (%s); the sensors stay unavailable until the "
+            "pack is heard again",
+            address,
+            coordinator.last_exception,
+        )
+
+    _track_device_details(hass, entry, coordinator)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
@@ -82,26 +99,46 @@ def _resolve_address(entry: ConfigEntry) -> str | None:
     return None
 
 
-def _register_device(
+def _track_device_details(
     hass: HomeAssistant, entry: WashiBmsConfigEntry, coordinator: WashiBmsCoordinator
 ) -> None:
-    """Create or refresh the device entry.
+    """Register the device now and keep it in step with what the pack reports.
 
-    Any field left out here keeps whatever the registry already holds, so a
-    name the user set by hand survives.
+    The model string and the pack size are only known once the pack has
+    actually answered, which — on a pack that starts out of range — can be a
+    long time after setup. So the device is registered immediately with
+    whatever is known, and refreshed when a poll fills the rest in.
     """
-    extra: dict[str, str] = {}
+    written: dict[str, str] = {}
+
+    @callback
+    def _sync() -> None:
+        details = _device_details(coordinator)
+        if details == written:
+            return
+        written.clear()
+        written.update(details)
+        # Any field left out here keeps whatever the registry already holds,
+        # so a name the user set by hand survives.
+        dr.async_get(hass).async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, coordinator.address)},
+            connections={(dr.CONNECTION_BLUETOOTH, coordinator.address)},
+            manufacturer=MANUFACTURER,
+            name=entry.title,
+            **details,
+        )
+
+    _sync()
+    entry.async_on_unload(coordinator.async_add_listener(_sync))
+
+
+def _device_details(coordinator: WashiBmsCoordinator) -> dict[str, str]:
+    """The device-page fields that can only be filled in from a real reading."""
+    details: dict[str, str] = {}
     if coordinator.model:
-        extra["model"] = coordinator.model
+        details["model"] = coordinator.model
     nominal = (coordinator.data or {}).get("nominal_capacity")
     if nominal:
-        extra["hw_version"] = f"12.8V / {nominal:g}Ah / {nominal * 12.8:g}Wh"
-
-    dr.async_get(hass).async_get_or_create(
-        config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, coordinator.address)},
-        connections={(dr.CONNECTION_BLUETOOTH, coordinator.address)},
-        manufacturer=MANUFACTURER,
-        name=entry.title,
-        **extra,
-    )
+        details["hw_version"] = f"12.8V / {nominal:g}Ah / {nominal * 12.8:g}Wh"
+    return details

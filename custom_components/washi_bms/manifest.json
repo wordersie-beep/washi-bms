@@ -1,7 +1,7 @@
 {
   "domain": "washi_bms",
   "name": "Washi BMS (LiFePO4 Battery)",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "codeowners": [
     "@wordersie-beep"
   ],

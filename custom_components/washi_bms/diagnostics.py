@@ -22,7 +22,15 @@ async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
-    coordinator: WashiBmsCoordinator = entry.runtime_data
+    # The dump is asked for precisely when things are broken, so it has to
+    # survive an entry that never finished setting up rather than 500.
+    coordinator: WashiBmsCoordinator | None = getattr(entry, "runtime_data", None)
+    if coordinator is None:
+        return {
+            "entry": async_redact_data(dict(entry.data), TO_REDACT),
+            "connection": {"loaded": False, "reason": entry.reason},
+        }
+
     data = coordinator.data or {}
 
     return {

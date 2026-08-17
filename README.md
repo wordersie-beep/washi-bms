@@ -39,6 +39,20 @@ actually be. If no position satisfies all of that, those sensors report
 
 An unknown value you can see is better than a wrong one you cannot.
 
+## When the pack is out of range
+
+The pack drops off Bluetooth regularly — a proxy reboots, the van is parked
+away from the hub, the BMS goes quiet. The integration keeps its entities in
+place through that: they read `unavailable` and come back on their own the
+moment the pack advertises again.
+
+That holds across a Home Assistant restart too. An entry whose pack cannot be
+heard at startup still sets up, with the sensors unavailable, rather than
+failing setup and taking every entity out of Home Assistant altogether — which
+would leave dashboards showing "entity not found" and would stop any
+automation that watches for the pack going unavailable, including the one that
+restarts the BLE proxy to bring it back.
+
 ## If a sensor stays unknown
 
 Download diagnostics from the device page (⋮ → Download diagnostics). The dump
