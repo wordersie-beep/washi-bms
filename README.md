@@ -56,3 +56,11 @@ over Bluetooth automatically.
 
 Home Assistant 2024.12 or newer, and a Bluetooth adapter or ESPHome BLE proxy
 within range of the pack.
+
+## Dashboard card
+
+The repository also carries a Lovelace card, `lovelace/crafter-route-card.js`,
+which draws a van's recorded position history as a driven route rather than a
+field of accuracy circles — road-snapped, coloured by speed, tappable for the
+speed and time at any point, and full screen on tap. It is independent of the
+BMS integration; see [`lovelace/README.md`](lovelace/README.md).
