@@ -14,7 +14,7 @@
  * built-in map card already uses, plus OSRM when road snapping is enabled.
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 const DEFAULTS = {
   hours_to_show: 24,
@@ -366,25 +366,32 @@ function boundsOf(list) {
 
 /**
  * Ask OSRM to lay the fixes onto the road network. The public demo server takes
- * at most 100 coordinates per request, so long trips go up in overlapping
+ * at most 100 coordinates per request, so long runs go up in overlapping
  * chunks; a chunk that fails falls back to its own raw points, which keeps the
  * line continuous instead of losing a stretch of the journey.
  */
-async function osrmMatch(chunk, opts, signal) {
+async function osrmMatch(chunk, opts, signal, radius) {
   // A dead or blocked OSRM must not hold the card hostage for 30 s a chunk.
   const local = new AbortController();
   const timer = setTimeout(() => local.abort(), 12000);
   const relay = () => local.abort();
   signal.addEventListener("abort", relay, { once: true });
   try {
-    return await osrmRequest(chunk, opts, local.signal);
+    return await osrmRequest(chunk, opts, local.signal, radius);
   } finally {
     clearTimeout(timer);
     signal.removeEventListener("abort", relay);
   }
 }
 
-async function osrmRequest(chunk, opts, signal) {
+/** Errors are tagged: a network failure is fatal, an unmatchable trace is not. */
+function osrmError(message, network) {
+  const err = new Error(message);
+  err.network = !!network;
+  return err;
+}
+
+async function osrmRequest(chunk, opts, signal, radius) {
   let last = 0;
   const stamps = chunk.map((p) => {
     let t = Math.round(p.t / 1000);
@@ -396,53 +403,88 @@ async function osrmRequest(chunk, opts, signal) {
     `${opts.osrm_url}/match/v1/driving/` +
     chunk.map((p) => `${p.lon.toFixed(6)},${p.lat.toFixed(6)}`).join(";") +
     `?geometries=geojson&overview=full&tidy=true&gaps=split` +
-    `&radiuses=${chunk.map(() => 25).join(";")}` +
+    (radius ? `&radiuses=${chunk.map(() => radius).join(";")}` : "") +
     `&timestamps=${stamps.join(";")}`;
 
-  const res = await fetch(url, { signal, referrerPolicy: "no-referrer" });
-  if (!res.ok) throw new Error(`OSRM HTTP ${res.status}`);
+  let res;
+  try {
+    res = await fetch(url, { signal, referrerPolicy: "no-referrer" });
+  } catch (err) {
+    throw osrmError(err && err.name === "AbortError" ? "нет ответа" : "сеть", true);
+  }
+  if (!res.ok) throw osrmError(`HTTP ${res.status}`, true);
   const data = await res.json();
   if (data.code !== "Ok" || !Array.isArray(data.matchings) || !data.matchings.length) {
-    throw new Error(`OSRM ${data.code || "no match"}`);
+    throw osrmError(data.code || "нет совпадения", false);
   }
   const out = [];
   for (const m of data.matchings) {
     for (const c of m.geometry.coordinates) out.push({ lat: c[1], lon: c[0] });
   }
-  if (out.length < 2) throw new Error("OSRM empty geometry");
+  if (out.length < 2) throw osrmError("пустая геометрия", false);
   return out;
 }
 
-async function snapTrip(points, opts, signal, health) {
+/**
+ * Map-match one continuous run of movement. A parked van is the hardest thing
+ * to snap — it sits in a yard or a layby with no road within the search radius
+ * — so stops never come here; only the driving between them does. A trace the
+ * server cannot match is retried once with OSRM's own default search radius
+ * before the run is given up on.
+ */
+async function snapRun(points, opts, signal, health) {
   const CHUNK = 80;
   const coords = [];
-  let snappedAll = true;
   for (let i = 0; i < points.length - 1; i += CHUNK - 1) {
     const chunk = points.slice(i, i + CHUNK);
     if (chunk.length < 2) break;
-    let piece;
-    if (health.failures >= 2) {
+    let piece = null;
+    if (health.dead) {
       health.failed++;
-      snappedAll = false;
-      piece = chunk.map((p) => ({ lat: p.lat, lon: p.lon }));
     } else {
-      try {
-        piece = await osrmMatch(chunk, opts, signal);
-        health.failures = 0;
-        health.ok++;
-      } catch (err) {
-        // Only the caller's own abort ends the build; a timeout is a failure.
-        if (signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
-        health.failures++;
-        health.failed++;
-        snappedAll = false;
-        piece = chunk.map((p) => ({ lat: p.lat, lon: p.lon }));
+      for (const radius of [50, 0]) {
+        try {
+          piece = await osrmMatch(chunk, opts, signal, radius);
+          health.ok++;
+          health.network = 0;
+          break;
+        } catch (err) {
+          if (signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+          if (!health.reason) health.reason = err.message;
+          if (err.network) {
+            // The server is unreachable — a wider radius will not help.
+            if (++health.network >= 3) health.dead = true;
+            break;
+          }
+        }
       }
+      if (!piece) health.failed++;
     }
+    if (!piece) piece = chunk.map((p) => ({ lat: p.lat, lon: p.lon }));
     if (coords.length) coords.push(...piece.slice(1));
     else coords.push(...piece);
   }
-  return { coords, snapped: snappedAll };
+  return coords;
+}
+
+/**
+ * Split a trip into runs of movement separated by stops. The stops stay in the
+ * drawn line as plain joints, so the route never breaks apart at a car park.
+ */
+function movingRuns(trip) {
+  const runs = [];
+  let run = [];
+  for (const node of trip) {
+    if (node.kind === "stop") {
+      if (run.length) runs.push({ moving: true, nodes: run });
+      runs.push({ moving: false, nodes: [node] });
+      run = [];
+    } else {
+      run.push(node);
+    }
+  }
+  if (run.length) runs.push({ moving: true, nodes: run });
+  return runs;
 }
 
 /** Carry time and speed from the recorded fixes onto the drawn vertices. */
@@ -515,10 +557,13 @@ class VanMap {
 
     this._svg = document.createElementNS(SVG_NS, "svg");
     this._svg.setAttribute("class", "vrc-svg");
-    this._routeG = document.createElementNS(SVG_NS, "g");
+    this._casingG = document.createElementNS(SVG_NS, "g");
+    this._casingG.setAttribute("class", "vrc-casings");
+    this._lineG = document.createElementNS(SVG_NS, "g");
+    this._lineG.setAttribute("class", "vrc-lines");
     this._arrowG = document.createElementNS(SVG_NS, "g");
     this._arrowG.setAttribute("class", "vrc-arrows");
-    this._svg.append(this._routeG, this._arrowG);
+    this._svg.append(this._casingG, this._lineG, this._arrowG);
 
     this._pane.append(this._tileLayer, this._svg);
 
@@ -673,11 +718,38 @@ class VanMap {
     const tx = this._w / 2 - (cx - this._px0.x) * this._scale;
     const ty = this._h / 2 - (cy - this._px0.y) * this._scale;
     this._pane.style.transform = `translate3d(${tx.toFixed(2)}px, ${ty.toFixed(2)}px, 0) scale(${this._scale})`;
-    this._svg.style.setProperty("--sc", String(1 / this._scale));
 
+    this._sizeSvg(cx, cy);
     this._renderTiles();
     this._renderMarkers();
     if (this.onViewChange) this.onViewChange();
+  }
+
+  /**
+   * Give the route SVG a real viewport covering the visible world plus half a
+   * screen of slack, and re-state it in the viewBox. Relying on
+   * `overflow: visible` on a zero-sized SVG is not portable — WebKit clips it,
+   * which hides the whole route — and the stroke widths ride on an inherited
+   * presentation attribute for the same reason.
+   */
+  _sizeSvg(cx, cy) {
+    const halfW = this._w / (2 * this._scale);
+    const halfH = this._h / (2 * this._scale);
+    const x = Math.round(cx - this._px0.x - halfW * 1.5);
+    const y = Math.round(cy - this._px0.y - halfH * 1.5);
+    const w = Math.max(1, Math.round(halfW * 3));
+    const h = Math.max(1, Math.round(halfH * 3));
+    const svg = this._svg;
+    svg.style.left = `${x}px`;
+    svg.style.top = `${y}px`;
+    svg.style.width = `${w}px`;
+    svg.style.height = `${h}px`;
+    svg.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
+
+    const k = 1 / this._scale;
+    this._casingG.setAttribute("stroke-width", (9 * k).toFixed(2));
+    this._lineG.setAttribute("stroke-width", (5 * k).toFixed(2));
+    this._arrowG.setAttribute("stroke-width", (1.5 * k).toFixed(2));
   }
 
   /** Swap the tile style; every loaded tile belongs to the old style. */
@@ -834,20 +906,18 @@ class VanMap {
     const z = this._z;
     const ox = this._px0.x;
     const oy = this._px0.y;
-    const frag = document.createDocumentFragment();
+    const casings = document.createDocumentFragment();
+    const lines = document.createDocumentFragment();
 
     const xy = (c) => `${(lonToX(c.lon, z) - ox).toFixed(1)} ${(latToY(c.lat, z) - oy).toFixed(1)}`;
 
     for (const seg of this._geometry) {
       if (seg.coords.length < 2) continue;
       seg._xy = seg.coords.map(xy);
-      frag.appendChild(this._path(`M${seg._xy.join("L")}`, "vrc-casing"));
-    }
+      casings.appendChild(this._path(`M${seg._xy.join("L")}`, "vrc-casing"));
 
-    for (const seg of this._geometry) {
-      if (seg.coords.length < 2) continue;
       if (!this.o.colorBySpeed || !seg.speeds) {
-        frag.appendChild(this._path(`M${seg._xy.join("L")}`, "vrc-line", SPEED_BANDS[0].color));
+        lines.appendChild(this._path(`M${seg._xy.join("L")}`, "vrc-line", SPEED_BANDS[0].color));
         continue;
       }
       let start = 0;
@@ -855,14 +925,15 @@ class VanMap {
       for (let i = 1; i < seg.coords.length; i++) {
         const b = bandFor(seg.speeds[i]);
         if (b === band) continue;
-        frag.appendChild(this._path(`M${seg._xy.slice(start, i + 1).join("L")}`, "vrc-line", band.color));
+        lines.appendChild(this._path(`M${seg._xy.slice(start, i + 1).join("L")}`, "vrc-line", band.color));
         start = i;
         band = b;
       }
-      frag.appendChild(this._path(`M${seg._xy.slice(start).join("L")}`, "vrc-line", band.color));
+      lines.appendChild(this._path(`M${seg._xy.slice(start).join("L")}`, "vrc-line", band.color));
     }
 
-    this._routeG.replaceChildren(frag);
+    this._casingG.replaceChildren(casings);
+    this._lineG.replaceChildren(lines);
     this._buildArrows();
   }
 
@@ -1045,22 +1116,20 @@ const STYLES = `
 }
 .vrc-tile.is-on { opacity: 1; }
 .vrc-svg {
-  position: absolute; left: 0; top: 0; width: 1px; height: 1px;
+  position: absolute; left: 0; top: 0;
   overflow: visible; pointer-events: none;
+  z-index: 2;
 }
 .vrc-casing {
   fill: none; stroke: rgba(0,0,0,.5);
   stroke-linecap: round; stroke-linejoin: round;
-  stroke-width: calc(9px * var(--sc, 1));
 }
 .vrc-line {
   fill: none; stroke-linecap: round; stroke-linejoin: round;
-  stroke-width: calc(5px * var(--sc, 1));
 }
 .vrc-arrows path {
   fill: none; stroke: rgba(255,255,255,.9);
   stroke-linecap: round; stroke-linejoin: round;
-  stroke-width: calc(1.5px * var(--sc, 1));
 }
 .vrc-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
 .vrc-marker { position: absolute; left: 0; top: 0; will-change: transform; }
@@ -1120,6 +1189,7 @@ const STYLES = `
   background: rgba(15,23,42,.82); color: #e2e8f0;
   border: 1px solid rgba(148,163,184,.28);
   cursor: pointer; padding: 0;
+  -webkit-backdrop-filter: blur(3px);
   backdrop-filter: blur(3px);
 }
 .vrc-btn:hover { background: rgba(30,41,59,.92); }
@@ -1428,8 +1498,9 @@ class CrafterRouteCard extends HTMLElement {
     ];
     if (period) parts.push(period);
     if (this._loading) parts.push("обновление…");
-    if (this._snapState === "partial") parts.push("часть маршрута не легла на дороги");
-    else if (this._snapState === "none") parts.push("дороги недоступны — линия по точкам GPS");
+    const why = this._snapReason ? ` (${escapeHtml(this._snapReason)})` : "";
+    if (this._snapState === "partial") parts.push(`часть маршрута не легла на дороги${why}`);
+    else if (this._snapState === "none") parts.push(`дороги недоступны — линия по точкам GPS${why}`);
     return parts.map((p) => `<span>${p}</span>`).join("");
   }
 
@@ -1587,32 +1658,28 @@ class CrafterRouteCard extends HTMLElement {
     const tolerance = this._track.nodes.length > 12000 ? cfg.simplify_meters : 0;
 
     const geometry = [];
-    const health = { failures: 0, ok: 0, failed: 0 };
-    let chunkBudget = 40;
+    const health = { network: 0, ok: 0, failed: 0, dead: false, reason: "" };
+    let chunkBudget = 60;
 
     for (const trip of this._track.trips) {
       if (trip.length < 2) continue;
-      let coords = (tolerance ? simplify(trip, tolerance) : trip).map((p) => ({
-        lat: p.lat,
-        lon: p.lon,
-      }));
-
-      if (this._snap) {
-        const thinned = thinForSnap(trip, 20);
-        const needed = Math.ceil(thinned.length / 79);
-        if (thinned.length >= 4 && needed <= chunkBudget) {
-          chunkBudget -= needed;
-          try {
-            const snapped = await snapTrip(thinned, cfg, ac.signal, health);
-            coords = snapped.coords;
-          } catch (err) {
-            if (err && err.name === "AbortError") throw err;
-            health.failed++;
+      const coords = [];
+      for (const run of movingRuns(trip)) {
+        let piece = (tolerance && run.moving ? simplify(run.nodes, tolerance) : run.nodes).map(
+          (p) => ({ lat: p.lat, lon: p.lon })
+        );
+        if (this._snap && run.moving) {
+          const thinned = thinForSnap(run.nodes, 20);
+          const needed = Math.ceil(thinned.length / 79);
+          if (thinned.length >= 4 && needed <= chunkBudget) {
+            chunkBudget -= needed;
+            const snapped = await snapRun(thinned, cfg, ac.signal, health);
+            if (snapped.length >= 2) piece = snapped;
           }
-        } else if (thinned.length >= 4) {
-          health.failed++;
         }
+        coords.push(...piece);
       }
+      if (coords.length < 2) continue;
 
       const s = attachSamples(coords, trip);
       geometry.push({ coords, speeds: s.speeds, times: s.times, dists: s.dists, nodes: trip });
@@ -1620,6 +1687,7 @@ class CrafterRouteCard extends HTMLElement {
 
     if (ac.signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
     this._geometry = geometry;
+    this._snapReason = health.reason;
     if (!this._snap) this._snapState = "off";
     else if (!health.failed) this._snapState = "full";
     else if (health.ok) this._snapState = "partial";

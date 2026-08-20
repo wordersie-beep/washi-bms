@@ -14,9 +14,12 @@ history as a journey instead of a scatter plot:
   arrival and departure time — this is what removes the parked-van jitter cloud.
 * **The history is split into trips** at long stops and at gaps in the
   recording, so the line never jumps across a stretch that was never driven.
-* **The line follows roads.** Each trip is map-matched with OSRM, in
-  overlapping chunks; anything that fails to match falls back to the raw track,
-  so the route stays continuous either way.
+* **The line follows roads.** Each stretch of *movement* is map-matched with
+  OSRM in overlapping chunks — stops are never sent, because a van parked in a
+  yard has no road within any sane search radius and is exactly what makes a
+  match fail. A trace the server cannot match is retried once with OSRM's own
+  default radius; anything that still fails falls back to the raw track, so the
+  route stays continuous either way, and the reason is shown in the summary.
 * **Speed is visible.** The line is coloured by speed band, and tapping
   anywhere on it reports the speed, the clock time, the date, how far along the
   trip that point was, and the altitude.
@@ -24,7 +27,9 @@ history as a journey instead of a scatter plot:
   Escape or the ✕ closes it.
 
 The slippy map is implemented in the card, so there is no Leaflet or other
-library to install. Raster tiles come from CARTO — the same source the built-in
+library to install. The route SVG is given a real viewport that tracks the view
+(as Leaflet does) rather than relying on `overflow: visible`, which WebKit does
+not honour — there, a zero-sized SVG clips the whole route away. Raster tiles come from CARTO — the same source the built-in
 map card uses.
 
 ## Install
