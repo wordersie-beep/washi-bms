@@ -14,7 +14,7 @@
  * built-in map card already uses, plus OSRM when road snapping is enabled.
  */
 
-const CARD_VERSION = "1.2.0";
+const CARD_VERSION = "1.3.0";
 
 const DEFAULTS = {
   hours_to_show: 24,
@@ -405,6 +405,7 @@ const SNAP_ATTEMPTS = [
 const SNAP_CHUNK = 60;        // coordinates per request; the demo servers cap at 100
 const SNAP_TIMEOUT = 12000;   // ms — a dead server must not hold the card hostage
 const SNAP_STRIKES = 2;       // network failures before an endpoint is abandoned
+const SNAP_REFUSALS = 2;      // outright refusals before matching is given up on
 
 // Matched geometry, kept for the life of the page: switching the range or
 // toggling the button re-draws the same trips, and the demo servers are a
@@ -604,12 +605,18 @@ async function snapRun(points, opts, signal, health) {
     while (!piece && health.at < health.endpoints.length) {
       try {
         const res = await snapChunk(chunk, health.endpoints[health.at], signal, health, 0);
-        // A server that turns every shape of request away is not going to
-        // start now: hand the stretch to the next one before giving up on it.
-        if (!res.matched && res.refused && health.at + 1 < health.endpoints.length) {
-          health.at++;
-          health.strikes = 0;
-          continue;
+        if (!res.matched && res.refused) {
+          // A server that turns every shape of request away is not going to
+          // start now: hand the stretch to the next one. And once the last one
+          // has refused twice, stop asking for this redraw — otherwise every
+          // remaining chunk pays for the same refusal, and the wait is what the
+          // person looking at the card actually feels.
+          if (health.at + 1 < health.endpoints.length) {
+            health.at++;
+            health.strikes = 0;
+            continue;
+          }
+          if (++health.refusals >= SNAP_REFUSALS) health.at = health.endpoints.length;
         }
         piece = res.coords;
         health.ok += res.matched;
@@ -1510,6 +1517,10 @@ class CrafterRouteCard extends HTMLElement {
     this._loading = false;
     this._error = null;
     this._snapState = "off";
+    // Bumped by every redraw: an older pass that is still waiting on a server
+    // checks it and drops its result instead of drawing over a newer one.
+    this._gen = 0;
+    this._snapping = false;
   }
 
   setConfig(config) {
@@ -1548,7 +1559,11 @@ class CrafterRouteCard extends HTMLElement {
   connectedCallback() {
     if (this._hass && !this.shadowRoot.childElementCount) this._buildDom();
     if (this._map) this._map.attach();
-    this._timer = setInterval(() => this._reload(), 120000);
+    // A refresh in the middle of a matching pass would cancel it and start
+    // over, so the roads would never finish arriving on a slow server.
+    this._timer = setInterval(() => {
+      if (!this._snapping) this._reload();
+    }, 120000);
   }
 
   disconnectedCallback() {
@@ -1702,6 +1717,7 @@ class CrafterRouteCard extends HTMLElement {
     ];
     if (period) parts.push(period);
     if (this._loading) parts.push("обновление…");
+    else if (this._snapping) parts.push("прокладываю по дорогам…");
     const why = this._snapReason ? ` (${escapeHtml(this._snapReason)})` : "";
     if (this._snapState === "partial") parts.push(`часть маршрута не легла на дороги${why}`);
     else if (this._snapState === "none") parts.push(`дороги недоступны — линия по точкам GPS${why}`);
@@ -1819,40 +1835,81 @@ class CrafterRouteCard extends HTMLElement {
     return raw;
   }
 
+  /**
+   * Reload the history and redraw.
+   *
+   * Map matching talks to a server, and a server can be slow — so the card
+   * never waits on it before showing anything. The recorded fixes are drawn
+   * first, and the roads arrive afterwards in a second pass. Nothing here
+   * refuses to start because something else is in flight either: pressing 6 ч
+   * while the roads for 1 ч are still coming back cancels that pass and starts
+   * this one, which is what the button press meant.
+   */
   async _reload() {
-    if (!this._hass || !this._config || this._loading) return;
+    if (!this._hass || !this._config) return;
+    const gen = ++this._gen;
+    if (this._abort) this._abort.abort();
     this._loading = true;
     this._error = null;
     this._renderChrome();
+
+    let raw;
     try {
-      const raw = await this._fetch();
-      this._track = buildTrack(raw, this._config);
-      await this._buildGeometry();
-      this._draw(!this._touched);
+      raw = await this._fetch();
     } catch (err) {
-      if (err && err.name === "AbortError") return;
-      this._error = (err && (err.message || err.error)) || String(err);
-    } finally {
+      if (gen !== this._gen) return;
       this._loading = false;
+      if (!err || err.name !== "AbortError") {
+        this._error = (err && (err.message || err.error)) || String(err);
+      }
       this._renderChrome();
+      return;
     }
+    if (gen !== this._gen) return;
+
+    this._track = buildTrack(raw, this._config);
+    this._loading = false;
+    await this._buildGeometry(false);
+    if (gen !== this._gen) return;
+    this._draw(!this._touched);
+    this._renderChrome();
+
+    await this._snapPass(gen);
   }
 
   /** Re-run only the geometry stage — used when road snapping is toggled. */
   async _rebuild() {
     if (!this._track.trips.length) return;
+    const gen = ++this._gen;
+    if (this._abort) this._abort.abort();
+    await this._buildGeometry(false);
+    if (gen !== this._gen) return;
+    this._draw(false);
+    this._renderChrome();
+    await this._snapPass(gen);
+  }
+
+  /** The road-matching pass: slow, cancellable, and never blocks the buttons. */
+  async _snapPass(gen) {
+    if (!this._snap || !this._track.trips.length) return;
+    this._snapping = true;
+    this._renderChrome();
     try {
-      await this._buildGeometry();
+      await this._buildGeometry(true);
     } catch (err) {
       if (err && err.name === "AbortError") return;
-      this._error = (err && err.message) || String(err);
+      if (gen === this._gen) this._error = (err && err.message) || String(err);
+    } finally {
+      if (gen === this._gen) this._snapping = false;
     }
+    if (gen !== this._gen) return;
     this._draw(false);
     this._renderChrome();
   }
 
-  async _buildGeometry() {
+  async _buildGeometry(useSnap) {
     const cfg = this._config;
+    const snapping = !!useSnap && this._snap;
     if (this._abort) this._abort.abort();
     const ac = (this._abort = new AbortController());
 
@@ -1868,6 +1925,7 @@ class CrafterRouteCard extends HTMLElement {
       strikes: 0,
       ok: 0,
       failed: 0,
+      refusals: 0,
       reason: "",
     };
     let chunkBudget = 60;
@@ -1881,7 +1939,7 @@ class CrafterRouteCard extends HTMLElement {
         let piece = (tolerance && run.moving ? simplify(run.nodes, tolerance) : run.nodes).map(
           (p) => ({ lat: p.lat, lon: p.lon })
         );
-        if (this._snap && run.moving) {
+        if (snapping && run.moving) {
           const thinned = thinForSnap(run.nodes, 20);
           const needed = Math.ceil(thinned.length / (SNAP_CHUNK - 1));
           if (thinned.length >= 4 && needed <= chunkBudget) {
@@ -1910,6 +1968,7 @@ class CrafterRouteCard extends HTMLElement {
     this._geometry = geometry;
     this._snapReason = health.reason;
     if (!this._snap) this._snapState = "off";
+    else if (!snapping) this._snapState = "pending";
     else if (!health.failed) this._snapState = "full";
     else if (health.ok) this._snapState = "partial";
     else this._snapState = "none";

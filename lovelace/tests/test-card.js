@@ -48,7 +48,7 @@ const check = async (name, fn) => {
     global.fetch = async (url) => roadFor(url);
     const c = card(true);
     const gps = c._track.stats.gpsDist;
-    await c._buildGeometry();
+    await c._buildGeometry(true);
     const s = c._track.stats;
     assert.equal(c._snapState, "full", "reason: " + c._snapReason);
     assert.equal(s.snapped, true);
@@ -64,7 +64,7 @@ const check = async (name, fn) => {
     global.fetch = async () => ({ ok: false, status: 400, json: async () => ({ code: "TooBig", message: "Too many trace coordinates" }) });
     const c = card(true);
     const gps = c._track.stats.gpsDist;
-    await c._buildGeometry();
+    await c._buildGeometry(true);
     assert.equal(c._snapState, "none");
     assert.equal(c._track.stats.snapped, false);
     assert.ok(/TooBig/.test(c._snapReason), "reason: " + c._snapReason);
@@ -79,7 +79,7 @@ const check = async (name, fn) => {
       return roadFor(url);
     };
     const c = card(true);
-    await c._buildGeometry();
+    await c._buildGeometry(true);
     assert.equal(c._snapState, "full", "state " + c._snapState + " reason " + c._snapReason);
     assert.equal(c._track.stats.snapped, true);
   });
@@ -87,7 +87,7 @@ const check = async (name, fn) => {
   await check("snapping off: the card measures the line it draws", async () => {
     global.fetch = async () => { throw new Error("no requests expected"); };
     const c = card(false);
-    await c._buildGeometry();
+    await c._buildGeometry(true);
     assert.equal(c._snapState, "off");
     assert.equal(c._track.stats.snapped, false);
     assert.ok(Math.abs(c._track.stats.dist - c._track.stats.gpsDist) < c._track.stats.gpsDist * 0.02);
@@ -97,7 +97,7 @@ const check = async (name, fn) => {
     m.SNAP_CACHE.clear();
     global.fetch = async (url) => roadFor(url);
     const c = card(true);
-    await c._buildGeometry();
+    await c._buildGeometry(true);
     assert.ok(c._track.stops.length >= 1, "the three-minute stop should be detected");
     assert.ok(c._geometry.length >= 1);
     for (const g of c._geometry) assert.equal(g.coords.length, g.speeds.length);

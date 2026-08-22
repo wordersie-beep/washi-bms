@@ -3,7 +3,7 @@ const assert = require("assert");
 
 const AC = () => new AbortController();
 const health = (opts = {}) => Object.assign(
-  { endpoints: ["https://a.example", "https://b.example"], at: 0, strikes: 0, ok: 0, failed: 0, reason: "" },
+  { endpoints: ["https://a.example", "https://b.example"], at: 0, strikes: 0, ok: 0, failed: 0, refusals: 0, reason: "" },
   opts
 );
 
