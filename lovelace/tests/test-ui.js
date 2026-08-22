@@ -135,5 +135,40 @@ const check = async (name, fn) => {
     assert.equal(c._error, null, "and a later reload clears it");
   });
 
+  await check("a map parked on the van is re-fitted once a route exists", async () => {
+    m.SNAP_CACHE.clear();
+    const c = card(10);
+    const calls = { fit: 0, view: 0 };
+    c._map = {
+      o: {},
+      setDark() {}, setRoute() {}, setMarkers() {}, setTooltip() {},
+      fitBounds() { calls.fit++; },
+      setView() { calls.view++; },
+      metersPerPixel: () => 1,
+    };
+    c._hass = { states: { "device_tracker.van": { attributes: { latitude: 53.4, longitude: -6.44 } } } };
+    delete c._draw;                      // the real one, this time
+
+    // Opening the map before any history has arrived parks it on the van.
+    c._fitAll();
+    assert.equal(calls.view, 1, "nothing to fit yet, so it sits on the van");
+    assert.equal(c._fitted, undefined || c._fitted, "and that does not count as fitted");
+    assert.ok(!c._fitted);
+
+    // The route arrives, and the person has since touched the map — the redraw
+    // asks for no fit at all. It must still fit this first real route.
+    await c._reload();
+    assert.ok(c._geometry.length > 0);
+    c._touched = true;
+    c._draw(false);
+    assert.ok(calls.fit >= 1, "the first real route must be brought on screen");
+    assert.equal(c._fitted, true);
+
+    // From then on, a redraw leaves the view where the person put it.
+    const before = calls.fit;
+    c._draw(false);
+    assert.equal(calls.fit, before, "later redraws must not steal the view back");
+  });
+
   process.exitCode = pass ? 0 : 1;
 })();

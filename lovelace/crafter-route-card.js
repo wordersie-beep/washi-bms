@@ -14,7 +14,7 @@
  * built-in map card already uses, plus OSRM when road snapping is enabled.
  */
 
-const CARD_VERSION = "1.3.0";
+const CARD_VERSION = "1.3.1";
 
 const DEFAULTS = {
   hours_to_show: 24,
@@ -1521,6 +1521,9 @@ class CrafterRouteCard extends HTMLElement {
     // checks it and drops its result instead of drawing over a newer one.
     this._gen = 0;
     this._snapping = false;
+    // Whether the map has ever been fitted to an actual route, as opposed to
+    // being parked on the van because there was nothing else to fit yet.
+    this._fitted = false;
   }
 
   setConfig(config) {
@@ -1587,7 +1590,8 @@ class CrafterRouteCard extends HTMLElement {
     el.innerHTML =
       `© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>` +
       `, © <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>` +
-      `<span class="vrc-osrm"></span>`;
+      `<span class="vrc-osrm"></span>` +
+      ` · v${CARD_VERSION}`;
     return el;
   }
 
@@ -1698,7 +1702,7 @@ class CrafterRouteCard extends HTMLElement {
   }
 
   _statsHtml() {
-    if (this._error) return `<span>Не удалось загрузить историю: ${escapeHtml(this._error)}</span>`;
+    if (this._error) return `<span>Ошибка: ${escapeHtml(this._error)}</span>`;
     const s = this._track.stats;
     if (!this._track.nodes.length) {
       return `<span>${this._loading ? "Загрузка истории…" : "За выбранный период точек нет"}</span>`;
@@ -1869,7 +1873,12 @@ class CrafterRouteCard extends HTMLElement {
 
     this._track = buildTrack(raw, this._config);
     this._loading = false;
-    await this._buildGeometry(false);
+    try {
+      await this._buildGeometry(false);
+    } catch (err) {
+      if (gen !== this._gen) return;
+      if (err && err.name !== "AbortError") this._error = err.message || String(err);
+    }
     if (gen !== this._gen) return;
     this._draw(!this._touched);
     this._renderChrome();
@@ -1882,7 +1891,12 @@ class CrafterRouteCard extends HTMLElement {
     if (!this._track.trips.length) return;
     const gen = ++this._gen;
     if (this._abort) this._abort.abort();
-    await this._buildGeometry(false);
+    try {
+      await this._buildGeometry(false);
+    } catch (err) {
+      if (gen !== this._gen) return;
+      if (err && err.name !== "AbortError") this._error = err.message || String(err);
+    }
     if (gen !== this._gen) return;
     this._draw(false);
     this._renderChrome();
@@ -1962,6 +1976,23 @@ class CrafterRouteCard extends HTMLElement {
       cursor = s.end;
       prevEnd = trip[trip.length - 1];
       geometry.push({ coords, speeds: s.speeds, times: s.times, dists: s.dists, nodes: trip });
+    }
+
+    // A track that no trip could be cut out of — a van that only jittered in a
+    // car park, or a range too short for anything to be split off — still has
+    // fixes worth drawing. An empty map under a header full of numbers reads as
+    // a broken card, not as "you did not go anywhere".
+    if (!geometry.length && this._track.nodes.length >= 2) {
+      const coords = this._track.nodes.map((p) => ({ lat: p.lat, lon: p.lon }));
+      const s = attachSamples(coords, this._track.nodes, cursor);
+      cursor = s.end;
+      geometry.push({
+        coords,
+        speeds: s.speeds,
+        times: s.times,
+        dists: s.dists,
+        nodes: this._track.nodes,
+      });
     }
 
     if (ac.signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
@@ -2054,8 +2085,15 @@ class CrafterRouteCard extends HTMLElement {
     const live = this._livePoint();
     if (live) all.push(live);
     const b = boundsOf(all);
-    if (b && (b.n !== b.s || b.e !== b.w)) this._map.fitBounds(b, padding || (this._fs ? 56 : 34));
-    else if (live) this._map.setView(live, 16);
+    if (b && (b.n !== b.s || b.e !== b.w)) {
+      this._map.fitBounds(b, padding || (this._fs ? 56 : 34));
+      // Fitting the live point alone does not count: the map is then parked on
+      // the van at street level, and if nothing re-fits it, a route that
+      // arrives later sits outside the screen and the card looks empty.
+      this._fitted = this._geometry.length > 0;
+    } else if (live) {
+      this._map.setView(live, 16);
+    }
   }
 
   _draw(fit) {
@@ -2065,7 +2103,7 @@ class CrafterRouteCard extends HTMLElement {
     this._liveKey = null;
     this._map.setMarkers(this._buildMarkers());
     if (this._tipEl) this._map.setTooltip(this._tipEl);
-    if (fit) this._fitAll();
+    if (fit || !this._fitted) this._fitAll();
     if (this._note) {
       this._note.style.display = this._track.nodes.length ? "" : "none";
       this._note.classList.remove("is-faded");

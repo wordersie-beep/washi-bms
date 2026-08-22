@@ -103,5 +103,53 @@ const check = async (name, fn) => {
     for (const g of c._geometry) assert.equal(g.coords.length, g.speeds.length);
   });
 
+  await check("a van parked all hour is coherent: no line, no crash, honest numbers", async () => {
+    m.SNAP_CACHE.clear();
+    global.fetch = async () => { throw new Error("no roads for a car park"); };
+    // Half an hour of GPS drift inside a few metres. There is no journey here,
+    // and the card must say so without falling over.
+    const parked = [];
+    for (let i = 0; i < 120; i++) {
+      parked.push({
+        t: 1.7e12 + i * 15000,
+        lat: 53.4 + Math.sin(i) * 0.00004,
+        lon: -6.44 + Math.cos(i) * 0.00004,
+        v: 0,
+        alt: 60,
+      });
+    }
+    const c = Object.create(m.CrafterRouteCard.prototype);
+    c._config = Object.assign({}, m.DEFAULTS, { entity: "device_tracker.van" });
+    c._track = m.buildTrack(parked, c._config);
+    c._snap = true;
+    c._geometry = [];
+    assert.equal(c._track.trips.length, 0, "nothing here is a trip");
+    assert.equal(c._track.nodes.length, 1, "the whole hour folds into one stop");
+    await c._buildGeometry(false);
+    assert.equal(c._geometry.length, 0, "one point is not a line");
+    assert.equal(c._track.stats.dist, 0);
+    assert.equal(c._snapState, "pending");
+  });
+
+  await check("fixes that no trip could be cut from are drawn anyway", async () => {
+    m.SNAP_CACHE.clear();
+    global.fetch = async () => { throw new Error("not asked"); };
+    const c = Object.create(m.CrafterRouteCard.prototype);
+    c._config = Object.assign({}, m.DEFAULTS, { entity: "device_tracker.van" });
+    // A track the trip splitter dropped everything out of, which used to leave
+    // the map blank under a header full of numbers.
+    const nodes = [
+      { kind: "move", lat: 53.4, lon: -6.44, t: 1.7e12, tEnd: 1.7e12, v: 30 },
+      { kind: "move", lat: 53.402, lon: -6.437, t: 1.7e12 + 60000, tEnd: 1.7e12 + 60000, v: 30 },
+    ];
+    c._track = { nodes, trips: [], stops: [], stats: { dist: 0, gpsDist: 0, snapped: false } };
+    c._snap = false;
+    c._geometry = [];
+    await c._buildGeometry(false);
+    assert.equal(c._geometry.length, 1, "the fixes are drawn anyway");
+    assert.equal(c._geometry[0].coords.length, 2);
+    assert.ok(c._track.stats.dist > 100, "and they are measured: " + c._track.stats.dist);
+  });
+
   process.exitCode = pass ? 0 : 1;
 })();
