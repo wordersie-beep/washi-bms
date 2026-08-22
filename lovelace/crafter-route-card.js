@@ -14,7 +14,7 @@
  * built-in map card already uses, plus OSRM when road snapping is enabled.
  */
 
-const CARD_VERSION = "1.1.0";
+const CARD_VERSION = "1.2.0";
 
 const DEFAULTS = {
   hours_to_show: 24,
@@ -27,7 +27,14 @@ const DEFAULTS = {
   trip_gap_seconds: 900,    // s — a longer stop or data gap starts a new trip
   max_jump_kmh: 200,        // above this a fix is treated as an outlier
   simplify_meters: 4,       // Douglas–Peucker tolerance for the drawn line
-  osrm_url: "https://router.project-osrm.org",
+  // Tried in order: the first one that answers wins. A single string works
+  // too, and a config that names one endpoint still gets the built-in
+  // fallbacks appended unless osrm_fallback is turned off.
+  osrm_url: [
+    "https://router.project-osrm.org",
+    "https://routing.openstreetmap.de/routed-car",
+  ],
+  osrm_fallback: true,
   min_zoom: 3,
   max_zoom: 19,
 };
@@ -336,7 +343,13 @@ function buildTrack(raw, opts) {
     stops,
     stats: {
       points: points.length,
+      // Straight lines between fixes. Once the geometry is built this is
+      // replaced by the length of the drawn route, which follows the roads
+      // whenever the fixes could be matched onto them; gpsDist keeps the
+      // original figure for when they could not.
       dist: total,
+      gpsDist: total,
+      snapped: false,
       movingSec,
       maxV,
       stops: stops.length,
@@ -365,102 +378,255 @@ function boundsOf(list) {
 /* ----------------------------------------------------------------- road snap */
 
 /**
- * Ask OSRM to lay the fixes onto the road network. The public demo server takes
- * at most 100 coordinates per request, so long runs go up in overlapping
- * chunks; a chunk that fails falls back to its own raw points, which keeps the
- * line continuous instead of losing a stretch of the journey.
+ * Map matching: laying the recorded fixes onto the road network with OSRM.
+ *
+ * Everything here is written around one fact about the public demo servers:
+ * they answer 400 to a request they dislike (too many coordinates, a search
+ * radius above their limit, timestamps they will not read), and a 400 is a
+ * statement about the request, never about the roads. So a refused chunk is
+ * retried with plainer parameters, then in halves, then on the next endpoint,
+ * and only a chunk that all of that still cannot place falls back to its own
+ * raw GPS points — the rest of the journey stays on the road network.
  */
-async function osrmMatch(chunk, opts, signal, radius) {
-  // A dead or blocked OSRM must not hold the card hostage for 30 s a chunk.
+
+/**
+ * Parameter sets, best first, each one dropping whatever the previous one might
+ * have been refused for: our own search radius (servers cap it, and answer 400
+ * when it is over their limit), then the timestamps, and finally a wider radius
+ * for fixes that sit too far from any road to be placed at all.
+ */
+const SNAP_ATTEMPTS = [
+  { radius: 25, timestamps: true },
+  { radius: 0, timestamps: true },
+  { radius: 0, timestamps: false },
+  { radius: 50, timestamps: false },
+];
+
+const SNAP_CHUNK = 60;        // coordinates per request; the demo servers cap at 100
+const SNAP_TIMEOUT = 12000;   // ms — a dead server must not hold the card hostage
+const SNAP_STRIKES = 2;       // network failures before an endpoint is abandoned
+
+// Matched geometry, kept for the life of the page: switching the range or
+// toggling the button re-draws the same trips, and the demo servers are a
+// shared resource that should not be asked the same question twice.
+const SNAP_CACHE = new Map();
+const SNAP_CACHE_MAX = 400;
+
+function snapCacheGet(key) {
+  return SNAP_CACHE.get(key) || null;
+}
+
+function snapCachePut(key, coords) {
+  if (SNAP_CACHE.size >= SNAP_CACHE_MAX) SNAP_CACHE.delete(SNAP_CACHE.keys().next().value);
+  SNAP_CACHE.set(key, coords);
+}
+
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch (err) {
+    return String(url);
+  }
+}
+
+/** The endpoints to try, in order, with the built-in fallbacks appended. */
+function osrmEndpoints(opts) {
+  const listed = Array.isArray(opts.osrm_url) ? opts.osrm_url : [opts.osrm_url];
+  const out = [];
+  const add = (url) => {
+    if (typeof url !== "string") return;
+    const clean = url.trim().replace(/\/+$/, "");
+    if (clean && out.indexOf(clean) === -1) out.push(clean);
+  };
+  listed.forEach(add);
+  if (opts.osrm_fallback !== false) DEFAULTS.osrm_url.forEach(add);
+  return out;
+}
+
+/**
+ * Errors carry what should happen next:
+ *   "request" — the server refused these parameters; plainer ones may work.
+ *   "nomatch" — the trace itself could not be placed on a road.
+ *   "network" — the server is unreachable or broken; only another one helps.
+ */
+function snapError(message, kind) {
+  const err = new Error(message);
+  err.kind = kind;
+  return err;
+}
+
+/** Whole seconds, strictly increasing — OSRM rejects a repeated timestamp. */
+function snapTimestamps(chunk) {
+  let last = 0;
+  return chunk.map((p) => {
+    let t = Math.round((p.t || 0) / 1000);
+    if (!isFinite(t) || t <= last) t = last + 1;
+    last = t;
+    return t;
+  });
+}
+
+function osrmUrl(base, chunk, radius, timestamps) {
+  const coords = chunk.map((p) => `${p.lon.toFixed(6)},${p.lat.toFixed(6)}`).join(";");
+  const params = ["geometries=geojson", "overview=full", "tidy=true"];
+  if (timestamps) {
+    // gaps=split only means anything with timestamps to split on.
+    params.push(`timestamps=${snapTimestamps(chunk).join(";")}`, "gaps=split");
+  } else {
+    params.push("gaps=ignore");
+  }
+  if (radius) params.push(`radiuses=${chunk.map(() => radius).join(";")}`);
+  return `${base}/match/v1/driving/${coords}?${params.join("&")}`;
+}
+
+/** One request. Returns the matched geometry, or throws a tagged error. */
+async function osrmRequest(base, chunk, radius, timestamps, signal) {
   const local = new AbortController();
-  const timer = setTimeout(() => local.abort(), 12000);
+  const timer = setTimeout(() => local.abort(), SNAP_TIMEOUT);
   const relay = () => local.abort();
   signal.addEventListener("abort", relay, { once: true });
+  let res;
   try {
-    return await osrmRequest(chunk, opts, local.signal, radius);
+    res = await fetch(osrmUrl(base, chunk, radius, timestamps), {
+      signal: local.signal,
+      referrerPolicy: "no-referrer",
+    });
+  } catch (err) {
+    if (signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+    throw snapError(err && err.name === "AbortError" ? "нет ответа" : "сеть", "network");
   } finally {
     clearTimeout(timer);
     signal.removeEventListener("abort", relay);
   }
-}
 
-/** Errors are tagged: a network failure is fatal, an unmatchable trace is not. */
-function osrmError(message, network) {
-  const err = new Error(message);
-  err.network = !!network;
-  return err;
-}
-
-async function osrmRequest(chunk, opts, signal, radius) {
-  let last = 0;
-  const stamps = chunk.map((p) => {
-    let t = Math.round(p.t / 1000);
-    if (t <= last) t = last + 1;
-    last = t;
-    return t;
-  });
-  const url =
-    `${opts.osrm_url}/match/v1/driving/` +
-    chunk.map((p) => `${p.lon.toFixed(6)},${p.lat.toFixed(6)}`).join(";") +
-    `?geometries=geojson&overview=full&tidy=true&gaps=split` +
-    (radius ? `&radiuses=${chunk.map(() => radius).join(";")}` : "") +
-    `&timestamps=${stamps.join(";")}`;
-
-  let res;
+  // OSRM describes its own refusals in the body, 4xx included: read it, so the
+  // card can say "TooBig" or "NoSegment" instead of a bare status code.
+  let data = null;
   try {
-    res = await fetch(url, { signal, referrerPolicy: "no-referrer" });
+    data = await res.json();
   } catch (err) {
-    throw osrmError(err && err.name === "AbortError" ? "нет ответа" : "сеть", true);
+    data = null;
   }
-  if (!res.ok) throw osrmError(`HTTP ${res.status}`, true);
-  const data = await res.json();
-  if (data.code !== "Ok" || !Array.isArray(data.matchings) || !data.matchings.length) {
-    throw osrmError(data.code || "нет совпадения", false);
+  if (!res.ok) {
+    const detail = (data && (data.code || data.message)) || `HTTP ${res.status}`;
+    const mine = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
+    throw snapError(detail, mine ? "request" : "network");
+  }
+  if (!data || data.code !== "Ok" || !Array.isArray(data.matchings) || !data.matchings.length) {
+    throw snapError((data && (data.code || data.message)) || "нет совпадения", "nomatch");
   }
   const out = [];
   for (const m of data.matchings) {
-    for (const c of m.geometry.coordinates) out.push({ lat: c[1], lon: c[0] });
+    const line = m.geometry && m.geometry.coordinates;
+    if (!Array.isArray(line)) continue;
+    for (const c of line) out.push({ lat: c[1], lon: c[0] });
   }
-  if (out.length < 2) throw osrmError("пустая геометрия", false);
+  if (out.length < 2) throw snapError("пустая геометрия", "nomatch");
   return out;
+}
+
+const rawCoords = (chunk) => chunk.map((p) => ({ lat: p.lat, lon: p.lon }));
+
+/**
+ * Is this failure one that a shorter trace could survive? A refusal about the
+ * size of the request is, and so is a trace the matcher could not place —
+ * part of it usually still lies on a road. A flat "these parameters are wrong"
+ * is not, and halving would only repeat the same refusal on the way down.
+ */
+function worthHalving(err) {
+  if (!err) return false;
+  if (err.kind === "nomatch") return true;
+  return /toobig|too many|too long|too large|413|414/i.test(err.message || "");
+}
+
+/**
+ * Snap one chunk, degrading the request until the server accepts it and, if it
+ * never does, halving the trace — an over-long or partly unmatchable stretch
+ * usually has a shorter piece inside it that matches perfectly well.
+ *
+ * Returns { coords, matched, missed, refused }: the counts are sub-chunks, and
+ * they are what decides whether the card reports the route as snapped,
+ * part-snapped or not snapped at all. `refused` says the server turned the
+ * requests themselves away rather than failing to find a road, which is worth
+ * taking to the next endpoint. Only a network failure is thrown, and it means
+ * "this endpoint is no use", not "give up".
+ */
+async function snapChunk(chunk, base, signal, health, depth) {
+  const first = chunk[0];
+  const last = chunk[chunk.length - 1];
+  const key =
+    `${base}|${chunk.length}|${first.lat.toFixed(5)},${first.lon.toFixed(5)}` +
+    `|${last.lat.toFixed(5)},${last.lon.toFixed(5)}|${first.t || 0}|${last.t || 0}`;
+  const cached = snapCacheGet(key);
+  if (cached) return { coords: cached, matched: 1, missed: 0, refused: false };
+
+  let refused = false;
+  let lastErr = null;
+  for (const attempt of SNAP_ATTEMPTS) {
+    try {
+      const coords = await osrmRequest(base, chunk, attempt.radius, attempt.timestamps, signal);
+      snapCachePut(key, coords);
+      return { coords, matched: 1, missed: 0, refused: false };
+    } catch (err) {
+      if (err && err.name === "AbortError") throw err;
+      if (!health.reason) health.reason = `${hostOf(base)}: ${err.message}`;
+      if (err.kind === "network") throw err;
+      if (err.kind === "request") refused = true;
+      lastErr = err;
+    }
+  }
+
+  if (depth < 2 && chunk.length >= 12 && worthHalving(lastErr)) {
+    const mid = Math.floor(chunk.length / 2);
+    const left = await snapChunk(chunk.slice(0, mid + 1), base, signal, health, depth + 1);
+    const right = await snapChunk(chunk.slice(mid), base, signal, health, depth + 1);
+    return {
+      coords: left.coords.concat(right.coords.slice(1)),
+      matched: left.matched + right.matched,
+      missed: left.missed + right.missed,
+      refused: left.refused || right.refused,
+    };
+  }
+  return { coords: rawCoords(chunk), matched: 0, missed: 1, refused };
 }
 
 /**
  * Map-match one continuous run of movement. A parked van is the hardest thing
  * to snap — it sits in a yard or a layby with no road within the search radius
- * — so stops never come here; only the driving between them does. A trace the
- * server cannot match is retried once with OSRM's own default search radius
- * before the run is given up on.
+ * — so stops never come here; only the driving between them does.
  */
 async function snapRun(points, opts, signal, health) {
-  const CHUNK = 80;
   const coords = [];
-  for (let i = 0; i < points.length - 1; i += CHUNK - 1) {
-    const chunk = points.slice(i, i + CHUNK);
+  for (let i = 0; i < points.length - 1; i += SNAP_CHUNK - 1) {
+    const chunk = points.slice(i, i + SNAP_CHUNK);
     if (chunk.length < 2) break;
     let piece = null;
-    if (health.dead) {
-      health.failed++;
-    } else {
-      for (const radius of [50, 0]) {
-        try {
-          piece = await osrmMatch(chunk, opts, signal, radius);
-          health.ok++;
-          health.network = 0;
-          break;
-        } catch (err) {
-          if (signal.aborted) throw Object.assign(new Error("aborted"), { name: "AbortError" });
-          if (!health.reason) health.reason = err.message;
-          if (err.network) {
-            // The server is unreachable — a wider radius will not help.
-            if (++health.network >= 3) health.dead = true;
-            break;
-          }
+    while (!piece && health.at < health.endpoints.length) {
+      try {
+        const res = await snapChunk(chunk, health.endpoints[health.at], signal, health, 0);
+        // A server that turns every shape of request away is not going to
+        // start now: hand the stretch to the next one before giving up on it.
+        if (!res.matched && res.refused && health.at + 1 < health.endpoints.length) {
+          health.at++;
+          health.strikes = 0;
+          continue;
+        }
+        piece = res.coords;
+        health.ok += res.matched;
+        health.failed += res.missed;
+      } catch (err) {
+        if (err && err.name === "AbortError") throw err;
+        // Unreachable server: give it one more chance, then move down the list.
+        if (++health.strikes >= SNAP_STRIKES) {
+          health.strikes = 0;
+          health.at++;
         }
       }
-      if (!piece) health.failed++;
     }
-    if (!piece) piece = chunk.map((p) => ({ lat: p.lat, lon: p.lon }));
+    if (!piece) {
+      health.failed++;
+      piece = rawCoords(chunk);
+    }
     if (coords.length) coords.push(...piece.slice(1));
     else coords.push(...piece);
   }
@@ -487,14 +653,34 @@ function movingRuns(trip) {
   return runs;
 }
 
-/** Carry time and speed from the recorded fixes onto the drawn vertices. */
-function attachSamples(coords, nodes) {
+/**
+ * Carry time and speed from the recorded fixes onto the drawn vertices, and
+ * measure the line as it is drawn.
+ *
+ * The measurement runs along the drawn geometry rather than from fix to fix, so
+ * once a stretch has been matched onto the road network the kilometres are road
+ * kilometres — the distance the van actually drove, not the sum of the straight
+ * lines between GPS fixes, which cuts every corner and every bend. Each node
+ * gets the reading of the vertex nearest to it, which is what a tap on the
+ * route reports as "N км от начала".
+ *
+ * startDist carries the running total in from the previous trip; the total at
+ * the end of this one comes back as `end`.
+ */
+function attachSamples(coords, nodes, startDist) {
+  const base = startDist || 0;
   const speeds = new Float64Array(coords.length);
-  if (!nodes.length) return { speeds, times: speeds, dists: speeds };
   const times = new Float64Array(coords.length);
   const dists = new Float64Array(coords.length);
+  if (!nodes.length || !coords.length) return { speeds, times, dists, end: base };
+  const reached = new Float64Array(nodes.length);
+  const closest = new Float64Array(nodes.length).fill(Infinity);
+  const seen = new Uint8Array(nodes.length);
   let j = 0;
+  let run = base;
   for (let i = 0; i < coords.length; i++) {
+    if (i) run += haversine(coords[i - 1], coords[i]);
+    dists[i] = run;
     let best = j;
     let bestD = haversine(coords[i], nodes[j]);
     for (let k = j + 1; k < Math.min(nodes.length, j + 48); k++) {
@@ -507,9 +693,21 @@ function attachSamples(coords, nodes) {
     j = best;
     speeds[i] = nodes[j].v || 0;
     times[i] = nodes[j].t;
-    dists[i] = nodes[j].dist || 0;
+    // Each node is placed at the vertex that actually passes closest to it.
+    if (bestD < closest[j]) {
+      closest[j] = bestD;
+      reached[j] = run;
+      seen[j] = 1;
+    }
   }
-  return { speeds, times, dists };
+  // A node the line never passed closest to keeps the reading of the last one
+  // it did, so the distance along the route never runs backwards.
+  let carry = base;
+  for (let k = 0; k < nodes.length; k++) {
+    if (seen[k]) carry = reached[k];
+    nodes[k].dist = carry;
+  }
+  return { speeds, times, dists, end: run };
 }
 
 /* ------------------------------------------------------------------- the map */
@@ -1319,6 +1517,10 @@ class CrafterRouteCard extends HTMLElement {
     if (!cfg.entity && !(cfg.latitude && cfg.longitude)) {
       throw new Error("Нужен entity (device_tracker) или пара latitude + longitude");
     }
+    // A hand-configured endpoint is never silently topped up with the public
+    // ones: someone running their own OSRM does not expect the van's track to
+    // leave the house. Set osrm_fallback: true to allow it anyway.
+    if (config && config.osrm_url && config.osrm_fallback === undefined) cfg.osrm_fallback = false;
     this._config = cfg;
     this._hours = cfg.hours_to_show;
     this._snap = !!cfg.snap_to_roads;
@@ -1465,7 +1667,9 @@ class CrafterRouteCard extends HTMLElement {
       t.legend.innerHTML = legend;
     }
     const osrm =
-      this._snapState === "full" || this._snapState === "partial" ? ", маршрут — OSRM" : "";
+      this._snapState === "full" || this._snapState === "partial"
+        ? ", маршрут по дорогам — OSRM"
+        : "";
     for (const el of this._allRoots()) {
       const tag = el.querySelector(".vrc-osrm");
       if (tag) tag.textContent = osrm;
@@ -1491,7 +1695,7 @@ class CrafterRouteCard extends HTMLElement {
           }${fmtShortTime(s.to)}`
         : "";
     const parts = [
-      `<b>${fmtDist(s.dist)}</b> пройдено`,
+      `<b>${fmtDist(s.dist)}</b> ${s.snapped ? "по дорогам" : "пройдено"}`,
       `в пути <b>${fmtDur(s.movingSec)}</b>`,
       `макс <b>${num(s.maxV, 0)} км/ч</b>`,
       `<b>${s.stops}</b> ${plural(s.stops, "стоянка", "стоянки", "стоянок")}`,
@@ -1658,8 +1862,17 @@ class CrafterRouteCard extends HTMLElement {
     const tolerance = this._track.nodes.length > 12000 ? cfg.simplify_meters : 0;
 
     const geometry = [];
-    const health = { network: 0, ok: 0, failed: 0, dead: false, reason: "" };
+    const health = {
+      endpoints: osrmEndpoints(cfg),
+      at: 0,
+      strikes: 0,
+      ok: 0,
+      failed: 0,
+      reason: "",
+    };
     let chunkBudget = 60;
+    let cursor = 0;
+    let prevEnd = null;
 
     for (const trip of this._track.trips) {
       if (trip.length < 2) continue;
@@ -1670,18 +1883,26 @@ class CrafterRouteCard extends HTMLElement {
         );
         if (this._snap && run.moving) {
           const thinned = thinForSnap(run.nodes, 20);
-          const needed = Math.ceil(thinned.length / 79);
+          const needed = Math.ceil(thinned.length / (SNAP_CHUNK - 1));
           if (thinned.length >= 4 && needed <= chunkBudget) {
             chunkBudget -= needed;
             const snapped = await snapRun(thinned, cfg, ac.signal, health);
             if (snapped.length >= 2) piece = snapped;
+          } else if (thinned.length >= 4) {
+            // Out of request budget for this redraw: this stretch stays on GPS.
+            health.failed += needed;
           }
         }
         coords.push(...piece);
       }
       if (coords.length < 2) continue;
 
-      const s = attachSamples(coords, trip);
+      // Whatever happened between two trips — a data hole, or a move nobody
+      // recorded — still counts towards the distance covered.
+      if (prevEnd) cursor += haversine(prevEnd, trip[0]);
+      const s = attachSamples(coords, trip, cursor);
+      cursor = s.end;
+      prevEnd = trip[trip.length - 1];
       geometry.push({ coords, speeds: s.speeds, times: s.times, dists: s.dists, nodes: trip });
     }
 
@@ -1692,6 +1913,15 @@ class CrafterRouteCard extends HTMLElement {
     else if (!health.failed) this._snapState = "full";
     else if (health.ok) this._snapState = "partial";
     else this._snapState = "none";
+
+    // The header reports the route as drawn: road kilometres where the fixes
+    // were matched, straight-line kilometres only for the stretches that were
+    // not — and the plain GPS total when there is no geometry at all.
+    const stats = this._track.stats;
+    if (stats) {
+      stats.snapped = this._snapState === "full" || this._snapState === "partial";
+      stats.dist = geometry.length ? cursor : stats.gpsDist || 0;
+    }
   }
 
   /* --------------------------------------------------------------- drawing */
