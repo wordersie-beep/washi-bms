@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    cTrader cBot project.
+
+    NOTE ON FOLDER LAYOUT: the cTrader.Automate SDK derives the .algo file name
+    from the name of the PARENT directory of this project directory
+    (see cTrader.Automate.targets -> _AlgoRootDirectoryName). Keep the
+    src/QuantCryptoV3/QuantCryptoV3/ nesting or the produced artefact will be
+    named after whatever folder happens to sit above it.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>QuantCryptoV3</AssemblyName>
+    <RootNamespace>Quant.Bot</RootNamespace>
+    <Product>QuantCryptoV3</Product>
+    <Version>3.0.0</Version>
+    <!--
+      Cloud safety. cTrader Cloud runs the .algo on Linux, with no GUI and no
+      ability to load stand-alone .dll files at run time, so the bot must build
+      from compile-time references only and must never pull in WPF/WinForms.
+    -->
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>false</UseWPF>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="cTrader.Automate" Version="1.0.21" />
+  </ItemGroup>
+
+  <!--
+    Quant.Core is consumed as SOURCE rather than as a ProjectReference on purpose:
+    the .algo then contains exactly one assembly and cannot fail in the Cloud
+    because a satellite DLL was not packaged. Quant.Core.csproj still exists so
+    the unit tests compile the very same files against the very same TFM.
+  -->
+  <ItemGroup>
+    <Compile Include="..\..\Quant.Core\**\*.cs"
+             Exclude="..\..\Quant.Core\obj\**\*.cs;..\..\Quant.Core\bin\**\*.cs"
+             LinkBase="Core" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Quant.Core holds the entire decision stack and has NO dependency on cAlgo.API.
+    That is deliberate:
+      * it can be unit-tested on any machine without cTrader installed;
+      * it is provably free of platform/Windows/GUI dependencies, which is what
+        cTrader Cloud (Linux) requires;
+      * the exact same code runs in backtest, optimisation, shadow and live.
+    The cBot project compiles these sources directly into the .algo assembly
+    (see Quant.Bot.csproj) so the deployed artefact stays a single assembly with
+    only compile-time references.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>Quant.Core</AssemblyName>
+    <RootNamespace>Quant.Core</RootNamespace>
+  </PropertyGroup>
+</Project>

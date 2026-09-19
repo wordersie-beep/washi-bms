@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <WarningsAsErrors>CS0162;CS0164;CS0168;CS0219</WarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+</Project>
