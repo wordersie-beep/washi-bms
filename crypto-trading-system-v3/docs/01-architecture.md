@@ -28,7 +28,7 @@
 ```
 src/
   Quant.Core/                     вся логика, НОЛЬ зависимостей от cAlgo
-  QuantCryptoV3/QuantCryptoV3/    cBot: адаптер платформы, ~700 строк
+  QuantCryptoV3/QuantCryptoV3/    cBot: адаптер платформы, ~849 строк
 tests/
   Quant.Core.Tests/               307 тестов, работают без cTrader
 ```

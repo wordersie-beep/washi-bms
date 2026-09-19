@@ -32,13 +32,16 @@ public class QuantCryptoV3Bot : Robot
 {
     // ================= ПАРАМЕТРЫ: РЕЖИМ =================
 
-    [Parameter("Режим работы", Group = "Режим", DefaultValue = OperatingMode.Shadow)]
+    [Parameter("Режим работы", Group = "Режим", DefaultValue = OperatingMode.Shadow,
+        Description = "Shadow и Paper НЕ отправляют приказы брокеру — счёт не затрагивается. Demo и Live отправляют. Порядок освоения: Shadow, Paper, Demo, Live.")]
     public OperatingMode Mode { get; set; }
 
-    [Parameter("Подтверждаю реальную торговлю", Group = "Режим", DefaultValue = false)]
+    [Parameter("Подтверждаю реальную торговлю", Group = "Режим", DefaultValue = false,
+        Description = "Обязательно для режима Live на реальном счёте. Без этого система откажется запускаться: одного параметра «Режим» недостаточно, чтобы начать двигать настоящие деньги.")]
     public bool LiveTradingAcknowledged { get; set; }
 
-    [Parameter("Доп. символы (через запятую)", Group = "Режим", DefaultValue = "")]
+    [Parameter("Доп. символы (через запятую)", Group = "Режим", DefaultValue = "",
+        Description = "Инструменты помимо графика, например ETHUSD,SOLUSD. Эталонный добавляется сам. Каждый инструмент — это 6 рядов данных; разумный потолок для облака 4–6 инструментов.")]
     public string AdditionalSymbols { get; set; }
 
     /// <summary>
@@ -48,7 +51,8 @@ public class QuantCryptoV3Bot : Robot
     /// запуск на минутном графике выглядел как «бот не работает»: он исправно торговал по
     /// пятиминуткам и игнорировал выбор пользователя.
     /// </summary>
-    [Parameter("Сигнальный таймфрейм", Group = "Режим", DefaultValue = Tf.M5)]
+    [Parameter("Сигнальный таймфрейм", Group = "Режим", DefaultValue = Tf.M5,
+        Description = "Таймфрейм, на закрытии которого принимаются решения. Таймфрейм ГРАФИКА на работу бота не влияет вообще.")]
     public Tf SignalTimeframe { get; set; }
 
     /// <summary>
@@ -57,98 +61,126 @@ public class QuantCryptoV3Bot : Robot
     /// Чем он медленнее, тем больше истории нужно для прогрева: требуется 60 его баров.
     /// Для связки M1/H1 это 60 часов, и бот скажет об этом при старте.
     /// </summary>
-    [Parameter("Контекстный таймфрейм", Group = "Режим", DefaultValue = Tf.H1)]
+    [Parameter("Контекстный таймфрейм", Group = "Режим", DefaultValue = Tf.H1,
+        Description = "Даёт тренд более высокого порядка. Должен быть медленнее сигнального, иначе проверка тренда перестаёт что-либо проверять.")]
     public Tf ContextTimeframe { get; set; }
 
-    [Parameter("Эталонный символ", Group = "Режим", DefaultValue = "BTCUSD")]
+    [Parameter("Эталонный символ", Group = "Режим", DefaultValue = "BTCUSD",
+        Description = "Инструмент, задающий общий контекст рынка. Смещает вероятность, но никогда не накладывает вето. Подписывается даже если им не торгуют.")]
     public string BenchmarkSymbol { get; set; }
 
-    [Parameter("Дашборд каждые N минут", Group = "Режим", DefaultValue = 60, MinValue = 5, MaxValue = 1440)]
+    [Parameter("Дашборд каждые N минут", Group = "Режим", DefaultValue = 60, MinValue = 5, MaxValue = 1440,
+        Description = "Полный отчёт: капитал, просадки, портфель, режимы, стратегии, калибровка, причины отказа.")]
     public int DashboardIntervalMinutes { get; set; }
 
-    [Parameter("Признак жизни каждые N минут", Group = "Режим", DefaultValue = 15, MinValue = 1, MaxValue = 240)]
+    [Parameter("Признак жизни каждые N минут", Group = "Режим", DefaultValue = 15, MinValue = 1, MaxValue = 240,
+        Description = "Одна строка о состоянии бота. Главный ответ на вопрос «он работает или завис»: правильно молчащая система неотличима от мёртвой.")]
     public int HeartbeatIntervalMinutes { get; set; }
 
-    [Parameter("Подробный журнал отказов", Group = "Режим", DefaultValue = false)]
+    [Parameter("Подробный журнал отказов", Group = "Режим", DefaultValue = false,
+        Description = "Да — в лог идёт каждое отклонённое решение. Нет — только смена причины. Включайте для разбора, на рабочем режиме выключайте.")]
     public bool VerboseJournal { get; set; }
 
     // ================= ПАРАМЕТРЫ: РИСК =================
 
-    [Parameter("Риск на сделку, %", Group = "Риск", DefaultValue = 0.35, MinValue = 0.01, MaxValue = 2.0, Step = 0.05)]
+    [Parameter("Риск на сделку, %", Group = "Риск", DefaultValue = 0.35, MinValue = 0.01, MaxValue = 2.0, Step = 0.05,
+        Description = "Доля капитала, теряемая при срабатывании стопа. Это ПОТОЛОК: все адаптивные множители только уменьшают его, никогда не увеличивают.")]
     public double RiskPerTradePercent { get; set; }
 
-    [Parameter("Жёсткий предел риска, %", Group = "Риск", DefaultValue = 1.0, MinValue = 0.1, MaxValue = 3.0, Step = 0.1)]
+    [Parameter("Жёсткий предел риска, %", Group = "Риск", DefaultValue = 1.0, MinValue = 0.1, MaxValue = 3.0, Step = 0.1,
+        Description = "Абсолютный потолок риска на сделку. Не может быть превышен ничем и никогда.")]
     public double HardMaxRiskPercent { get; set; }
 
-    [Parameter("Общий риск портфеля, %", Group = "Риск", DefaultValue = 2.0, MinValue = 0.2, MaxValue = 6.0, Step = 0.1)]
+    [Parameter("Общий риск портфеля, %", Group = "Риск", DefaultValue = 2.0, MinValue = 0.2, MaxValue = 6.0, Step = 0.1,
+        Description = "Суммарный риск всех открытых позиций. Должен превышать риск на сделку, иначе ни одна сделка не пройдёт.")]
     public double MaxTotalOpenRiskPercent { get; set; }
 
-    [Parameter("Дневной лимит убытка, %", Group = "Риск", DefaultValue = 2.0, MinValue = 0.5, MaxValue = 10.0, Step = 0.25)]
+    [Parameter("Дневной лимит убытка, %", Group = "Риск", DefaultValue = 2.0, MinValue = 0.5, MaxValue = 10.0, Step = 0.25,
+        Description = "Достигнут — торговля останавливается до следующего дня. Точка отсчёта переживает перезапуск бота.")]
     public double DailyLossLimitPercent { get; set; }
 
-    [Parameter("Недельный лимит убытка, %", Group = "Риск", DefaultValue = 5.0, MinValue = 1.0, MaxValue = 20.0, Step = 0.5)]
+    [Parameter("Недельный лимит убытка, %", Group = "Риск", DefaultValue = 5.0, MinValue = 1.0, MaxValue = 20.0, Step = 0.5,
+        Description = "Должен быть больше дневного. Достигнут — остановка до следующей недели.")]
     public double WeeklyLossLimitPercent { get; set; }
 
-    [Parameter("Макс. просадка 24ч, %", Group = "Риск", DefaultValue = 4.0, MinValue = 1.0, MaxValue = 20.0, Step = 0.5)]
+    [Parameter("Макс. просадка 24ч, %", Group = "Риск", DefaultValue = 4.0, MinValue = 1.0, MaxValue = 20.0, Step = 0.5,
+        Description = "Просадка от пика капитала за сутки. Превышена — новые позиции запрещены.")]
     public double MaxDrawdown24hPercent { get; set; }
 
-    [Parameter("Макс. просадка всего, %", Group = "Риск", DefaultValue = 18.0, MinValue = 5.0, MaxValue = 50.0, Step = 1.0)]
+    [Parameter("Макс. просадка всего, %", Group = "Риск", DefaultValue = 18.0, MinValue = 5.0, MaxValue = 50.0, Step = 1.0,
+        Description = "Просадка от исторического пика капитала. Самый последний рубеж обороны.")]
     public double MaxDrawdownAllTimePercent { get; set; }
 
-    [Parameter("Макс. одновременных позиций", Group = "Риск", DefaultValue = 4, MinValue = 1, MaxValue = 10)]
+    [Parameter("Макс. одновременных позиций", Group = "Риск", DefaultValue = 4, MinValue = 1, MaxValue = 10,
+        Description = "Потолок числа открытых позиций. Работает вместе с лимитами по символу, кластеру и направлению.")]
     public int MaxOpenPositions { get; set; }
 
     // ================= ПАРАМЕТРЫ: СИГНАЛ =================
 
-    [Parameter("Мин. уверенность режима", Group = "Сигнал", DefaultValue = 0.55, MinValue = 0.3, MaxValue = 0.95, Step = 0.05)]
+    [Parameter("Мин. уверенность режима", Group = "Сигнал", DefaultValue = 0.55, MinValue = 0.3, MaxValue = 0.95, Step = 0.05,
+        Description = "Ниже этого порога режим рынка считается неопределённым, и сделки не открываются. NO TRADE — полноценное решение.")]
     public double MinRegimeConfidence { get; set; }
 
-    [Parameter("Мин. уверенность ансамбля", Group = "Сигнал", DefaultValue = 0.55, MinValue = 0.3, MaxValue = 0.95, Step = 0.05)]
+    [Parameter("Мин. уверенность ансамбля", Group = "Сигнал", DefaultValue = 0.55, MinValue = 0.3, MaxValue = 0.95, Step = 0.05,
+        Description = "Порог согласия стратегий. Голоса взвешены по качеству и уменьшены за пересечение: две стратегии, смотрящие на одно и то же, не считаются за две.")]
     public double MinEnsembleConfidence { get; set; }
 
-    [Parameter("Макс. вес одной стратегии", Group = "Сигнал", DefaultValue = 0.40, MinValue = 0.15, MaxValue = 0.60, Step = 0.05)]
+    [Parameter("Макс. вес одной стратегии", Group = "Сигнал", DefaultValue = 0.40, MinValue = 0.15, MaxValue = 0.60, Step = 0.05,
+        Description = "Потолок влияния любой стратегии на решение. Не даёт ансамблю выродиться в одну стратегию после удачной полосы.")]
     public double MaxSingleStrategyWeight { get; set; }
 
     // ================= ПАРАМЕТРЫ: ПРЕИМУЩЕСТВО =================
 
-    [Parameter("Базовое мин. преимущество, R", Group = "Преимущество", DefaultValue = 0.10, MinValue = 0.0, MaxValue = 0.5, Step = 0.02)]
+    [Parameter("Базовое мин. преимущество, R", Group = "Преимущество", DefaultValue = 0.10, MinValue = 0.0, MaxValue = 0.5, Step = 0.02,
+        Description = "Минимальное ожидание сверх издержек, без которого сделка не открывается. Ноль означает торговлю при нулевом ожидании.")]
     public double BaseMinimumEdgeR { get; set; }
 
-    [Parameter("Сигм для нижней границы EV", Group = "Преимущество", DefaultValue = 1.0, MinValue = 0.0, MaxValue = 3.0, Step = 0.25)]
+    [Parameter("Сигм для нижней границы EV", Group = "Преимущество", DefaultValue = 1.0, MinValue = 0.0, MaxValue = 3.0, Step = 0.25,
+        Description = "Решение принимается по НИЖНЕЙ границе ожидания, а не по точечной оценке. Больше сигм — строже требование к статистической уверенности.")]
     public double EdgeConfidenceZ { get; set; }
 
-    [Parameter("Мин. соотношение риск/прибыль", Group = "Преимущество", DefaultValue = 1.3, MinValue = 0.8, MaxValue = 4.0, Step = 0.1)]
+    [Parameter("Мин. соотношение риск/прибыль", Group = "Преимущество", DefaultValue = 1.3, MinValue = 0.8, MaxValue = 4.0, Step = 0.1,
+        Description = "Отношение цели к стопу. Цель дополнительно ограничивается историческим MFE: цель, до которой цена не доходила, — не цель, а допущение.")]
     public double MinRewardToRisk { get; set; }
 
-    [Parameter("Сила байесовского априора", Group = "Преимущество", DefaultValue = 25.0, MinValue = 5.0, MaxValue = 100.0, Step = 5.0)]
+    [Parameter("Сила байесовского априора", Group = "Преимущество", DefaultValue = 25.0, MinValue = 5.0, MaxValue = 100.0, Step = 5.0,
+        Description = "Сколько наблюдений «весит» априорная оценка. Больше — медленнее реакция на новые данные, но меньше шанс принять случайную серию за преимущество.")]
     public double PriorStrength { get; set; }
 
     // ================= ПАРАМЕТРЫ: ВЫХОДЫ =================
 
-    [Parameter("Стоп, ATR", Group = "Выходы", DefaultValue = 1.6, MinValue = 0.5, MaxValue = 5.0, Step = 0.1)]
+    [Parameter("Стоп, ATR", Group = "Выходы", DefaultValue = 1.6, MinValue = 0.5, MaxValue = 5.0, Step = 0.1,
+        Description = "Базовая ширина стопа в единицах ATR. Фактическая выбирается из структуры рынка и распределения MAE, этот параметр задаёт запасной вариант и потолок.")]
     public double AtrStopMultiple { get; set; }
 
-    [Parameter("Цель 1, R", Group = "Выходы", DefaultValue = 1.2, MinValue = 0.5, MaxValue = 5.0, Step = 0.1)]
+    [Parameter("Цель 1, R", Group = "Выходы", DefaultValue = 1.2, MinValue = 0.5, MaxValue = 5.0, Step = 0.1,
+        Description = "Первая цель в единицах риска. По ней закрывается часть позиции.")]
     public double Target1R { get; set; }
 
-    [Parameter("Цель 2, R", Group = "Выходы", DefaultValue = 2.2, MinValue = 0.8, MaxValue = 10.0, Step = 0.1)]
+    [Parameter("Цель 2, R", Group = "Выходы", DefaultValue = 2.2, MinValue = 0.8, MaxValue = 10.0, Step = 0.1,
+        Description = "Вторая цель. Остаток после неё ведётся трейлингом.")]
     public double Target2R { get; set; }
 
-    [Parameter("Безубыток при, R", Group = "Выходы", DefaultValue = 0.9, MinValue = 0.2, MaxValue = 3.0, Step = 0.1)]
+    [Parameter("Безубыток при, R", Group = "Выходы", DefaultValue = 0.9, MinValue = 0.2, MaxValue = 3.0, Step = 0.1,
+        Description = "Прибыль, при которой стоп переносится в безубыток — с учётом издержек, а не в точку входа.")]
     public double BreakEvenTriggerR { get; set; }
 
-    [Parameter("Трейлинг тренда, ATR", Group = "Выходы", DefaultValue = 2.2, MinValue = 0.8, MaxValue = 6.0, Step = 0.1)]
+    [Parameter("Трейлинг тренда, ATR", Group = "Выходы", DefaultValue = 2.2, MinValue = 0.8, MaxValue = 6.0, Step = 0.1,
+        Description = "Дистанция трейлинг-стопа в ATR. Меньше — раньше выбьет из тренда, больше — отдаст больше прибыли на откате.")]
     public double TrendTrailAtr { get; set; }
 
     // ================= ПАРАМЕТРЫ: ИСПОЛНЕНИЕ =================
 
-    [Parameter("Макс. проскальзывание, ATR", Group = "Исполнение", DefaultValue = 0.25, MinValue = 0.05, MaxValue = 2.0, Step = 0.05)]
+    [Parameter("Макс. проскальзывание, ATR", Group = "Исполнение", DefaultValue = 0.25, MinValue = 0.05, MaxValue = 2.0, Step = 0.05,
+        Description = "Потолок проскальзывания в долях ATR. Берётся БОЛЬШЕЕ из этого и лимита в спредах.")]
     public double MaxSlippageInAtr { get; set; }
 
-    [Parameter("Макс. проскальзывание, спредов", Group = "Исполнение", DefaultValue = 3.0, MinValue = 1.0, MaxValue = 20.0, Step = 0.5)]
+    [Parameter("Макс. проскальзывание, спредов", Group = "Исполнение", DefaultValue = 3.0, MinValue = 1.0, MaxValue = 20.0, Step = 0.5,
+        Description = "Потолок проскальзывания в текущих спредах. Работает там, где ATR ещё не набран.")]
     public double MaxSlippageSpreadMultiple { get; set; }
 
-    [Parameter("Сверка каждые N минут", Group = "Исполнение", DefaultValue = 5, MinValue = 1, MaxValue = 60)]
+    [Parameter("Сверка каждые N минут", Group = "Исполнение", DefaultValue = 5, MinValue = 1, MaxValue = 60,
+        Description = "Частота сверки позиций с брокером. Расхождение — состояние, в котором любое решение принимается вслепую, поэтому оно вызывает остановку.")]
     public int ReconciliationIntervalMinutes { get; set; }
 
     // ================= ВНУТРЕННЕЕ СОСТОЯНИЕ =================

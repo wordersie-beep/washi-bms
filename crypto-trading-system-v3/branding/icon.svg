@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="QuantCryptoV3">
+  <title>QuantCryptoV3</title>
+
+  <!--
+    Иконка говорит о том, чем система является, а не о том, чем торгует.
+
+    Щит — приоритет номер один: выживание капитала. Он снаружи и охватывает всё
+    остальное, потому что каждое решение внутри проходит через него.
+
+    Ступенчатая линия — распределение, а не цена. Система принимает решения по
+    НИЖНЕЙ границе ожидания, и поэтому под кривой отмечен именно левый хвост:
+    то, чем управляют, а не то, на что надеются.
+
+    Ничего золотого, ничего с символом валюты, никаких стрелок вверх. Обещание
+    прибыли на иконке было бы первым нарушением правила «не обещать».
+  -->
+
+  <defs>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1F6F8B"/>
+      <stop offset="1" stop-color="#11313E"/>
+    </linearGradient>
+    <clipPath id="inside">
+      <path d="M128 20 L216 52 V126 C216 178 176 216 128 236 C80 216 40 178 40 126 V52 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- Щит -->
+  <path d="M128 20 L216 52 V126 C216 178 176 216 128 236 C80 216 40 178 40 126 V52 Z"
+        fill="url(#shield)"/>
+  <path d="M128 20 L216 52 V126 C216 178 176 216 128 236 C80 216 40 178 40 126 V52 Z"
+        fill="none" stroke="#6FD3C7" stroke-width="7" stroke-linejoin="round"/>
+
+  <g clip-path="url(#inside)">
+    <!-- Базовая линия -->
+    <line x1="52" y1="178" x2="204" y2="178" stroke="#6FD3C7" stroke-width="3" opacity="0.45"/>
+
+    <!-- Распределение исходов -->
+    <path d="M56 178 V166 H74 V148 H92 V116 H110 V88 H128 V78 H146 V96 H164 V132 H182 V162 H200 V178 Z"
+          fill="#6FD3C7" opacity="0.20"/>
+    <path d="M56 166 H74 V148 H92 V116 H110 V88 H128 V78 H146 V96 H164 V132 H182 V162 H200"
+          fill="none" stroke="#9BE7DC" stroke-width="5"
+          stroke-linejoin="round" stroke-linecap="round"/>
+
+    <!-- Левый хвост: то, чем управляют -->
+    <path d="M56 178 V166 H74 V148 H92 V116 H110 V178 Z" fill="#E8A33D" opacity="0.55"/>
+    <line x1="110" y1="70" x2="110" y2="186" stroke="#E8A33D" stroke-width="4" stroke-dasharray="9 7"/>
+  </g>
+</svg>
