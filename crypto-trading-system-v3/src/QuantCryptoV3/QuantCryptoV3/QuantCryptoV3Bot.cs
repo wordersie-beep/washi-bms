@@ -4,6 +4,7 @@ using cAlgo.API;
 using cAlgo.API.Internals;
 using Quant.Core;
 using Quant.Core.Config;
+using Quant.Core.Ev;
 using Quant.Core.Execution;
 using Quant.Core.Primitives;
 using Quant.Core.Stats;
@@ -154,7 +155,13 @@ public class QuantCryptoV3Bot : Robot
 
     private TradingEngine _engine;
     private EngineConfig _config;
-    private CTraderBroker _broker;
+    private IBroker _broker;
+
+    /// <summary>
+    /// Симулятор исполнения в режимах Shadow и Paper. Ему нужно подавать живые котировки:
+    /// «бумажная» торговля по несуществующим ценам ничего не доказывает.
+    /// </summary>
+    private SimulatedBroker _simulatedBroker;
 
     /// <summary>Ссылки на серии удерживаются, иначе подписки на события пропадают.</summary>
     private readonly List<Bars> _subscribedBars = new List<Bars>();
@@ -185,7 +192,27 @@ public class QuantCryptoV3Bot : Robot
             // и одинаково не должен «бумажный» прогон незаметно оказаться боевым.
             if (!ValidateModeAgainstAccount()) { _initialisationFailed = true; Stop(); return; }
 
-            _broker = new CTraderBroker(this);
+            // Брокер выбирается РЕЖИМОМ. В Shadow и Paper приказы не должны доходить до
+            // счёта, и единственный надёжный способ это гарантировать — не давать движку
+            // настоящего брокера вовсе. Проверка «а точно ли режим разрешает торговать»
+            // перед каждым приказом опирается на то, что её не забыли написать; отсутствие
+            // подключения к счёту не опирается ни на что.
+            if (TradingEngine.RequiresSimulatedBroker(_config.Mode))
+            {
+                var simulated = new SimulatedBroker(
+                    _config.Execution, new CostModel(_config.Execution),
+                    new AccountSnapshot(
+                        Account.Equity, Account.Balance, 0, Account.Equity,
+                        Account.FreeMargin, Account.MarginLevel ?? 0, Account.IsLive, Account.Asset.Name),
+                    simulateFailures: false);
+
+                _simulatedBroker = simulated;
+                _broker = simulated;
+            }
+            else
+            {
+                _broker = new CTraderBroker(this);
+            }
 
             _engine = new TradingEngine(
                 _config, _broker, new LocalStorageStateStore(this),
@@ -209,6 +236,12 @@ public class QuantCryptoV3Bot : Robot
 
             Print($"QuantCryptoV3 запущен. Режим {_config.Mode}. Символы: {string.Join(", ", _symbols)}. " +
                   $"Счёт {(Account.IsLive ? "РЕАЛЬНЫЙ" : "демо")}, капитал {Account.Equity:F2} {Account.Asset.Name}.");
+
+            Print(_broker.IsSimulated
+                ? $"Режим {_config.Mode}: приказы НЕ отправляются брокеру, исполнение моделируется по живым ценам " +
+                  "со спредом и комиссией. На счёте ничего не изменится."
+                : $"Режим {_config.Mode}: приказы отправляются НА СЧЁТ " +
+                  $"({(Account.IsLive ? "РЕАЛЬНЫЙ — деньги настоящие" : "демонстрационный")}).");
 
             Print($"Решения принимаются на закрытии {_config.Data.SignalTimeframe}, контекст — {_config.Data.ContextTimeframe}. " +
                   $"Таймфрейм графика на это не влияет.");
@@ -304,7 +337,9 @@ public class QuantCryptoV3Bot : Robot
             Symbol symbol = Symbols.GetSymbol(_symbols[i]);
             if (symbol == null) continue;
 
-            _engine.AddSymbol(_symbols[i], ToSpec(symbol), ToSchedule(symbol));
+            SymbolSpec spec = ToSpec(symbol);
+            _engine.AddSymbol(_symbols[i], spec, ToSchedule(symbol));
+            _simulatedBroker?.RegisterSymbol(spec);
             symbol.Tick += OnSymbolTick;
         }
     }
@@ -452,6 +487,11 @@ public class QuantCryptoV3Bot : Robot
 
         try
         {
+            if (_simulatedBroker != null)
+            {
+                _simulatedBroker.Quotes[args.SymbolName] = new Quote(Server.TimeInUtc, args.Bid, args.Ask);
+            }
+
             _engine.OnTick(args.SymbolName, new Quote(Server.TimeInUtc, args.Bid, args.Ask));
         }
         catch (Exception)
@@ -498,6 +538,11 @@ public class QuantCryptoV3Bot : Robot
 
         try
         {
+            // В Shadow и Paper позиции живут в симуляторе, а не на платформе. Её события
+            // относятся к чужим сделкам, и их идентификаторы могут совпасть с нашими
+            // виртуальными — тогда закрытие чужой позиции закрыло бы нашу.
+            if (_simulatedBroker != null) return;
+
             Position p = args.Position;
             if (p.Label == null || !p.Label.StartsWith(_config.Execution.OrderLabelPrefix, StringComparison.Ordinal)) return;
 

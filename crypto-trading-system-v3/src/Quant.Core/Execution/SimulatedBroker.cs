@@ -60,6 +60,9 @@ public sealed class SimulatedBroker : IBroker
     /// <summary>Инструменты, торговавшиеся без известных условий — то есть без комиссии.</summary>
     public HashSet<string> SymbolsWithoutSpec { get; } = new HashSet<string>(StringComparer.Ordinal);
 
+    /// <summary>Приказы никуда не уходят — исполнение моделируется.</summary>
+    public bool IsSimulated => true;
+
     /// <summary>
     /// Комиссия одной стороны сделки, в валюте счёта.
     /// Ставка задана за миллион единиц номинала в котируемой валюте.

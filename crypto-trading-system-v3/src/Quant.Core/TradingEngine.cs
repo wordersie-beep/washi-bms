@@ -181,6 +181,16 @@ public sealed class TradingEngine
         _schedules[symbolName] = schedule ?? MarketSchedule.Unknown;
     }
 
+    /// <summary>
+    /// Режимы, в которых приказы не должны доходить до настоящего счёта.
+    ///
+    /// Shadow — наблюдение: решения принимаются и записываются, денег нет вовсе.
+    /// Paper — исполнение моделируется по живым ценам со спредом и комиссией, но приказы
+    /// никуда не уходят. Demo и Live отличаются только типом счёта.
+    /// </summary>
+    public static bool RequiresSimulatedBroker(OperatingMode mode) =>
+        mode == OperatingMode.Shadow || mode == OperatingMode.Paper;
+
     /// <summary>Расписание торгов инструмента. Никогда не null.</summary>
     public MarketSchedule ScheduleOf(string symbolName) =>
         _schedules.TryGetValue(symbolName, out MarketSchedule s) ? s : MarketSchedule.Unknown;
@@ -586,6 +596,20 @@ public sealed class TradingEngine
 
     private void Execute(DateTime nowUtc, TradeCandidate c, AccountSnapshot account, PortfolioExposure exposure, double entryPrice)
     {
+        // Защита режима. Shadow и Paper обещают человеку, что деньги не двигаются. Обещание
+        // не может держаться на том, что кто-то подставил правильного брокера: параметр,
+        // выставленный по ошибке, не должен иметь возможности отправить приказ на счёт.
+        //
+        // Отказ здесь громкий и полный. Тихо исполнить приказ, пометив сделку виртуальной,
+        // было бы худшим из возможных исходов: деньги двигаются, а память системы об этом
+        // не знает и ничему не учится.
+        if (RequiresSimulatedBroker(_config.Mode) && !_broker.IsSimulated)
+        {
+            RecordRejection(c, GateOutcome.Reject(NoTradeReason.ModeGuard,
+                $"режим {_config.Mode} запрещает отправку приказов, но подключён настоящий брокер"), account);
+            return;
+        }
+
         SymbolDataSet data = c.Data;
         double predictedSlippage = _costModel.OneWaySlippage(
             data.Spread.CostingSpread(), c.Features.SpreadPercentile > 0.85, _executionQuality.SlippageMultiplier);

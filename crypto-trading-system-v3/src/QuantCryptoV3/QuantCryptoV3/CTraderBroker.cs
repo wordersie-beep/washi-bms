@@ -133,6 +133,9 @@ public sealed class CTraderBroker : IBroker
         }
     }
 
+    /// <summary>Приказы уходят на настоящий счёт — демонстрационный или реальный.</summary>
+    public bool IsSimulated => false;
+
     public BrokerResult ModifyStop(long positionId, double newStopPrice)
     {
         try

@@ -107,4 +107,14 @@ public interface IBroker
     IReadOnlyList<BrokerPosition> GetOpenPositions(string labelPrefix);
 
     AccountSnapshot GetAccount();
+
+    /// <summary>
+    /// Брокер НЕ отправляет приказы на настоящий счёт.
+    ///
+    /// Нужен как страховка: режимы Shadow и Paper обещают, что деньги не двигаются, и это
+    /// обещание не должно держаться на том, что кто-то не забыл подставить правильную
+    /// реализацию. Движок проверяет признак сам и отказывается торговать, если обещание
+    /// и реальность разошлись.
+    /// </summary>
+    bool IsSimulated { get; }
 }

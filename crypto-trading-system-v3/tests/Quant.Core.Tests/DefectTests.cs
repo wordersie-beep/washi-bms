@@ -429,6 +429,32 @@ public class DefectRegressionTests
         Assert.Equal(1, harness.Engine.Performance.Get(PerformanceStore.StrategyKey(position.StrategyName)).TotalTrades);
     }
 
+    // ── 13. Shadow и Paper не имеют права отправлять приказы на счёт ──────────────
+
+    [Fact]
+    public void ShadowAndPaperRefuseToTradeThroughARealBroker()
+    {
+        // Shadow и Paper обещают человеку, что деньги не двигаются. Обещание не может
+        // держаться на том, что кто-то подставил правильного брокера: параметр,
+        // выставленный по ошибке, не должен иметь возможности отправить приказ на счёт.
+        Assert.True(TradingEngine.RequiresSimulatedBroker(OperatingMode.Shadow));
+        Assert.True(TradingEngine.RequiresSimulatedBroker(OperatingMode.Paper));
+        Assert.False(TradingEngine.RequiresSimulatedBroker(OperatingMode.Demo));
+        Assert.False(TradingEngine.RequiresSimulatedBroker(OperatingMode.Live));
+    }
+
+    [Fact]
+    public void ARealBrokerDeclaresItselfAsNotSimulated()
+    {
+        // Симулятор обязан признавать себя симулятором, иначе защита режима слепа.
+        var config = new EngineConfig();
+        var simulated = new SimulatedBroker(config.Execution, new CostModel(config.Execution),
+            new AccountSnapshot(10000, 10000, 0, 10000, 1000, 50, false, "USD"), false);
+
+        Assert.True(simulated.IsSimulated);
+        Assert.False(new AlwaysFailsBroker(outcomeUnknown: false).IsSimulated);
+    }
+
     // ── 11. Позиция, закрывшаяся во время простоя, не должна исчезать бесследно ───
 
     [Fact]
@@ -578,5 +604,6 @@ public class DefectRegressionTests
         public BrokerResult ModifyStop(long id, double p) => BrokerResult.Fail("нет", false);
         public IReadOnlyList<BrokerPosition> GetOpenPositions(string prefix) => Array.Empty<BrokerPosition>();
         public AccountSnapshot GetAccount() => new AccountSnapshot(10000, 10000, 0, 10000, 1000, 50, false, "USD");
+        public bool IsSimulated => false;
     }
 }
