@@ -9,7 +9,7 @@ namespace Quant.Core.Numerics;
 /// which is what keeps a 24/7 process from growing without limit (spec section 150).
 /// Indexing is newest-first: <c>this[0]</c> is the most recent item.
 /// </summary>
-public sealed class Ring<T> : IEnumerable<T>
+public sealed class Ring<T> : IReadOnlyCollection<T>
 {
     private readonly T[] _items;
     private int _head;   // index where the next item will be written

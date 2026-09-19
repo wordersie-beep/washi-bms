@@ -87,8 +87,19 @@ public sealed class RollingWindow
     }
 
     /// <summary>
-    /// Fraction of observations at or below <paramref name="value"/>, in 0..1.
+    /// Percentile rank of <paramref name="value"/> in 0..1, using MID-RANKS for ties.
     /// Returns 0.5 (an explicit "no information" answer) below the minimum sample.
+    ///
+    /// Ties count as half rather than as "at or below", and that detail matters far more
+    /// than it looks. A broker quoting a CONSTANT spread makes every observation identical;
+    /// under an "at or below" rule the current spread then ranks at the 100th percentile
+    /// forever, and any filter keyed to a spread percentile blocks every trade the system
+    /// would ever take. Fixed spreads are entirely normal on crypto CFDs, so the naive rule
+    /// is not an edge case — it silently disables the system at a large class of brokers.
+    ///
+    /// Mid-ranks give a degenerate distribution a rank of exactly 0.5, which is the honest
+    /// answer: a constant series carries no information about whether the present value is
+    /// high or low.
     /// </summary>
     public double PercentileRank(double value, int minSample = 10)
     {
@@ -96,11 +107,15 @@ public sealed class RollingWindow
         if (n < minSample) return 0.5;
 
         int below = 0;
+        int equal = 0;
         for (int i = 0; i < n; i++)
         {
-            if (_ring[i] <= value) below++;
+            double v = _ring[i];
+            if (v < value) below++;
+            else if (v.Equals(value)) equal++;
         }
-        return (double)below / n;
+
+        return (below + (0.5 * equal)) / n;
     }
 
     public double PercentileRankOfNewest(int minSample = 10) => Count == 0 ? 0.5 : PercentileRank(this[0], minSample);

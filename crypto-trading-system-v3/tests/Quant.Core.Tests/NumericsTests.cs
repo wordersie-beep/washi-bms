@@ -110,14 +110,30 @@ public class RollingWindowTests
     }
 
     [Fact]
-    public void PercentileRankIsFractionAtOrBelow()
+    public void PercentileRankUsesMidRanksForTies()
     {
         var w = new RollingWindow(100);
         for (int i = 1; i <= 100; i++) w.Add(i);
 
-        Assert.Equal(0.25, w.PercentileRank(25), 6);
-        Assert.Equal(1.0, w.PercentileRank(100), 6);
+        // 24 values below 25, plus half of the single value equal to it.
+        Assert.Equal(0.245, w.PercentileRank(25), 6);
+        Assert.Equal(0.995, w.PercentileRank(100), 6);
         Assert.Equal(0.0, w.PercentileRank(0), 6);
+        Assert.Equal(1.0, w.PercentileRank(1000), 6);
+    }
+
+    [Fact]
+    public void AConstantSeriesRanksAtTheMiddleRatherThanTheTop()
+    {
+        // This is the degenerate case that matters in production: a broker quoting a FIXED
+        // spread makes every observation identical. Under a naive "at or below" rule the
+        // current value would rank at the 100th percentile forever, and any filter keyed to
+        // that percentile would block every trade the system could ever take.
+        var w = new RollingWindow(100);
+        for (int i = 0; i < 100; i++) w.Add(42.0);
+
+        Assert.Equal(0.5, w.PercentileRank(42.0), 6);
+        Assert.Equal(0.5, w.PercentileRankOfNewest(), 6);
     }
 
     [Fact]

@@ -21,7 +21,8 @@ public sealed class SymbolSpec
         double pipValuePerUnit,
         double minStopLossDistancePrice,
         double leverage,
-        bool isTradingEnabled)
+        bool isTradingEnabled,
+        LeverageTier[] leverageTiers = null)
     {
         if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Symbol name is required.", nameof(name));
 
@@ -39,6 +40,7 @@ public sealed class SymbolSpec
         // margin a position needs. Over-stating it blocks a trade; under-stating it invites
         // a margin call, so the conservative direction is the only acceptable default.
         Leverage = leverage > 0 ? leverage : 1.0;
+        LeverageTiers = leverageTiers;
         IsTradingEnabled = isTradingEnabled;
     }
 
@@ -69,11 +71,46 @@ public sealed class SymbolSpec
     /// </summary>
     public double Leverage { get; }
 
+    /// <summary>
+    /// Tiered leverage, when the broker publishes it. Ordered by volume ascending.
+    ///
+    /// Crypto CFDs very often carry tiered leverage: the first few units get one rate and
+    /// larger positions get progressively less. Using the headline figure for a size that
+    /// falls into a lower tier under-states the margin required, which is the direction of
+    /// error that produces a margin call rather than a refused trade.
+    /// </summary>
+    public LeverageTier[] LeverageTiers { get; }
+
     public bool IsTradingEnabled { get; }
 
+    /// <summary>
+    /// Leverage applicable to a position of this size.
+    ///
+    /// Picks the first tier whose volume ceiling covers the request; falls back to the
+    /// lowest published leverage when the size exceeds every tier, because "larger than the
+    /// largest tier" means less leverage, not more.
+    /// </summary>
+    public double LeverageFor(double units)
+    {
+        if (LeverageTiers == null || LeverageTiers.Length == 0) return Leverage;
+
+        double lowest = double.MaxValue;
+        for (int i = 0; i < LeverageTiers.Length; i++)
+        {
+            LeverageTier tier = LeverageTiers[i];
+            if (tier.Leverage > 0 && tier.Leverage < lowest) lowest = tier.Leverage;
+            if (units <= tier.Volume && tier.Leverage > 0) return tier.Leverage;
+        }
+
+        return lowest < double.MaxValue ? lowest : Leverage;
+    }
+
     /// <summary>Margin a position of this size would require, from the broker's own leverage.</summary>
-    public double EstimateMargin(double units, double price) =>
-        Leverage <= 0 ? units * price : units * price / Leverage;
+    public double EstimateMargin(double units, double price)
+    {
+        double leverage = LeverageFor(units);
+        return leverage <= 0 ? units * price : units * price / leverage;
+    }
 
     public double PriceToPips(double priceDistance) => PipSize <= 0 ? 0 : priceDistance / PipSize;
 
@@ -107,4 +144,22 @@ public sealed class SymbolSpec
     }
 
     public override string ToString() => Name;
+}
+
+/// <summary>One volume band of a tiered leverage schedule.</summary>
+public readonly struct LeverageTier
+{
+    public LeverageTier(double volumeCeiling, double leverage)
+    {
+        VolumeCeiling = volumeCeiling;
+        Leverage = leverage;
+    }
+
+    /// <summary>Largest position volume, in units, to which this tier's leverage applies.</summary>
+    public double VolumeCeiling { get; }
+
+    /// <summary>Alias kept for readability at call sites that think in terms of a ceiling.</summary>
+    public double Volume => VolumeCeiling;
+
+    public double Leverage { get; }
 }

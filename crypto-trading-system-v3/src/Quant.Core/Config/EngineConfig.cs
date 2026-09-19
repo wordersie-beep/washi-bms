@@ -602,8 +602,27 @@ public sealed class ExitConfig
 
 public sealed class ExecutionConfig
 {
-    /// <summary>Maximum acceptable slippage, in pips, bounding the market-range order.</summary>
-    public double MaxSlippagePips { get; set; } = 8.0;
+    /// <summary>
+    /// Maximum acceptable slippage as a fraction of ATR.
+    ///
+    /// Expressed relative to volatility rather than in pips, and that is not a stylistic
+    /// preference. A crypto CFD commonly quotes a pip size of 0.01 on an instrument priced
+    /// in the tens of thousands, so a limit of "8 pips" is eight cents on something that
+    /// moves in hundreds of dollars: every order would be rejected, and the system would
+    /// appear to work while never trading. A fraction of ATR means the same number, and the
+    /// same intent, on BTC at 60,000 and on XRP at 0.5.
+    /// </summary>
+    public double MaxSlippageInAtr { get; set; } = 0.25;
+
+    /// <summary>
+    /// Maximum acceptable slippage as a multiple of the current spread.
+    ///
+    /// The effective limit is the LARGER of this and <see cref="MaxSlippageInAtr"/>. Taking
+    /// the larger is deliberate: these are two ways of asking the same question, and
+    /// whichever is more permissive is the one that keeps a correctly-sized limit from
+    /// being overridden by a badly-scaled one.
+    /// </summary>
+    public double MaxSlippageSpreadMultiple { get; set; } = 3.0;
 
     /// <summary>Assumed slippage in normal conditions, as a fraction of the spread.</summary>
     public double NormalSlippageSpreadFraction { get; set; } = 0.35;
@@ -628,7 +647,8 @@ public sealed class ExecutionConfig
 
     internal void Validate(List<string> problems)
     {
-        if (MaxSlippagePips <= 0) problems.Add("MaxSlippagePips must be positive.");
+        if (MaxSlippageInAtr <= 0) problems.Add("MaxSlippageInAtr must be positive.");
+        if (MaxSlippageSpreadMultiple <= 0) problems.Add("MaxSlippageSpreadMultiple must be positive.");
         if (MaxOrderRetries < 0 || MaxOrderRetries > 5) problems.Add("MaxOrderRetries must be in [0, 5].");
         if (StressSlippageSpreadFraction < NormalSlippageSpreadFraction) problems.Add("Stress slippage must not be below normal slippage.");
         if (string.IsNullOrWhiteSpace(OrderLabelPrefix)) problems.Add("OrderLabelPrefix is required for restart recovery.");
