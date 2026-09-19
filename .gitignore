@@ -6,3 +6,5 @@ __pycache__/
 [Bb]in/
 [Oo]bj/
 *.user
+*.algo
+*.algo.metadata
