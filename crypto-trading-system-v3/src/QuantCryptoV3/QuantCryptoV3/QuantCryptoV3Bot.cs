@@ -217,6 +217,8 @@ public class QuantCryptoV3Bot : Robot
                   $"{_config.Data.MinBarsPerTimeframe} баров {_config.Data.ContextTimeframe} " +
                   $"(≈{_config.Data.MinBarsPerTimeframe * (int)_config.Data.ContextTimeframe / 60.0:F1} ч).");
 
+            ReportTradingHours();
+
             Print(_engine.RenderHeartbeat(Server.TimeInUtc));
             Print($"Признак жизни будет печататься каждые {HeartbeatIntervalMinutes} мин, дашборд — каждые {DashboardIntervalMinutes} мин.");
             Print("Если бот не торгует — это штатное поведение: настройки по умолчанию отклоняют " +
@@ -302,7 +304,7 @@ public class QuantCryptoV3Bot : Robot
             Symbol symbol = Symbols.GetSymbol(_symbols[i]);
             if (symbol == null) continue;
 
-            _engine.AddSymbol(_symbols[i], ToSpec(symbol));
+            _engine.AddSymbol(_symbols[i], ToSpec(symbol), ToSchedule(symbol));
             symbol.Tick += OnSymbolTick;
         }
     }
@@ -528,6 +530,91 @@ public class QuantCryptoV3Bot : Robot
     ///   занижает требуемую маржу для крупной позиции, а занижение маржи — это ровно та
     ///   ошибка, которая заканчивается margin call, а не отказом в сделке.
     /// </summary>
+    /// <summary>
+    /// Печатает расписание торгов каждого инструмента и предупреждает о тех, что не
+    /// торгуются круглосуточно.
+    ///
+    /// Это первое, что нужно человеку, если бот «не работает». Закрытый рынок и нехватка
+    /// истории — две причины бездействия, которые невозможно отличить по пустому журналу,
+    /// и обе снимаются одной строкой при старте.
+    /// </summary>
+    private void ReportTradingHours()
+    {
+        for (int i = 0; i < _symbols.Count; i++)
+        {
+            Symbol symbol = Symbols.GetSymbol(_symbols[i]);
+            if (symbol == null) continue;
+
+            MarketSchedule schedule = _engine.ScheduleOf(_symbols[i]);
+            bool openNow = true;
+            string openState;
+
+            try
+            {
+                openNow = symbol.MarketHours.IsOpened();
+                openState = openNow ? "рынок ОТКРЫТ" : "рынок ЗАКРЫТ";
+
+                if (!openNow)
+                {
+                    TimeSpan tillOpen = symbol.MarketHours.TimeTillOpen();
+                    if (tillOpen > TimeSpan.Zero)
+                    {
+                        openState += $", откроется через {(int)tillOpen.TotalHours}ч {tillOpen.Minutes:00}м";
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                openState = "состояние рынка платформа не сообщила";
+            }
+
+            Print($"{_symbols[i]}: {schedule.Describe()} | {openState}");
+        }
+
+        IReadOnlyList<string> notContinuous = _engine.SymbolsNotTrading24x7();
+        if (notContinuous.Count > 0)
+        {
+            Print($"ВНИМАНИЕ: {string.Join(", ", notContinuous)} торгуются НЕ круглосуточно. " +
+                  "Система рассчитана на непрерывный рынок: на открытии сессии приходит гэп, " +
+                  "который стоп-лосс не удерживает, а статистика режимов собирается по рваной серии. " +
+                  "Для работы 24/7 выберите крипто-символ без перерывов.");
+        }
+        else
+        {
+            Print("Все инструменты торгуются круглосуточно — режим 24/7 доступен.");
+        }
+    }
+
+    /// <summary>
+    /// Читает недельное расписание торгов инструмента у платформы.
+    ///
+    /// Система рассчитана на круглосуточный рынок. Инструмент с перерывами не вызывает ни
+    /// одной ошибки — он просто перестаёт присылать бары, и внешне это неотличимо от
+    /// зависшего бота. Расписание превращает догадку в строку журнала.
+    /// </summary>
+    private static MarketSchedule ToSchedule(Symbol s)
+    {
+        try
+        {
+            if (s?.MarketHours?.Sessions == null) return MarketSchedule.Unknown;
+
+            var windows = new List<TradingSessionWindow>();
+            foreach (TradingSession session in s.MarketHours.Sessions)
+            {
+                windows.Add(new TradingSessionWindow(
+                    session.StartDay, session.StartTime, session.EndDay, session.EndTime));
+            }
+
+            return MarketSchedule.FromSessions(windows);
+        }
+        catch (Exception)
+        {
+            // Расписание — диагностика, а не условие работы. Его отсутствие не повод
+            // отказываться от запуска.
+            return MarketSchedule.Unknown;
+        }
+    }
+
     private static SymbolSpec ToSpec(Symbol s)
     {
         double minStopDistancePrice = s.MinDistanceType == SymbolMinDistanceType.Percentage

@@ -33,7 +33,8 @@ public sealed class DataQualityMonitor
         Quote latestQuote,
         TimeframeSeries signalSeries,
         TickStatistics ticks,
-        SpreadModel spread)
+        SpreadModel spread,
+        MarketSchedule schedule = null)
     {
         var issues = new List<string>();
         double score = 1.0;
@@ -77,7 +78,20 @@ public sealed class DataQualityMonitor
         }
 
         // --- Gaps -----------------------------------------------------------------------
-        if (signalSeries.LastGapBars > 0)
+        // Отсутствие баров при ЗАКРЫТОМ рынке — это не потеря данных, а расписание.
+        // Без этой поправки инструмент с перерывом отвергается после каждого открытия
+        // сессии: разрыв в десятки интервалов читается как сбой подачи.
+        // Допуск в два интервала: границы разрыва — это последний бар до перерыва и первый
+        // после него, и оба приходятся на открытый рынок.
+        bool gapIsScheduled =
+            signalSeries.LastGapBars > 0 &&
+            schedule != null &&
+            schedule.ExplainsGap(
+                signalSeries.LastBarOpenTimeUtc.AddMinutes(-(int)signalSeries.Timeframe * signalSeries.LastGapBars),
+                signalSeries.LastBarOpenTimeUtc,
+                toleranceMinutes: (int)signalSeries.Timeframe * 2);
+
+        if (signalSeries.LastGapBars > 0 && !gapIsScheduled)
         {
             issues.Add($"bar gap of {signalSeries.LastGapBars} interval(s) at last close");
             double gapPenalty = MathUtil.Clamp01(signalSeries.LastGapBars / _config.MaxBarGapMultiple);
@@ -93,6 +107,15 @@ public sealed class DataQualityMonitor
         // otherwise the series has silently stopped advancing.
         double barAgeMinutes = (nowUtc - signalSeries.LastBarOpenTimeUtc).TotalMinutes;
         double maxBarAge = (int)signalSeries.Timeframe * (1.0 + _config.MaxBarGapMultiple);
+
+        // Пока рынок закрыт, серия и не должна продвигаться. Это не остановка подачи.
+        bool marketClosed = schedule != null && !schedule.IsOpenAt(nowUtc);
+        if (marketClosed)
+        {
+            issues.Add("рынок закрыт по расписанию инструмента");
+            return new DataQualityReport(false, 0, issues);
+        }
+
         if (barAgeMinutes > maxBarAge)
         {
             issues.Add($"bar series stalled ({barAgeMinutes:F0}m since last close, limit {maxBarAge:F0}m)");

@@ -52,6 +52,7 @@ public sealed class TradingEngine
     private readonly Dictionary<string, RegimeAssessment> _regimes = new Dictionary<string, RegimeAssessment>(StringComparer.Ordinal);
     private readonly Dictionary<string, FeatureVector> _latestFeatures = new Dictionary<string, FeatureVector>(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> _lastSignalBar = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+    private readonly Dictionary<string, MarketSchedule> _schedules = new Dictionary<string, MarketSchedule>(StringComparer.Ordinal);
     private readonly List<OpenPosition> _positions = new List<OpenPosition>();
     private readonly Dictionary<string, ExitPlan> _plans = new Dictionary<string, ExitPlan>(StringComparer.Ordinal);
 
@@ -169,7 +170,7 @@ public sealed class TradingEngine
     public long TradesClosed { get; private set; }
 
     /// <summary>Регистрирует инструмент. Вызывается один раз на старте для каждого символа.</summary>
-    public void AddSymbol(string symbolName, SymbolSpec spec)
+    public void AddSymbol(string symbolName, SymbolSpec spec, MarketSchedule schedule = null)
     {
         if (string.IsNullOrWhiteSpace(symbolName) || _data.ContainsKey(symbolName)) return;
 
@@ -177,6 +178,30 @@ public sealed class TradingEngine
         _features[symbolName] = new FeatureEngine(_config.Data);
         _regimeModels[symbolName] = new StatisticalRegimeModel(_config.Regime);
         _regimes[symbolName] = RegimeAssessment.Unknown;
+        _schedules[symbolName] = schedule ?? MarketSchedule.Unknown;
+    }
+
+    /// <summary>Расписание торгов инструмента. Никогда не null.</summary>
+    public MarketSchedule ScheduleOf(string symbolName) =>
+        _schedules.TryGetValue(symbolName, out MarketSchedule s) ? s : MarketSchedule.Unknown;
+
+    /// <summary>
+    /// Инструменты, которые торгуются НЕ круглосуточно.
+    ///
+    /// Система рассчитана на непрерывный рынок (раздел 1). Инструмент с перерывами её не
+    /// ломает, но меняет: на открытии сессии приходит гэп, который стоп не удерживает, а
+    /// статистика режимов собирается по рваной серии. Об этом человек должен узнать при
+    /// старте, а не из отсутствия сделок.
+    /// </summary>
+    public IReadOnlyList<string> SymbolsNotTrading24x7()
+    {
+        var result = new List<string>();
+        foreach (KeyValuePair<string, MarketSchedule> kv in _schedules)
+        {
+            if (!kv.Value.IsContinuous) result.Add(kv.Key);
+        }
+        result.Sort(StringComparer.Ordinal);
+        return result;
     }
 
     public SymbolDataSet Data(string symbolName) => _data.TryGetValue(symbolName, out SymbolDataSet d) ? d : null;
@@ -348,7 +373,7 @@ public sealed class TradingEngine
         RegimeAssessment regime = _regimes[symbolName];
 
         DataQualityReport quality = _dataQuality.Evaluate(
-            nowUtc, data.Spec, data.LatestQuote, data.Signal, data.Ticks, data.Spread);
+            nowUtc, data.Spec, data.LatestQuote, data.Signal, data.Ticks, data.Spread, ScheduleOf(symbolName));
 
         var ctx = new StrategyContext(nowUtc, data, features, regime, global, _config);
 
@@ -990,6 +1015,17 @@ public sealed class TradingEngine
             if (_regimes.TryGetValue(kv.Key, out RegimeAssessment regime) && regime.Primary != MarketRegime.Unknown)
             {
                 sb.AppendFormat(" {0}({1:P0})", regime.Primary, regime.Confidence);
+            }
+
+            // Закрытый рынок — главная причина, по которой исправный бот ничего не делает.
+            // Не назвать её значит оставить человека гадать между «завис» и «ждёт».
+            MarketSchedule schedule = ScheduleOf(kv.Key);
+            if (!schedule.IsOpenAt(nowUtc))
+            {
+                int untilOpen = schedule.MinutesUntilOpen(nowUtc);
+                sb.Append(untilOpen > 0
+                    ? $" — РЫНОК ЗАКРЫТ, откроется через {untilOpen / 60}ч {untilOpen % 60:00}м"
+                    : " — РЫНОК ЗАКРЫТ");
             }
         }
 
