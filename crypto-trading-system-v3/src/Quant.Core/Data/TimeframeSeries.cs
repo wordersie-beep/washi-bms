@@ -167,6 +167,16 @@ public sealed class TimeframeSeries
 
         // Percentile histories are updated with the values that were current BEFORE this bar
         // is folded in, so that a percentile rank never compares a value against itself.
+        // The Donchian channel is advanced with the PREVIOUS bar, so that after this call it
+        // describes the N bars BEFORE the one just closed.
+        //
+        // This is not a detail. If the channel included the bar being evaluated, then its
+        // upper bound would always be at least that bar's high, so "closed above the
+        // channel" could never be true and the breakout strategy could never fire at all.
+        // Excluding the current bar is what makes a breakout level a statement about the
+        // past rather than about itself.
+        if (Bars.Count > 0) Donchian.Update(Bars[0]);
+
         if (Atr.IsReady && Bars.Count > 0) _atrHistory.Add(MathUtil.SafeDiv(Atr.Value, Bars[0].Close));
         if (Bollinger.IsReady) _bbWidthHistory.Add(Bollinger.Value);
         if (BarsProcessed > 0)
@@ -186,7 +196,6 @@ public sealed class TimeframeSeries
         EmaTrend.Update(bar.Close);
         Macd.Update(bar.Close);
         Slope.Update(bar.Close);
-        Donchian.Update(bar);
         Structure.Update(bar);
         RealizedVol.Update(bar.Close);
 
