@@ -303,7 +303,10 @@ public class RestartRecoveryTests
 
         BotState saved = h.Store.Load();
         Assert.NotNull(saved);
-        Assert.Equal(1, saved.SchemaVersion);
+        // Сверяется с константой, а не с числом: версия поднимается при каждом
+        // несовместимом изменении формата, и тест не должен требовать правки вместе с ней.
+        // Проверяется ровно то, что важно, — версия записана и совпадает с текущей.
+        Assert.Equal(StateSerializer.CurrentSchemaVersion, saved.SchemaVersion);
         Assert.True(saved.AllTimePeakEquity > 0);
         Assert.True(saved.DayStartEquity > 0);
     }

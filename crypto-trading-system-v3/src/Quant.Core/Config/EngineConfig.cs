@@ -774,6 +774,18 @@ public sealed class AdaptationConfig
     public int MaxConcurrentShadowPositions { get; set; } = 3;
 
     /// <summary>
+    /// Сколько последних закрытых сделок переживает перезапуск.
+    ///
+    /// Компромисс между памятью системы и размером снимка состояния. Пятисот сделок
+    /// достаточно, чтобы восстановить все срезы статистики и калибровку: оценки и так
+    /// взвешены в пользу недавнего, и сделка годичной давности влияет на решение мало.
+    ///
+    /// Ноль означает, что история не сохраняется — то есть адаптивный слой обнуляется при
+    /// каждом перезапуске. Это допустимо только в бэктесте.
+    /// </summary>
+    public int PersistedTradeHistory { get; set; } = 300;
+
+    /// <summary>
     /// Стоп по времени для виртуальной сделки, если план выхода его не задал. Без него
     /// виртуальная позиция в боковике могла бы не закрыться никогда и навсегда занять
     /// место в лимите наблюдений.
@@ -802,6 +814,7 @@ public sealed class AdaptationConfig
         if (RecoveryWeightFraction <= 0 || RecoveryWeightFraction > 1) problems.Add("RecoveryWeightFraction must be in (0, 1].");
         if (AdaptationIntervalMinutes < 1) problems.Add("AdaptationIntervalMinutes must be at least 1.");
         if (ShadowTradesForRecovery < 10) problems.Add("ShadowTradesForRecovery below 10 is not evidence of recovery.");
+        if (PersistedTradeHistory < 0) problems.Add("PersistedTradeHistory cannot be negative.");
         if (MaxConcurrentShadowPositions < 1) problems.Add("MaxConcurrentShadowPositions must be at least 1 or disabled strategies can never recover.");
         if (ShadowFallbackTimeStopBars < 1) problems.Add("ShadowFallbackTimeStopBars must be positive.");
     }

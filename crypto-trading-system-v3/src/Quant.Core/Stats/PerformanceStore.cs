@@ -24,6 +24,7 @@ public sealed class PerformanceStore
     private readonly AdaptationConfig _config;
     private readonly Dictionary<string, SegmentStats> _segments = new Dictionary<string, SegmentStats>(StringComparer.Ordinal);
     private readonly List<TradeRecord> _trades;
+    private readonly List<TradeRecord> _virtualTrades = new List<TradeRecord>();
     private readonly int _maxTrades;
 
     public PerformanceStore(AdaptationConfig config, int maxTradesRetained = 2000)
@@ -35,6 +36,16 @@ public sealed class PerformanceStore
 
     /// <summary>All retained trades, oldest first. Bounded so a 24/7 process stays bounded.</summary>
     public IReadOnlyList<TradeRecord> Trades => _trades;
+
+    /// <summary>
+    /// Виртуальные сделки отключённых стратегий.
+    ///
+    /// Хранятся отдельно и сохраняются наравне с настоящими: теневая запись — единственный
+    /// путь отключённой стратегии обратно в работу, и обнулять её при каждом перезапуске
+    /// значило бы сделать восстановление недостижимым там, где процесс перезапускается
+    /// регулярно, — то есть в облаке.
+    /// </summary>
+    public IReadOnlyList<TradeRecord> VirtualTrades => _virtualTrades;
 
     public SegmentStats Overall => Get("all");
 
@@ -53,6 +64,9 @@ public sealed class PerformanceStore
 
         if (trade.IsVirtual)
         {
+            _virtualTrades.Add(trade);
+            if (_virtualTrades.Count > _maxTrades) _virtualTrades.RemoveRange(0, _virtualTrades.Count - _maxTrades);
+
             Get(ShadowKey(trade.StrategyName)).Record(trade);
             Get(ShadowKey(trade.StrategyName, trade.Regime)).Record(trade);
             return;

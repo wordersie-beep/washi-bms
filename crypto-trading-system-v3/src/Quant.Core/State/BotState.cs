@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 using Quant.Core.Primitives;
 
 namespace Quant.Core.State;
@@ -57,6 +58,105 @@ public sealed class PersistedStrategy
 }
 
 /// <summary>
+/// Закрытая сделка в сохранённом виде.
+///
+/// Компактная проекция <see cref="Quant.Core.Stats.TradeRecord"/>: только те поля, из
+/// которых восстанавливаются все производные структуры — срезы статистики, калибровка,
+/// иерархия вероятностей, распределения MAE и MFE. Вычисляемые величины не хранятся, они
+/// выводятся заново.
+///
+/// Отдельный тип, а не сам TradeRecord, потому что формат хранения обязан меняться
+/// медленнее внутренней модели: добавление поля в запись сделки не должно ломать чтение
+/// состояния, записанного вчерашней версией.
+/// </summary>
+public sealed class PersistedTrade
+{
+    [JsonPropertyName("ti")]
+    public string TradeId { get; set; }
+    [JsonPropertyName("si")]
+    public string SignalId { get; set; }
+    [JsonPropertyName("sy")]
+    public string SymbolName { get; set; }
+    [JsonPropertyName("st")]
+    public string StrategyName { get; set; }
+    [JsonPropertyName("d")]
+    public int Direction { get; set; }
+    [JsonPropertyName("sk")]
+    public int StrategyKind { get; set; }
+    [JsonPropertyName("rg")]
+    public int Regime { get; set; }
+    [JsonPropertyName("se")]
+    public int Session { get; set; }
+    [JsonPropertyName("vb")]
+    public int VolatilityBucket { get; set; }
+    [JsonPropertyName("xr")]
+    public int ExitReason { get; set; }
+    [JsonPropertyName("m")]
+    public int Mode { get; set; }
+    [JsonPropertyName("h")]
+    public int HourUtc { get; set; }
+    [JsonPropertyName("dw")]
+    public int DayOfWeek { get; set; }
+    [JsonPropertyName("we")]
+    public bool IsWeekend { get; set; }
+    [JsonPropertyName("v")]
+    public bool IsVirtual { get; set; }
+    [JsonPropertyName("rc")]
+    public double RegimeConfidence { get; set; }
+    [JsonPropertyName("sc")]
+    public double SignalConfidence { get; set; }
+    [JsonPropertyName("ec")]
+    public double EnsembleConfidence { get; set; }
+    [JsonPropertyName("ev")]
+    public double EffectiveVotes { get; set; }
+    [JsonPropertyName("pw")]
+    public double EstimatedWinProbability { get; set; }
+    [JsonPropertyName("eR")]
+    public double ExpectedValueR { get; set; }
+    [JsonPropertyName("rr")]
+    public double PlannedRewardToRisk { get; set; }
+    [JsonPropertyName("at")]
+    public double AtrAtEntry { get; set; }
+    [JsonPropertyName("sp")]
+    public double SpreadAtEntry { get; set; }
+    [JsonPropertyName("t0")]
+    public DateTime EntryTimeUtc { get; set; }
+    [JsonPropertyName("t1")]
+    public DateTime ExitTimeUtc { get; set; }
+    [JsonPropertyName("p0")]
+    public double EntryPrice { get; set; }
+    [JsonPropertyName("pq")]
+    public double RequestedEntryPrice { get; set; }
+    [JsonPropertyName("p1")]
+    public double ExitPrice { get; set; }
+    [JsonPropertyName("ps")]
+    public double InitialStopPrice { get; set; }
+    [JsonPropertyName("pt")]
+    public double InitialTargetPrice { get; set; }
+    [JsonPropertyName("vo")]
+    public double VolumeInUnits { get; set; }
+    [JsonPropertyName("ra")]
+    public double RiskAmount { get; set; }
+    [JsonPropertyName("rf")]
+    public double RiskFractionOfEquity { get; set; }
+    [JsonPropertyName("gp")]
+    public double GrossProfit { get; set; }
+    [JsonPropertyName("cm")]
+    public double Commission { get; set; }
+    [JsonPropertyName("sw")]
+    public double Swap { get; set; }
+    [JsonPropertyName("np")]
+    public double NetProfit { get; set; }
+    [JsonPropertyName("sl")]
+    public double EntrySlippage { get; set; }
+    [JsonPropertyName("r")]
+    public double R { get; set; }
+    [JsonPropertyName("ma")]
+    public double MaeR { get; set; }
+    public double MfeR { get; set; }
+}
+
+/// <summary>
 /// Полный снимок состояния бота, переживающий рестарт (раздел 146).
 ///
 /// Что именно здесь лежит, определяется одним вопросом: что будет неверно, если это
@@ -72,7 +172,7 @@ public sealed class PersistedStrategy
 public sealed class BotState
 {
     /// <summary>Версия схемы. Несовпадение — состояние отбрасывается, а не интерпретируется наугад.</summary>
-    public int SchemaVersion { get; set; } = 1;
+    public int SchemaVersion { get; set; } = 2;
 
     public string InstanceId { get; set; }
     public DateTime SavedAtUtc { get; set; }
@@ -108,4 +208,17 @@ public sealed class BotState
     public Dictionary<string, DateTime> LastSignalBarUtc { get; set; } = new Dictionary<string, DateTime>();
 
     public long TotalTradesRecorded { get; set; }
+
+    /// <summary>
+    /// История закрытых сделок.
+    ///
+    /// Без неё каждый перезапуск обнулял всё, чему система научилась: срезы статистики,
+    /// калибровку вероятностей, распределения MAE и MFE, обнаружение деградации стратегий.
+    /// В облаке, где процесс перезапускается регулярно, адаптивный слой не накапливал бы
+    /// ничего и вечно работал по априорным значениям — то есть существовал бы формально.
+    ///
+    /// Хранится ограниченное число последних сделок: состояние должно оставаться
+    /// компактным, а статистика и так взвешена в пользу недавнего.
+    /// </summary>
+    public List<PersistedTrade> Trades { get; set; } = new List<PersistedTrade>();
 }

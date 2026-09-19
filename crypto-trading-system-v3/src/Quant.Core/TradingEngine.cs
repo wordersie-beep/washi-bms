@@ -1130,6 +1130,12 @@ public sealed class TradingEngine
 
     // --- Персистентность ------------------------------------------------------------------
 
+    /// <summary>
+    /// Принудительно записывает состояние. Нужно тестам и корректной остановке бота:
+    /// перезапуск не должен терять то, что произошло после последнего бара.
+    /// </summary>
+    public void SaveStateForTest(DateTime nowUtc) => SaveState(nowUtc, _broker.GetAccount());
+
     private void SaveState(DateTime nowUtc, AccountSnapshot account)
     {
         var state = new BotState
@@ -1154,6 +1160,18 @@ public sealed class TradingEngine
         foreach (KeyValuePair<string, DateTime> kv in _lastSignalBar) state.LastSignalBarUtc[kv.Key] = kv.Value;
 
         for (int i = 0; i < _positions.Count; i++) state.Positions.Add(ToPersisted(_positions[i]));
+
+        // История закрытых сделок. Без неё перезапуск обнуляет всё, чему система
+        // научилась, и адаптивный слой вечно работает по априорным значениям.
+        int keep = _config.Adaptation.PersistedTradeHistory;
+        if (keep > 0)
+        {
+            AppendTrades(state, _performance.Trades, keep);
+
+            // Теневые сделки сохраняются наравне с настоящими: это единственный путь
+            // отключённой стратегии обратно, и перезапуск не должен его обнулять.
+            AppendTrades(state, _performance.VirtualTrades, keep);
+        }
 
         foreach (KeyValuePair<string, Adaptation.StrategyState> kv in _weights.States)
         {
@@ -1205,6 +1223,11 @@ public sealed class TradingEngine
         _risk.Restore(
             (RiskState)state.RiskState, state.ConsecutiveLosses, state.ConsecutiveWins, state.CooldownUntilUtc,
             state.DayStartUtc, state.DayStartEquity, state.WeekStartUtc, state.WeekStartEquity, nowUtc);
+
+        // История сделок воспроизводится ПЕРВОЙ: из неё заново строятся срезы статистики,
+        // калибровка вероятностей, распределения MAE и MFE и обнаружение деградации
+        // стратегий. Всё, что идёт ниже, опирается на эти структуры.
+        RestoreTradeHistory(state);
 
         _drawdown.Restore(state.AllTimePeakEquity, account.Equity, nowUtc);
         _idempotency.Restore(state.ExecutedSignalIds);
@@ -1276,6 +1299,37 @@ public sealed class TradingEngine
         }
 
         FinishRestore(nowUtc, state, persistedById);
+    }
+
+    /// <summary>
+    /// Воспроизводит сохранённые сделки во всех слоях памяти системы.
+    ///
+    /// Именно воспроизводит, а не подставляет агрегаты: срезы статистики, бины калибровки,
+    /// распределения MAE и MFE и счётчики CUSUM выводятся из сделок по одним и тем же
+    /// правилам, что и в работе. Сохранять агрегаты значило бы завести второй способ их
+    /// получить — и он разошёлся бы с первым при первом же изменении формулы.
+    ///
+    /// Риск-слой здесь НЕ трогается: серия убытков и дневная точка отсчёта восстанавливаются
+    /// отдельно, из собственных полей состояния. Прогнать через них историю значило бы
+    /// заново «пережить» все прошлые убытки и уйти в остановку на ровном месте.
+    /// </summary>
+    private void RestoreTradeHistory(BotState state)
+    {
+        if (state.Trades == null || state.Trades.Count == 0) return;
+
+        int replayed = 0;
+        for (int i = 0; i < state.Trades.Count; i++)
+        {
+            TradeRecord record = TradeHistoryMapper.FromPersisted(state.Trades[i]);
+            if (record == null) continue;
+
+            _performance.Record(record);
+            _probability.Observe(record);
+            replayed++;
+        }
+
+        _journal.Write($"ВОССТАНОВЛЕНИЕ: воспроизведено {replayed} сделок — статистика, " +
+                       "калибровка и распределения выходов восстановлены.");
     }
 
     /// <summary>
@@ -1467,6 +1521,17 @@ public sealed class TradingEngine
         _probability.Observe(record);
         _risk.OnTradeClosed(nowUtc, record.IsWin);
         TradesClosed++;
+    }
+
+    private static void AppendTrades(BotState state, IReadOnlyList<TradeRecord> trades, int keep)
+    {
+        if (trades == null) return;
+
+        int from = Math.Max(0, trades.Count - keep);
+        for (int i = from; i < trades.Count; i++)
+        {
+            state.Trades.Add(TradeHistoryMapper.ToPersisted(trades[i]));
+        }
     }
 
     private static PersistedPosition ToPersisted(OpenPosition p) => new PersistedPosition

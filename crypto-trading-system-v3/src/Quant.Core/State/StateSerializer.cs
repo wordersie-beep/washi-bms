@@ -21,7 +21,17 @@ public static class StateSerializer
         NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
     };
 
-    public const int CurrentSchemaVersion = 1;
+    /// <summary>
+    /// Версия формата состояния.
+    ///
+    /// Поднимается при КАЖДОМ несовместимом изменении. Состояние другой версии
+    /// отбрасывается целиком, а не читается частично: половина снимка хуже его отсутствия,
+    /// потому что отсутствие видно, а половина выглядит рабочей.
+    ///
+    /// 2 — добавлена история закрытых сделок; поля сохранённой сделки записываются
+    ///     короткими именами ради размера снимка в хранилище платформы.
+    /// </summary>
+    public const int CurrentSchemaVersion = 2;
 
     public static string Serialize(BotState state)
     {
@@ -64,6 +74,7 @@ public static class StateSerializer
             state.ExecutedSignalIds ??= new System.Collections.Generic.List<string>();
             state.Strategies ??= new System.Collections.Generic.List<PersistedStrategy>();
             state.LastSignalBarUtc ??= new System.Collections.Generic.Dictionary<string, DateTime>();
+            state.Trades ??= new System.Collections.Generic.List<PersistedTrade>();
 
             return state;
         }
