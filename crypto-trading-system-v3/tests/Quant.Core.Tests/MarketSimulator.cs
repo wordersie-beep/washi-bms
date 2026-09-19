@@ -90,7 +90,7 @@ public sealed class PipelineHarness
         Spec = new SymbolSpec(symbol, pipSize: 0.01, tickSize: 0.01, digits: 2,
             volumeInUnitsMin: 0.01, volumeInUnitsMax: 100, volumeInUnitsStep: 0.01,
             commissionPerMillionQuote: 35, pipValuePerUnit: 0.01,
-            minStopLossDistancePrice: 0, isTradingEnabled: true);
+            minStopLossDistancePrice: 0, leverage: 2.0, isTradingEnabled: true);
 
         Data = new SymbolDataSet(symbol, Spec, Config.Data);
         foreach (Tf tf in Config.Data.Timeframes) _pending[tf] = new List<Candle>();

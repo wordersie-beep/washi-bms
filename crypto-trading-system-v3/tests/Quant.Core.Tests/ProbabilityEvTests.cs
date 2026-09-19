@@ -36,7 +36,7 @@ internal static class Fixtures
         };
 
     public static SymbolSpec Spec(double commissionPerMillion = 35) =>
-        new SymbolSpec("BTCUSD", 0.01, 0.01, 2, 0.01, 100, 0.01, commissionPerMillion, 0.01, 0, true);
+        new SymbolSpec("BTCUSD", 0.01, 0.01, 2, 0.01, 100, 0.01, commissionPerMillion, 0.01, 0, 2.0, true);
 
     public static (BayesianProbabilityModel Model, PerformanceStore Store, CalibrationTracker Cal) BuildModel(EngineConfig config = null)
     {

@@ -20,6 +20,7 @@ public sealed class SymbolSpec
         double commissionPerMillionQuote,
         double pipValuePerUnit,
         double minStopLossDistancePrice,
+        double leverage,
         bool isTradingEnabled)
     {
         if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Symbol name is required.", nameof(name));
@@ -34,6 +35,10 @@ public sealed class SymbolSpec
         CommissionPerMillionQuote = Math.Max(0, commissionPerMillionQuote);
         PipValuePerUnit = pipValuePerUnit;
         MinStopLossDistancePrice = Math.Max(0, minStopLossDistancePrice);
+        // A non-positive leverage from the broker is treated as 1:1, which over-states the
+        // margin a position needs. Over-stating it blocks a trade; under-stating it invites
+        // a margin call, so the conservative direction is the only acceptable default.
+        Leverage = leverage > 0 ? leverage : 1.0;
         IsTradingEnabled = isTradingEnabled;
     }
 
@@ -57,7 +62,18 @@ public sealed class SymbolSpec
     /// <summary>Broker-enforced minimum stop distance, in price units. Zero when unconstrained.</summary>
     public double MinStopLossDistancePrice { get; }
 
+    /// <summary>
+    /// Broker leverage for this instrument, read from the platform rather than assumed.
+    /// Crypto CFD leverage varies widely between brokers and between instruments at the same
+    /// broker, so assuming a value is how a sizing calculation silently becomes wrong.
+    /// </summary>
+    public double Leverage { get; }
+
     public bool IsTradingEnabled { get; }
+
+    /// <summary>Margin a position of this size would require, from the broker's own leverage.</summary>
+    public double EstimateMargin(double units, double price) =>
+        Leverage <= 0 ? units * price : units * price / Leverage;
 
     public double PriceToPips(double priceDistance) => PipSize <= 0 ? 0 : priceDistance / PipSize;
 

@@ -146,7 +146,7 @@ public class DataQualityTests
     public void RejectsWhenTradingIsDisabledForTheSymbol()
     {
         PipelineHarness h = WarmHarness();
-        var disabled = new SymbolSpec("BTCUSD", 0.01, 0.01, 2, 0.01, 100, 0.01, 35, 0.01, 0, isTradingEnabled: false);
+        var disabled = new SymbolSpec("BTCUSD", 0.01, 0.01, 2, 0.01, 100, 0.01, 35, 0.01, 0, 2.0, isTradingEnabled: false);
 
         DataQualityReport report = h.QualityMonitor.Evaluate(
             h.LastTimeUtc, disabled, h.Data.LatestQuote, h.Data.Signal, h.Data.Ticks, h.Data.Spread);
