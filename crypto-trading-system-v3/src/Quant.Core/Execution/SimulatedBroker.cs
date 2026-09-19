@@ -75,8 +75,11 @@ public sealed class SimulatedBroker : IBroker
             return 0;
         }
 
-        double notional = volumeInUnits * price;
-        return notional / 1_000_000.0 * spec.CommissionPerMillionQuote;
+        // Ставка задана за миллион номинала в КОТИРУЕМОЙ валюте, а списывается комиссия со
+        // счёта — значит, переводить надо и её.
+        double notionalQuote = volumeInUnits * price;
+        double commissionQuote = notionalQuote / 1_000_000.0 * spec.CommissionPerMillionQuote;
+        return commissionQuote * spec.MoneyPerPricePerUnit;
     }
 
     /// <summary>Условия стресса по символу — влияют на моделируемое проскальзывание.</summary>
@@ -166,8 +169,13 @@ public sealed class SimulatedBroker : IBroker
         double basePrice = p.Direction == Side.Long ? quote.Bid : quote.Ask;
         double fillPrice = p.Direction == Side.Long ? basePrice - slippage : basePrice + slippage;
 
+        // Движение цены переводится в деньги СЧЁТА тем же курсом, что и риск. Без этого
+        // «бумажная» торговля считала бы прибыль в котируемой валюте и прибавляла её к
+        // капиталу в валюте счёта — а именно ради правдоподобия этих цифр режим и нужен.
+        double conversion = _specs.TryGetValue(p.SymbolName, out SymbolSpec spec) ? spec.MoneyPerPricePerUnit : 1.0;
+
         double grossPerUnit = p.Direction == Side.Long ? fillPrice - p.EntryPrice : p.EntryPrice - fillPrice;
-        double gross = grossPerUnit * closeVolume;
+        double gross = grossPerUnit * closeVolume * conversion;
 
         // Комиссия выхода — вторая половина круговых издержек.
         double exitCommission = CommissionFor(p.SymbolName, closeVolume, fillPrice);

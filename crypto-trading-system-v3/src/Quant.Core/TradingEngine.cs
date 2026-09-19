@@ -161,6 +161,7 @@ public sealed class TradingEngine
     public ExecutionQualityTracker ExecutionQuality => _executionQuality;
     public StrategyWeightEngine Weights => _weights;
     public ShadowTracker Shadow => _shadow;
+    public IdempotencyGuard Idempotency => _idempotency;
     public FilterValueLedger FilterLedger => _filterLedger;
     public CorrelationEngine Correlation => _correlation;
     public RiskEngine Risk => _risk;
@@ -662,6 +663,7 @@ public sealed class TradingEngine
             InvalidationPrice = c.Exit.InvalidationPrice,
             Mode = _config.Mode,
             IsVirtual = _config.Mode == OperatingMode.Shadow,
+            MoneyPerPricePerUnit = data.Spec?.MoneyPerPricePerUnit ?? 1.0,
         };
 
         _positions.Add(position);
@@ -691,6 +693,11 @@ public sealed class TradingEngine
             if (data == null || !_plans.TryGetValue(p.TradeId, out ExitPlan plan)) continue;
 
             bool ownBarClosed = string.Equals(p.SymbolName, closedSymbol, StringComparison.Ordinal);
+
+            // Курс пересчёта обновляется на каждом сопровождении: он меняется вместе с
+            // курсом валюты счёта к котируемой, а устаревший означает риск, посчитанный по
+            // вчерашнему курсу.
+            if (data.Spec != null) p.MoneyPerPricePerUnit = data.Spec.MoneyPerPricePerUnit;
 
             Quote quote = data.LatestQuote;
             if (!quote.IsWellFormed) continue;
@@ -745,7 +752,7 @@ public sealed class TradingEngine
                     if (action.Reason == ExitReason.TakeProfit2) p.Target2Filled = true;
 
                     double perUnit = p.Direction == Side.Long ? r.FilledPrice - p.EntryPrice : p.EntryPrice - r.FilledPrice;
-                    p.RealisedProfit += perUnit * r.FilledVolume;
+                    p.RealisedProfit += perUnit * r.FilledVolume * p.MoneyPerPricePerUnit;
                 }
                 break;
             }
@@ -756,7 +763,7 @@ public sealed class TradingEngine
                 if (r.IsSuccessful)
                 {
                     double perUnit = p.Direction == Side.Long ? r.FilledPrice - p.EntryPrice : p.EntryPrice - r.FilledPrice;
-                    p.RealisedProfit += perUnit * r.FilledVolume;
+                    p.RealisedProfit += perUnit * r.FilledVolume * p.MoneyPerPricePerUnit;
                     p.CurrentVolumeInUnits = 0;
                     CloseTrade(nowUtc, p, r.FilledPrice, action.Reason, account);
                 }
@@ -1265,6 +1272,137 @@ public sealed class TradingEngine
         {
             _haltedByReconciliation = true;
             _risk.ForceHalt(nowUtc, $"{orphaned} позиций у брокера не имеют сохранённого контекста");
+            return;
+        }
+
+        FinishRestore(nowUtc, state, persistedById);
+    }
+
+    /// <summary>
+    /// Доводит восстановление до состояния, в котором можно принимать решения.
+    ///
+    /// Сопоставить позиции по идентификатору мало. Пока робот был выключен, позиция могла
+    /// быть частично закрыта, её стоп мог быть сдвинут или снят вовсе, а сигнал, чей ордер
+    /// ушёл в таймаут, остался помеченным как исполненный. Каждое из этих состояний
+    /// выглядит рабочим и ведёт к неверным решениям:
+    ///
+    ///   * расхождение объёма — риск считается по несуществующему объёму;
+    ///   * снятый стоп — позиция без защиты, а система считает, что защита есть;
+    ///   * зависшая отметка — сигнал заблокирован навсегда, сделок по нему не будет.
+    ///
+    /// Поэтому после сопоставления идёт полная сверка, а не ожидание её по расписанию.
+    /// </summary>
+    private void FinishRestore(DateTime nowUtc, BotState state, Dictionary<long, PersistedPosition> persistedById)
+    {
+        // 1. Курс пересчёта в валюту счёта. Без него портфельный риск после рестарта
+        //    считается по единице, то есть в котируемой валюте.
+        for (int i = 0; i < _positions.Count; i++)
+        {
+            OpenPosition p = _positions[i];
+            SymbolSpec spec = Data(p.SymbolName)?.Spec;
+            if (spec != null) p.MoneyPerPricePerUnit = spec.MoneyPerPricePerUnit;
+
+            if (!persistedById.TryGetValue(p.BrokerPositionId, out PersistedPosition pp)) continue;
+
+            // 2. Расхождение объёма — частичное закрытие во время простоя. Брокер здесь
+            //    источник правды, но молчать об этом нельзя: часть сделки закрылась, и её
+            //    результат в статистику не попал.
+            double tolerance = Math.Max(1e-6, pp.InitialVolumeInUnits * 1e-4);
+            if (Math.Abs(pp.CurrentVolumeInUnits - p.CurrentVolumeInUnits) > tolerance)
+            {
+                _journal.Write($"ВОССТАНОВЛЕНИЕ: #{p.BrokerPositionId} {p.SymbolName} объём изменился за время " +
+                               $"простоя: было {pp.CurrentVolumeInUnits:F6}, у брокера {p.CurrentVolumeInUnits:F6}. " +
+                               "Принят объём брокера; результат закрытой части в статистику не попадёт.");
+            }
+
+            // 3. Стоп у брокера отличается от сохранённого либо отсутствует.
+            if (Math.Abs(pp.CurrentStopPrice - p.CurrentStopPrice) > 1e-9)
+            {
+                _journal.Write($"ВОССТАНОВЛЕНИЕ: #{p.BrokerPositionId} {p.SymbolName} стоп у брокера " +
+                               $"{p.CurrentStopPrice:F5}, сохранён был {pp.CurrentStopPrice:F5}. Принят стоп брокера.");
+            }
+        }
+
+        // 4. Позиция без стопа — это позиция без ограничения убытка. Защита
+        //    восстанавливается немедленно: ждать следующего бара значит держать капитал
+        //    открытым ровно в том состоянии, которого вся система призвана не допускать.
+        RestoreMissingStops(nowUtc);
+
+        // 5. Отметки исполнения, оставшиеся от ордеров с неизвестным исходом. Если позиции
+        //    по такому сигналу нет, значит ордер до биржи не дошёл, и держать сигнал
+        //    заблокированным больше не за что.
+        ReleaseStaleIdempotencyMarks();
+
+        // 6. Полная сверка — сразу, не дожидаясь расписания.
+        _lastReconciliationUtc = DateTime.MinValue;
+        MaybeReconcile(nowUtc);
+    }
+
+    /// <summary>Возвращает стоп-лосс позициям, у которых его не оказалось у брокера.</summary>
+    private void RestoreMissingStops(DateTime nowUtc)
+    {
+        IReadOnlyList<BrokerPosition> brokerPositions = _execution.GetOpenPositions();
+        var stopById = new Dictionary<long, double?>();
+        for (int i = 0; i < brokerPositions.Count; i++)
+        {
+            stopById[brokerPositions[i].PositionId] = brokerPositions[i].StopLoss;
+        }
+
+        for (int i = 0; i < _positions.Count; i++)
+        {
+            OpenPosition p = _positions[i];
+            if (!stopById.TryGetValue(p.BrokerPositionId, out double? brokerStop)) continue;
+            if (brokerStop.HasValue && brokerStop.Value > 0) continue;
+
+            _journal.Write($"ВОССТАНОВЛЕНИЕ: #{p.BrokerPositionId} {p.SymbolName} у брокера БЕЗ СТОПА — " +
+                           $"восстанавливаю {p.CurrentStopPrice:F5}.");
+
+            BrokerResult r = _execution.MoveStop(p.BrokerPositionId, p.CurrentStopPrice, _journal.Write);
+            if (r == null || !r.IsSuccessful)
+            {
+                _haltedByReconciliation = true;
+                _risk.ForceHalt(nowUtc, $"позиция #{p.BrokerPositionId} осталась без стоп-лосса: {r?.Error ?? "нет ответа"}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Снимает отметки исполнения с сигналов, по которым позиции не оказалось.
+    ///
+    /// Отметка ставится ДО отправки ордера и не снимается, когда исход неизвестен, — иначе
+    /// повтор открыл бы дубль. Но после рестарта неизвестность разрешима: если позиции по
+    /// сигналу нет ни у брокера, ни в памяти, значит ордер не исполнился, и сигнал должен
+    /// снова стать доступным.
+    /// </summary>
+    private void ReleaseStaleIdempotencyMarks()
+    {
+        var live = new HashSet<string>(StringComparer.Ordinal);
+        for (int i = 0; i < _positions.Count; i++)
+        {
+            if (!string.IsNullOrEmpty(_positions[i].SignalId)) live.Add(_positions[i].SignalId);
+        }
+
+        IReadOnlyList<TradeRecord> closed = _performance.Trades;
+        if (closed != null)
+        {
+            for (int i = 0; i < closed.Count; i++)
+            {
+                if (!string.IsNullOrEmpty(closed[i].SignalId)) live.Add(closed[i].SignalId);
+            }
+        }
+
+        var stale = new List<string>();
+        foreach (string id in _idempotency.ExecutedIds)
+        {
+            if (!live.Contains(id)) stale.Add(id);
+        }
+
+        for (int i = 0; i < stale.Count; i++) _idempotency.Release(stale[i]);
+
+        if (stale.Count > 0)
+        {
+            _journal.Write($"ВОССТАНОВЛЕНИЕ: снято {stale.Count} отметок исполнения без позиции — " +
+                           "эти ордера до биржи не дошли, сигналы снова доступны.");
         }
     }
 
@@ -1283,7 +1421,8 @@ public sealed class TradingEngine
         double exitPrice = pp.CurrentStopPrice > 0 ? pp.CurrentStopPrice : pp.InitialStopPrice;
 
         double perUnit = side == Side.Long ? exitPrice - pp.EntryPrice : pp.EntryPrice - exitPrice;
-        double gross = perUnit * pp.CurrentVolumeInUnits;
+        double conversion = Data(pp.SymbolName)?.Spec?.MoneyPerPricePerUnit ?? 1.0;
+        double gross = perUnit * pp.CurrentVolumeInUnits * conversion;
         double riskAmount = pp.RiskAmount > 0 ? pp.RiskAmount : pp.RiskPerUnit * pp.InitialVolumeInUnits;
 
         var record = new TradeRecord

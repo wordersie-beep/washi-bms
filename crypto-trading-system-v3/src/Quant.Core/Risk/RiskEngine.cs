@@ -145,7 +145,17 @@ public sealed class RiskEngine
         if (account.MarginLevelPercent.HasValue)
         {
             double marginLevel = account.MarginLevelPercent.Value;
-            double dangerLevel = Math.Max(_config.MinMarginLevelPercent, account.StopOutLevelPercent * _config.StopOutSafetyMultiple);
+
+            // Порог строится от стоп-аута брокера, но ограничен сверху: брокер, сообщивший
+            // бессмысленно высокий уровень, не должен получить возможность остановить
+            // торговлю навсегда — это отказ по чужой ошибке, а не по риску.
+            double fromStopOut = account.StopOutLevelPercent > 0
+                ? account.StopOutLevelPercent * _config.StopOutSafetyMultiple
+                : 0;
+
+            double dangerLevel = Math.Min(
+                _config.MaxMarginDangerLevelPercent,
+                Math.Max(_config.MinMarginLevelPercent, fromStopOut));
 
             if (marginLevel < dangerLevel)
                 Escalate(RiskState.Halt, NoTradeReason.MarginGuard, $"margin level {marginLevel:F0}% below the {dangerLevel:F0}% floor");

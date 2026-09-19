@@ -61,6 +61,42 @@ public sealed class SymbolSpec
     /// <summary>Account-currency value of one pip for one unit of volume.</summary>
     public double PipValuePerUnit { get; }
 
+    /// <summary>
+    /// Сколько денег СЧЁТА стоит движение цены на единицу за единицу объёма.
+    ///
+    /// Это единственный мост между ценой и деньгами, и без него вся арифметика риска
+    /// неверна на любом инструменте, чья котируемая валюта не совпадает с валютой счёта.
+    /// Счёт в EUR и ETHUSD: стоп в 50 долларов — это не 50 евро, и позиция, посчитанная
+    /// как «риск делить на расстояние», оказывается больше задуманной на весь курс пары.
+    ///
+    /// Платформа даёт стоимость пункта в валюте счёта; отсюда — стоимость единицы цены.
+    /// </summary>
+    public double MoneyPerPricePerUnit =>
+        PipValuePerUnit > 0 && PipSize > 0 ? PipValuePerUnit / PipSize : 1.0;
+
+    /// <summary>
+    /// Платформа не сообщила стоимость пункта, и пересчёт идёт один к одному.
+    ///
+    /// Молчать об этом нельзя: на инструменте с другой котируемой валютой это значит, что
+    /// размер позиции считается неверно, и человек должен узнать об этом из журнала, а не
+    /// из расхождения статистики с реальностью.
+    /// </summary>
+    public bool MoneyConversionIsAssumed => !(PipValuePerUnit > 0 && PipSize > 0);
+
+    /// <summary>Переводит движение цены на заданном объёме в деньги счёта.</summary>
+    public double MoneyFor(double priceDistance, double units) =>
+        priceDistance * units * MoneyPerPricePerUnit;
+
+    /// <summary>
+    /// Сколько единиц объёма нужно, чтобы движение цены на <paramref name="priceDistance"/>
+    /// стоило <paramref name="money"/> в валюте счёта.
+    /// </summary>
+    public double UnitsForMoney(double money, double priceDistance)
+    {
+        double perUnit = priceDistance * MoneyPerPricePerUnit;
+        return perUnit > 0 ? money / perUnit : 0;
+    }
+
     /// <summary>Broker-enforced minimum stop distance, in price units. Zero when unconstrained.</summary>
     public double MinStopLossDistancePrice { get; }
 
@@ -106,10 +142,18 @@ public sealed class SymbolSpec
     }
 
     /// <summary>Margin a position of this size would require, from the broker's own leverage.</summary>
+    /// <summary>
+    /// Требуемая маржа В ВАЛЮТЕ СЧЁТА.
+    ///
+    /// Номинал считается в котируемой валюте и переводится тем же курсом, что и риск:
+    /// сравнивать маржу в долларах со свободной маржой в евро — значит ошибаться на весь
+    /// курс пары ровно в той проверке, которая существует, чтобы не остаться без денег.
+    /// </summary>
     public double EstimateMargin(double units, double price)
     {
         double leverage = LeverageFor(units);
-        return leverage <= 0 ? units * price : units * price / leverage;
+        double notional = units * price * MoneyPerPricePerUnit;
+        return leverage <= 0 ? notional : notional / leverage;
     }
 
     public double PriceToPips(double priceDistance) => PipSize <= 0 ? 0 : priceDistance / PipSize;

@@ -140,7 +140,10 @@ public sealed class PortfolioRiskEngine
 
         if (distance <= 0) return 0;   // stop at or past break-even
 
-        double amountAtRisk = distance * p.CurrentVolumeInUnits;
+        // Расстояние в цене, объём в единицах, капитал в валюте счёта. Перевод обязателен:
+        // без него весь портфельный риск считается в котируемой валюте и сравнивается с
+        // лимитами, заданными в процентах от счёта, — то есть лимиты смещены на курс.
+        double amountAtRisk = distance * p.CurrentVolumeInUnits * p.MoneyPerPricePerUnit;
         return MathUtil.Clamp(100.0 * amountAtRisk / equity, 0, 100);
     }
 

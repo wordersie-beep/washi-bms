@@ -152,8 +152,12 @@ public sealed class PositionSizer
         }
 
         // --- Units --------------------------------------------------------------------------
+        // Риск считается в ВАЛЮТЕ СЧЁТА, а стоп — в цене инструмента. Делить одно на другое
+        // напрямую можно только когда котируемая валюта совпадает с валютой счёта. Счёт в
+        // EUR и ETHUSD: стоп в 50 долларов — это не 50 евро, и позиция получилась бы больше
+        // задуманной на весь курс пары.
         double riskAmount = account.Equity * riskPercent / 100.0;
-        double rawUnits = riskAmount / stopDistance;
+        double rawUnits = spec.UnitsForMoney(riskAmount, stopDistance);
 
         double units = spec.NormalizeVolumeDown(rawUnits);
         if (units <= 0)
@@ -189,7 +193,7 @@ public sealed class PositionSizer
 
         // Recompute the REALISED risk from the size actually obtainable. Rounding down means
         // the true risk is at or below the requested figure, and the record must say so.
-        double actualRiskAmount = units * stopDistance;
+        double actualRiskAmount = spec.MoneyFor(stopDistance, units);
         double actualRiskPercent = 100.0 * actualRiskAmount / account.Equity;
 
         return new SizingResult

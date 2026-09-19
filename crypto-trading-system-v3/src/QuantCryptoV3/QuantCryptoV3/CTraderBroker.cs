@@ -207,7 +207,10 @@ public sealed class CTraderBroker : IBroker
         IAccount a = _robot.Account;
         return new AccountSnapshot(
             a.Balance, a.Equity, a.Margin, a.FreeMargin,
-            a.MarginLevel, a.StopOutLevel * 100.0, a.IsLive, a.Asset.Name);
+            // Уровень стоп-аута передаётся КАК ЕСТЬ: приведение к процентам живёт в
+            // AccountSnapshot, в одном месте. Умножать здесь значило бы умножить дважды,
+            // если платформа однажды начнёт отдавать его уже в процентах.
+            a.MarginLevel, a.StopOutLevel, a.IsLive, a.Asset.Name);
     }
 
     private static string DescribeError(TradeResult result)

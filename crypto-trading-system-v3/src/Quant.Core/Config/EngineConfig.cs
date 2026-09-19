@@ -517,6 +517,15 @@ public sealed class RiskConfig
     /// <summary>Multiple of the stop-out level treated as the danger zone.</summary>
     public double StopOutSafetyMultiple { get; set; } = 3.0;
 
+    /// <summary>
+    /// Потолок порога опасного уровня маржи, %.
+    ///
+    /// Существует как защита от чужой ошибки: брокер, сообщивший стоп-аут в непривычных
+    /// единицах, иначе получил бы возможность остановить торговлю навсегда. Значение
+    /// заметно выше любого разумного стоп-аута и при этом конечно.
+    /// </summary>
+    public double MaxMarginDangerLevelPercent { get; set; } = 1000.0;
+
     /// <summary>Cooldown after any position closes, in minutes.</summary>
     public int PostTradeCooldownMinutes { get; set; } = 5;
 
