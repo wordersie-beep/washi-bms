@@ -50,7 +50,7 @@ public sealed class TradeGate
         // 1. Data quality -- nothing downstream means anything if the inputs are wrong.
         if (!candidate.DataQuality.IsAcceptable)
         {
-            return GateOutcome.Reject(NoTradeReason.DataQuality, candidate.DataQuality.IssueSummary);
+            return GateOutcome.Reject(candidate.DataQuality.Reason, candidate.DataQuality.IssueSummary);
         }
 
         // 2. Risk posture.

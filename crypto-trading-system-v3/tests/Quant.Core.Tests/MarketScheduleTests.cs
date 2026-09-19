@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using Quant.Core.Config;
+using Quant.Core.Data;
 using Quant.Core.Primitives;
 using Xunit;
 
@@ -140,6 +142,28 @@ public class MarketScheduleTests
         // понедельничной, и подсчёт открытых минут развалился бы.
         Assert.Equal(0, MarketSchedule.MinuteOfWeek(DayOfWeek.Monday, TimeSpan.Zero));
         Assert.Equal(6 * 24 * 60, MarketSchedule.MinuteOfWeek(DayOfWeek.Sunday, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void AClosedMarketIsReportedAsClosedNotAsBadData()
+    {
+        // «Закрытый рынок» и «данные испорчены» — разные вещи. Назвать первое вторым значит
+        // спрятать самую частую причину бездействия за формулировкой, которая звучит как
+        // поломка, и отправить человека искать несуществующий сбой.
+        var config = new EngineConfig();
+        var monitor = new DataQualityMonitor(config.Data);
+        var harness = new PipelineHarness(config);
+        harness.Feed(new MarketSimulator(seed: 701).Generate(600, 0.0002, 0.002));
+
+        var saturday = new DateTime(2026, 9, 19, 12, 0, 0, DateTimeKind.Utc);
+
+        DataQualityReport report = monitor.Evaluate(
+            saturday, harness.Spec, new Quote(saturday, 49999, 50001),
+            harness.Data.Signal, harness.Data.Ticks, harness.Data.Spread, Cfd());
+
+        Assert.False(report.IsAcceptable);
+        Assert.Equal(NoTradeReason.MarketClosed, report.Reason);
+        Assert.Contains("рынок закрыт", report.IssueSummary);
     }
 
     [Fact]

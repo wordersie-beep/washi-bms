@@ -39,6 +39,19 @@ public sealed class DataQualityMonitor
         var issues = new List<string>();
         double score = 1.0;
 
+        // Закрытый рынок проверяется ПЕРВЫМ. Пока рынок закрыт, всё остальное — устаревшая
+        // котировка, непродвигающаяся серия, разрыв в барах — не признаки неисправности, а
+        // прямые следствия закрытия. Проверь их раньше, и система сообщит о поломке там,
+        // где её нет, а настоящая причина потеряется.
+        if (schedule != null && !schedule.IsOpenAt(nowUtc))
+        {
+            int untilOpen = schedule.MinutesUntilOpen(nowUtc);
+            issues.Add(untilOpen > 0
+                ? $"рынок закрыт по расписанию инструмента, откроется через {untilOpen / 60}ч {untilOpen % 60:00}м"
+                : "рынок закрыт по расписанию инструмента");
+            return new DataQualityReport(false, 0, issues, NoTradeReason.MarketClosed);
+        }
+
         if (spec == null)
         {
             issues.Add("symbol specification unavailable");
@@ -107,14 +120,6 @@ public sealed class DataQualityMonitor
         // otherwise the series has silently stopped advancing.
         double barAgeMinutes = (nowUtc - signalSeries.LastBarOpenTimeUtc).TotalMinutes;
         double maxBarAge = (int)signalSeries.Timeframe * (1.0 + _config.MaxBarGapMultiple);
-
-        // Пока рынок закрыт, серия и не должна продвигаться. Это не остановка подачи.
-        bool marketClosed = schedule != null && !schedule.IsOpenAt(nowUtc);
-        if (marketClosed)
-        {
-            issues.Add("рынок закрыт по расписанию инструмента");
-            return new DataQualityReport(false, 0, issues);
-        }
 
         if (barAgeMinutes > maxBarAge)
         {
