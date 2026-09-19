@@ -343,21 +343,91 @@ public class QuantCryptoV3Bot : Robot
     /// </summary>
     private void WarmUpHistory()
     {
+        bool signalTimeframeShort = false;
+
         for (int i = 0; i < _subscribedBars.Count; i++)
         {
             Bars bars = _subscribedBars[i];
             Tf tf = FromPlatform(bars.TimeFrame);
             if (tf == 0) continue;
 
-            int count = Math.Min(bars.Count - 1, _config.Data.BarHistory);
-            for (int b = bars.Count - 1 - count; b < bars.Count - 1; b++)
+            bool isSignal = tf == _config.Data.SignalTimeframe;
+
+            // Сигнальному ряду нужен полный порог входа с запасом, остальным — их
+            // собственный, меньший порог. Просить у брокера больше, чем прочитает хоть
+            // один слой, значит платить задержкой старта ни за что.
+            int wanted = isSignal
+                ? Math.Min(_config.Data.BarHistory, _config.Data.MinBarsBeforeTrading + 50)
+                : Math.Min(_config.Data.BarHistory, _config.Data.MinBarsPerTimeframe + 20);
+
+            int available = EnsureHistory(bars, wanted + 1);
+
+            int count = Math.Min(available - 1, _config.Data.BarHistory);
+            int fed = 0;
+            for (int b = available - 1 - count; b < available - 1; b++)
             {
                 if (b < 0) continue;
                 _engine.OnBarClosed(
                     DateTime.SpecifyKind(bars.OpenTimes[b], DateTimeKind.Utc),
                     bars.SymbolName, tf, ToCandle(bars, b), isWarmUp: true);
+                fed++;
+            }
+
+            if (isSignal)
+            {
+                Print($"{bars.SymbolName} {tf}: загружено {fed} баров истории " +
+                      $"(нужно {_config.Data.MinBarsBeforeTrading} для начала торговли)");
+
+                if (fed < _config.Data.MinBarsBeforeTrading) signalTimeframeShort = true;
             }
         }
+
+        if (signalTimeframeShort)
+        {
+            Print("ВНИМАНИЕ: истории на сигнальном таймфрейме не хватает. Бот будет набирать " +
+                  "недостающие бары на живом рынке и до этого момента не откроет ни одной сделки. " +
+                  "Чтобы ускорить: откройте график этого инструмента на этом таймфрейме и " +
+                  "прокрутите его назад — платформа догрузит историю с сервера брокера.");
+        }
+    }
+
+    /// <summary>
+    /// Догружает историю ряда, пока её не станет достаточно.
+    ///
+    /// Без этого прогрев был бесполезен. <c>MarketData.GetBars</c> отдаёт лишь те бары,
+    /// что платформа уже держит в памяти, — а для инструмента, чей график не открыт, это
+    /// может быть один бар. Прогрев тогда подавал в движок ноль баров, и система честно
+    /// отказывалась торговать следующие семнадцать часов, пока не наберёт двести баров M5
+    /// на живом рынке. Внешне это неотличимо от неработающего бота.
+    ///
+    /// Число запросов ограничено: каждый идёт на сервер брокера, и упереться в отсутствие
+    /// истории лучше через несколько секунд, чем держать запуск бесконечно.
+    /// </summary>
+    private int EnsureHistory(Bars bars, int wanted)
+    {
+        const int MaxRequests = 20;
+
+        int requests = 0;
+        while (bars.Count < wanted && requests < MaxRequests)
+        {
+            requests++;
+
+            int loaded;
+            try
+            {
+                loaded = bars.LoadMoreHistory();
+            }
+            catch (Exception ex)
+            {
+                Print($"История {bars.SymbolName} {bars.TimeFrame}: {ex.GetType().Name}: {ex.Message}");
+                break;
+            }
+
+            // Ноль означает, что у брокера истории больше нет. Повторять бессмысленно.
+            if (loaded <= 0) break;
+        }
+
+        return bars.Count;
     }
 
     private void OnBarOpened(string symbolName, Tf timeframe, Bars bars)

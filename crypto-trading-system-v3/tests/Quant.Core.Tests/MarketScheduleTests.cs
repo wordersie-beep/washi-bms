@@ -167,6 +167,50 @@ public class MarketScheduleTests
     }
 
     [Fact]
+    public void TheDashboardNamesWhyASymbolIsIdle()
+    {
+        // «bars=0» само по себе не отвечает на вопрос, который человек задаёт, глядя на
+        // дашборд: это прогрев, закрытый рынок или неисправность. Три состояния выглядят
+        // одинаково, а требуют совершенно разных действий.
+        var config = new EngineConfig();
+        var broker = new Quant.Core.Execution.SimulatedBroker(
+            config.Execution, new Quant.Core.Ev.CostModel(config.Execution),
+            new AccountSnapshot(100000, 100000, 0, 100000, 2000, 50, false, "USD"), false);
+
+        var engine = new TradingEngine(config, broker, new Quant.Core.State.InMemoryStateStore(),
+            Quant.Core.Journal.NullJournalSink.Instance, "test");
+
+        var spec = new SymbolSpec("BTCUSD", 0.01, 0.01, 2, 0.001, 1000, 0.001, 35, 0.01, 0, 2.0, true);
+        engine.AddSymbol("BTCUSD", spec, MarketSchedule.Continuous);
+
+        string dashboard = engine.RenderDashboard(new DateTime(2026, 9, 16, 12, 0, 0, DateTimeKind.Utc));
+
+        Assert.Contains("ПРОГРЕВ", dashboard);
+        Assert.Contains("нужно ещё", dashboard);
+    }
+
+    [Fact]
+    public void TheDashboardNamesAClosedMarketRatherThanWarmUp()
+    {
+        var config = new EngineConfig();
+        var broker = new Quant.Core.Execution.SimulatedBroker(
+            config.Execution, new Quant.Core.Ev.CostModel(config.Execution),
+            new AccountSnapshot(100000, 100000, 0, 100000, 2000, 50, false, "USD"), false);
+
+        var engine = new TradingEngine(config, broker, new Quant.Core.State.InMemoryStateStore(),
+            Quant.Core.Journal.NullJournalSink.Instance, "test");
+
+        var spec = new SymbolSpec("XAUEUR", 0.01, 0.01, 2, 0.001, 1000, 0.001, 35, 0.01, 0, 2.0, true);
+        engine.AddSymbol("XAUEUR", spec, Cfd());
+
+        // Суббота: рынок закрыт, и это, а не прогрев, — причина бездействия.
+        string dashboard = engine.RenderDashboard(new DateTime(2026, 9, 19, 12, 0, 0, DateTimeKind.Utc));
+
+        Assert.Contains("РЫНОК ЗАКРЫТ", dashboard);
+        Assert.DoesNotContain("ПРОГРЕВ", dashboard);
+    }
+
+    [Fact]
     public void TheDescriptionNamesTheClosure()
     {
         string description = Cfd().Describe();

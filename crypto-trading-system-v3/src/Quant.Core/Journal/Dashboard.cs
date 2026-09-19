@@ -33,6 +33,7 @@ public sealed class Dashboard
         PortfolioExposure exposure,
         IReadOnlyList<OpenPosition> positions,
         IReadOnlyDictionary<string, RegimeAssessment> regimes,
+        IReadOnlyDictionary<string, string> symbolStatus,
         IReadOnlyDictionary<string, StrategyState> strategies,
         PerformanceStore performance,
         CalibrationTracker calibration,
@@ -84,7 +85,16 @@ public sealed class Dashboard
             sb.AppendLine("----------------------------------------------------------------");
             foreach (KeyValuePair<string, RegimeAssessment> kv in regimes)
             {
-                sb.AppendFormat("    {0,-10} {1}", kv.Key, kv.Value).AppendLine();
+                sb.AppendFormat("    {0,-10} {1}", kv.Key, kv.Value);
+
+                // Состояние инструмента дописывается к строке режима: «bars=0» само по себе
+                // не отвечает на вопрос, прогрев это, закрытый рынок или неисправность.
+                if (symbolStatus != null && symbolStatus.TryGetValue(kv.Key, out string status) && status != null)
+                {
+                    sb.AppendFormat("  <- {0}", status);
+                }
+
+                sb.AppendLine();
             }
         }
 

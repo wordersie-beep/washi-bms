@@ -1054,7 +1054,47 @@ public sealed class TradingEngine
 
         return _dashboard.Render(
             nowUtc, _config.Mode, account, _lastRisk, exposure, _positions,
-            _regimes, _weights.States, _performance, _calibration, _executionQuality, _journal);
+            _regimes, BuildSymbolStatus(nowUtc), _weights.States, _performance, _calibration,
+            _executionQuality, _journal);
+    }
+
+    /// <summary>
+    /// Короткая причина, по которой инструмент сейчас не торгуется, — или null, если
+    /// торгуется.
+    ///
+    /// Существует потому, что «bars=0» само по себе не отвечает на вопрос, который человек
+    /// задаёт, глядя на дашборд: это прогрев, закрытый рынок или неисправность. Три
+    /// состояния выглядят одинаково и требуют совершенно разных действий.
+    /// </summary>
+    private IReadOnlyDictionary<string, string> BuildSymbolStatus(DateTime nowUtc)
+    {
+        var status = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (KeyValuePair<string, SymbolDataSet> kv in _data)
+        {
+            MarketSchedule schedule = ScheduleOf(kv.Key);
+            if (!schedule.IsOpenAt(nowUtc))
+            {
+                int untilOpen = schedule.MinutesUntilOpen(nowUtc);
+                status[kv.Key] = untilOpen > 0
+                    ? $"РЫНОК ЗАКРЫТ, откроется через {untilOpen / 60}ч {untilOpen % 60:00}м"
+                    : "РЫНОК ЗАКРЫТ";
+                continue;
+            }
+
+            if (!kv.Value.IsReady)
+            {
+                long remaining = kv.Value.SignalBarsRemaining;
+                status[kv.Key] = remaining > 0
+                    ? $"ПРОГРЕВ: нужно ещё {remaining} баров {_config.Data.SignalTimeframe}"
+                    : $"ПРОГРЕВ: ждём {_config.Data.ContextTimeframe}";
+                continue;
+            }
+
+            status[kv.Key] = null;
+        }
+
+        return status;
     }
 
     // --- Персистентность ------------------------------------------------------------------
