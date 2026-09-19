@@ -40,11 +40,33 @@ public class QuantCryptoV3Bot : Robot
     [Parameter("Доп. символы (через запятую)", Group = "Режим", DefaultValue = "")]
     public string AdditionalSymbols { get; set; }
 
+    /// <summary>
+    /// Таймфрейм, на закрытии которого принимаются решения.
+    ///
+    /// ЭТО, а не таймфрейм графика, определяет работу бота. Раньше он был зашит в код, и
+    /// запуск на минутном графике выглядел как «бот не работает»: он исправно торговал по
+    /// пятиминуткам и игнорировал выбор пользователя.
+    /// </summary>
+    [Parameter("Сигнальный таймфрейм", Group = "Режим", DefaultValue = Tf.M5)]
+    public Tf SignalTimeframe { get; set; }
+
+    /// <summary>
+    /// Старший таймфрейм, дающий трендовый контекст. Обязан быть медленнее сигнального.
+    ///
+    /// Чем он медленнее, тем больше истории нужно для прогрева: требуется 60 его баров.
+    /// Для связки M1/H1 это 60 часов, и бот скажет об этом при старте.
+    /// </summary>
+    [Parameter("Контекстный таймфрейм", Group = "Режим", DefaultValue = Tf.H1)]
+    public Tf ContextTimeframe { get; set; }
+
     [Parameter("Эталонный символ", Group = "Режим", DefaultValue = "BTCUSD")]
     public string BenchmarkSymbol { get; set; }
 
     [Parameter("Дашборд каждые N минут", Group = "Режим", DefaultValue = 60, MinValue = 5, MaxValue = 1440)]
     public int DashboardIntervalMinutes { get; set; }
+
+    [Parameter("Признак жизни каждые N минут", Group = "Режим", DefaultValue = 15, MinValue = 1, MaxValue = 240)]
+    public int HeartbeatIntervalMinutes { get; set; }
 
     [Parameter("Подробный журнал отказов", Group = "Режим", DefaultValue = false)]
     public bool VerboseJournal { get; set; }
@@ -180,8 +202,26 @@ public class QuantCryptoV3Bot : Robot
 
             _engine.Restore(Server.TimeInUtc);
 
-            Print($"QuantCryptoV3 запущен. Режим {Mode}. Символы: {string.Join(", ", _symbols)}. " +
+            // Признак жизни идёт по ТАЙМЕРУ, а не по рыночным данным. Если бары перестали
+            // приходить, это ровно тот случай, когда сообщение нужнее всего, — а событийный
+            // путь в этот момент молчит вместе с рынком.
+            Timer.Start(TimeSpan.FromMinutes(Math.Max(1, HeartbeatIntervalMinutes)));
+
+            Print($"QuantCryptoV3 запущен. Режим {_config.Mode}. Символы: {string.Join(", ", _symbols)}. " +
                   $"Счёт {(Account.IsLive ? "РЕАЛЬНЫЙ" : "демо")}, капитал {Account.Equity:F2} {Account.Asset.Name}.");
+
+            Print($"Решения принимаются на закрытии {_config.Data.SignalTimeframe}, контекст — {_config.Data.ContextTimeframe}. " +
+                  $"Таймфрейм графика на это не влияет.");
+            Print($"Для начала работы нужно {_config.Data.MinBarsBeforeTrading} баров {_config.Data.SignalTimeframe} " +
+                  $"(≈{_config.Data.MinBarsBeforeTrading * (int)_config.Data.SignalTimeframe / 60.0:F1} ч) и " +
+                  $"{_config.Data.MinBarsPerTimeframe} баров {_config.Data.ContextTimeframe} " +
+                  $"(≈{_config.Data.MinBarsPerTimeframe * (int)_config.Data.ContextTimeframe / 60.0:F1} ч).");
+
+            Print(_engine.RenderHeartbeat(Server.TimeInUtc));
+            Print($"Признак жизни будет печататься каждые {HeartbeatIntervalMinutes} мин, дашборд — каждые {DashboardIntervalMinutes} мин.");
+            Print("Если бот не торгует — это штатное поведение: настройки по умолчанию отклоняют " +
+                  "подавляющее большинство сигналов. Причины видны в признаке жизни и в дашборде.");
+
             Print(_engine.RenderDashboard(Server.TimeInUtc));
         }
         catch (Exception ex)
@@ -293,6 +333,11 @@ public class QuantCryptoV3Bot : Robot
     /// <summary>
     /// Прогоняет историю через движок, чтобы индикаторы и перцентили были готовы к первому
     /// решению, а не набирались неделю на живом рынке.
+    ///
+    /// Бары подаются с флагом прогрева: они наполняют ряды, признаки и режим, но не
+    /// запускают оценку риска, сверку, попытки входа и сохранение состояния. Полный цикл
+    /// на исторических барах означал бы сотни решений по ценам, которых уже нет, и дневную
+    /// точку отсчёта, привязанную к историческому дню.
     /// </summary>
     private void WarmUpHistory()
     {
@@ -308,7 +353,7 @@ public class QuantCryptoV3Bot : Robot
                 if (b < 0) continue;
                 _engine.OnBarClosed(
                     DateTime.SpecifyKind(bars.OpenTimes[b], DateTimeKind.Utc),
-                    bars.SymbolName, tf, ToCandle(bars, b));
+                    bars.SymbolName, tf, ToCandle(bars, b), isWarmUp: true);
             }
         }
     }
@@ -344,20 +389,34 @@ public class QuantCryptoV3Bot : Robot
         }
     }
 
-    protected override void OnTick()
+    /// <summary>
+    /// Вся периодическая отчётность идёт отсюда, по таймеру.
+    ///
+    /// Раньше она висела на OnTick, и это было ошибкой: OnTick вызывается только для
+    /// инструмента графика и только когда идут тики. При остановке фида, на выходных или
+    /// при потере связи вывод замолкал — то есть именно тогда, когда по нему больше всего
+    /// нужно было судить о состоянии бота.
+    /// </summary>
+    protected override void OnTimer()
     {
-        // Работа по тикам идёт через подписку на символы, чтобы она одинаково охватывала все
-        // инструменты, а не только тот, на чьём графике запущен робот. Здесь остаётся лишь
-        // периодический вывод дашборда.
         if (_initialisationFailed || _engine == null) return;
 
-        DateTime now = Server.TimeInUtc;
-        if (_lastDashboardUtc == DateTime.MinValue) _lastDashboardUtc = now;
-
-        if ((now - _lastDashboardUtc).TotalMinutes >= DashboardIntervalMinutes)
+        try
         {
-            _lastDashboardUtc = now;
-            Print(_engine.RenderDashboard(now));
+            DateTime now = Server.TimeInUtc;
+
+            Print(_engine.RenderHeartbeat(now));
+
+            if (_lastDashboardUtc == DateTime.MinValue) _lastDashboardUtc = now;
+            if ((now - _lastDashboardUtc).TotalMinutes >= DashboardIntervalMinutes)
+            {
+                _lastDashboardUtc = now;
+                Print(_engine.RenderDashboard(now));
+            }
+        }
+        catch (Exception ex)
+        {
+            Print($"ОШИБКА при выводе состояния: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -527,6 +586,10 @@ public class QuantCryptoV3Bot : Robot
 
         config.Portfolio.MaxOpenPositions = MaxOpenPositions;
         config.Portfolio.BenchmarkSymbol = BenchmarkSymbol;
+
+        // Сигнальный, контекстный, корреляционный и набор агрегируемых таймфреймов
+        // выставляются одним вызовом, чтобы они не могли разойтись между собой.
+        config.UseTimeframes(SignalTimeframe, ContextTimeframe);
 
         config.Regime.MinConfidenceToTrade = MinRegimeConfidence;
         config.Strategy.MinEnsembleConfidence = MinEnsembleConfidence;

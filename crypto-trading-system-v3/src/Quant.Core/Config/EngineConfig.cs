@@ -40,6 +40,20 @@ public sealed class EngineConfig
     public ulong RandomSeed { get; set; } = 20260919UL;
 
     /// <summary>
+    /// Sets the signal and context timeframes together, rebuilding the aggregated set and
+    /// keeping the correlation timeframe consistent with them.
+    ///
+    /// Exists so the three cannot drift apart: setting SignalTimeframe alone used to leave
+    /// a timeframe set that might not contain it, and a correlation timeframe that might be
+    /// faster than it.
+    /// </summary>
+    public void UseTimeframes(Tf signal, Tf context)
+    {
+        Data.UseTimeframes(signal, context, Portfolio.CorrelationTimeframe);
+        if ((int)Portfolio.CorrelationTimeframe < (int)signal) Portfolio.CorrelationTimeframe = signal;
+    }
+
+    /// <summary>
     /// Validates the configuration and returns the problems found. An empty list means the
     /// configuration is internally consistent; it says nothing about whether it is profitable.
     /// </summary>
@@ -141,6 +155,46 @@ public sealed class DataConfig
     public int SwingConfirmationBars { get; set; } = 2;
     public int RealizedVolPeriods { get; set; } = 60;
     public int VolumeWindow { get; set; } = 100;
+
+    /// <summary>
+    /// Builds the set of timeframes to aggregate, given the three that must be present.
+    ///
+    /// Anything FASTER than the signal timeframe is dropped: no layer reads such a series,
+    /// and on a one-minute signal an extra series is real work on every bar. The signal,
+    /// context and correlation timeframes are always included, in ascending order.
+    /// </summary>
+    public static Tf[] BuildTimeframeSet(Tf signal, Tf context, Tf correlation)
+    {
+        var all = new[] { Tf.M1, Tf.M3, Tf.M5, Tf.M15, Tf.H1, Tf.H4 };
+        var result = new List<Tf>();
+
+        for (int i = 0; i < all.Length; i++)
+        {
+            if ((int)all[i] >= (int)signal) result.Add(all[i]);
+        }
+
+        foreach (Tf required in new[] { signal, context, correlation })
+        {
+            if (!result.Contains(required)) result.Add(required);
+        }
+
+        result.Sort((a, b) => ((int)a).CompareTo((int)b));
+        return result.ToArray();
+    }
+
+    /// <summary>
+    /// Applies a signal/context pair, rebuilding the timeframe set and keeping the
+    /// correlation timeframe from running faster than the signal — on a faster series it
+    /// would measure microstructure noise rather than the relationship between instruments.
+    /// </summary>
+    public void UseTimeframes(Tf signal, Tf context, Tf correlation)
+    {
+        SignalTimeframe = signal;
+        ContextTimeframe = context;
+
+        Tf effectiveCorrelation = (int)correlation < (int)signal ? signal : correlation;
+        Timeframes = BuildTimeframeSet(signal, context, effectiveCorrelation);
+    }
 
     internal void Validate(List<string> problems)
     {

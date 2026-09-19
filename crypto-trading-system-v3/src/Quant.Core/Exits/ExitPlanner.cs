@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Quant.Core.Config;
 using Quant.Core.Data;
 using Quant.Core.Ev;
@@ -66,12 +67,29 @@ public sealed class ExitPlanner
 
         double sign = direction == Side.Long ? 1 : -1;
 
-        // --- Candidate stop distances, all in price units ---------------------------------
-        double atrStop = atr * _config.AtrStopMultiple;
+        // --- Кандидаты на стоп, в единицах цены -------------------------------------------
+        //
+        // Порядок — по убыванию защищённости. Выбирается самый защищённый из тех, что
+        // УКЛАДЫВАЮТСЯ в допустимые границы, а не просто самый широкий.
+        //
+        // Различие существенное. Брать максимум и затем отказываться от сделки, если он
+        // вышел за верхнюю границу, означает выбрасывать сигнал всякий раз, когда
+        // структурный уровень или точка инвалидации оказались далеко — а в волатильном
+        // рынке это норма, и именно это отклоняло больше половины кандидатов. Более узкий
+        // кандидат при этом был совершенно приемлем.
+        double maxDistance = atr * _config.MaxStopInAtr;
 
-        double structureStop = atrStop;
-        StopMethod method = StopMethod.Atr;
+        var candidates = new List<(double Distance, StopMethod Method)>(3);
 
+        // 1. Уровень инвалидации стратегии — самый осмысленный: стратегия знает, что именно
+        //    опровергнет её тезис, и стоп внутри этого уровня выбивает работающую сделку.
+        if (leader?.InvalidationPrice != null)
+        {
+            double invalidationDistance = sign * (entryPrice - leader.InvalidationPrice.Value);
+            if (invalidationDistance > 0) candidates.Add((invalidationDistance, StopMethod.StrategyInvalidation));
+        }
+
+        // 2. Структурный уровень с буфером.
         SwingStructure structure = series.Structure;
         bool haveStructure = direction == Side.Long
             ? structure.TryGetSupportBelow(entryPrice, out SwingPoint level)
@@ -79,39 +97,46 @@ public sealed class ExitPlanner
 
         if (haveStructure)
         {
-            double candidate = Math.Abs(entryPrice - level.Price) + (atr * _config.StructureStopBufferAtr);
-            if (candidate > 0)
-            {
-                structureStop = candidate;
-                method = StopMethod.Structure;
-            }
+            double structureDistance = Math.Abs(entryPrice - level.Price) + (atr * _config.StructureStopBufferAtr);
+            if (structureDistance > 0) candidates.Add((structureDistance, StopMethod.Structure));
         }
 
-        double chosen = Math.Max(atrStop, structureStop);
+        // 3. Базовый кандидат от волатильности — есть всегда.
+        double atrStop = atr * _config.AtrStopMultiple;
+        candidates.Add((atrStop, StopMethod.Atr));
 
-        // The strategy's own invalidation level wins when it is wider than the generic
-        // candidates: the strategy knows what would disprove its thesis, and a stop inside
-        // that level exits a trade that is still working.
-        if (leader?.InvalidationPrice != null)
+        // Самый широкий из допустимых.
+        double chosen = -1;
+        StopMethod method = StopMethod.Atr;
+
+        for (int i = 0; i < candidates.Count; i++)
         {
-            double invalidationDistance = sign * (entryPrice - leader.InvalidationPrice.Value);
-            if (invalidationDistance > 0 && invalidationDistance > chosen)
-            {
-                chosen = invalidationDistance;
-                method = StopMethod.StrategyInvalidation;
-            }
+            (double distance, StopMethod candidateMethod) = candidates[i];
+            if (distance > maxDistance) continue;
+            if (distance > chosen) { chosen = distance; method = candidateMethod; }
         }
 
-        // --- MAE floor (spec section 45) ---------------------------------------------------
+        if (chosen <= 0)
+        {
+            // Даже базовый кандидат не укладывается — торговать нечем.
+            return ExitPlan.Rejected(NoTradeReason.InvalidStopPlacement,
+                $"stop of {atrStop / atr:F2} ATR exceeds the {_config.MaxStopInAtr:F2} ATR maximum and no narrower candidate exists");
+        }
+
+        // --- Нижние границы --------------------------------------------------------------
+        // В отличие от кандидатов выше, это не предпочтения, а ограничения: они только
+        // расширяют стоп, и обойти их выбором другого кандидата нельзя.
+
+        // Распределение MAE (раздел 45): стоп внутри области, куда победители регулярно
+        // проседают, превращает победителей в проигравших.
         (SegmentStats stats, double trust) = _performance.BestAvailable(
             leader?.StrategyName ?? "unknown", regime, data.SymbolName, _config.MinSampleForMaeStops);
 
         if (stats.MaeSampleSize >= _config.MinSampleForMaeStops && trust >= 0.5)
         {
-            // MAE is recorded in R against the stop that was used at the time, so it is
-            // scaled by the candidate distance to convert it back to price units.
-            double maeQuantileR = stats.MaeQuantile(_config.MaeStopQuantile);
-            double maeFloor = maeQuantileR * chosen;
+            // MAE записан в R против стопа, действовавшего на тот момент, поэтому
+            // масштабируется выбранным расстоянием обратно в единицы цены.
+            double maeFloor = stats.MaeQuantile(_config.MaeStopQuantile) * chosen;
             if (maeFloor > chosen)
             {
                 chosen = maeFloor;
@@ -119,14 +144,14 @@ public sealed class ExitPlanner
             }
         }
 
-        // --- Broker minimum -----------------------------------------------------------------
+        // Минимум брокера.
         if (spec.MinStopLossDistancePrice > 0 && chosen < spec.MinStopLossDistancePrice)
         {
             chosen = spec.MinStopLossDistancePrice;
             method = StopMethod.BrokerMinimum;
         }
 
-        // --- Sanity bounds (spec section 42) --------------------------------------------------
+        // --- Проверка границ (раздел 42) ---------------------------------------------------
         double stopInAtr = chosen / atr;
 
         if (stopInAtr < _config.MinStopInAtr)
@@ -137,8 +162,9 @@ public sealed class ExitPlanner
 
         if (stopInAtr > _config.MaxStopInAtr)
         {
+            // Сюда можно попасть только после нижних границ, которые обойти нельзя.
             return ExitPlan.Rejected(NoTradeReason.InvalidStopPlacement,
-                $"stop of {stopInAtr:F2} ATR is too wide to be economic (maximum {_config.MaxStopInAtr:F2} ATR)");
+                $"stop widened to {stopInAtr:F2} ATR by {method}, beyond the {_config.MaxStopInAtr:F2} ATR maximum");
         }
 
         // --- Economic viability ------------------------------------------------------------

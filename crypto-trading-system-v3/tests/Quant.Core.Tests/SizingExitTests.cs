@@ -686,6 +686,79 @@ public class ExitPlannerTests
     }
 
     [Fact]
+    public void AnOverlyWideInvalidationFallsBackToTheAtrStopInsteadOfRefusingTheTrade()
+    {
+        // Предпочитать более защищённый стоп правильно: стоп внутри шума превращает
+        // победителей в проигравших. Но когда структурный уровень или точка инвалидации
+        // оказываются за границей допустимого — а в волатильном рынке это норма —
+        // отказываться от сделки нельзя, если более узкий кандидат вполне приемлем.
+        var config = new EngineConfig();
+        PipelineHarness h = WarmMarket(config);
+        ExitPlanner planner = Planner(config, out _);
+
+        double atr = h.Data.Signal.Atr.Value;
+        double entry = h.Data.Signal.Last.Close;
+
+        var absurdlyWide = new StrategySignal
+        {
+            StrategyName = "T", Direction = Side.Long, Confidence = 0.8,
+            InvalidationPrice = entry - (atr * 12.0),   // далеко за MaxStopInAtr
+        };
+
+        ExitPlan plan = planner.Build(h.Spec, h.Data, Side.Long, entry, absurdlyWide, MarketRegime.TrendUp, SmallCost(atr));
+
+        Assert.True(plan.IsValid,
+            $"Сделка отклонена вместо отката к ATR-стопу: {plan.RejectionReason} ({plan.Detail})");
+        Assert.InRange(plan.StopInAtr, config.Exit.MinStopInAtr, config.Exit.MaxStopInAtr);
+        Assert.NotEqual(StopMethod.StrategyInvalidation, plan.StopMethod);
+    }
+
+    [Fact]
+    public void TheWidestAcceptableCandidateIsStillPreferred()
+    {
+        // Откат к более узкому кандидату не должен превратиться в «всегда самый узкий».
+        var config = new EngineConfig();
+        PipelineHarness h = WarmMarket(config);
+        ExitPlanner planner = Planner(config, out _);
+
+        double atr = h.Data.Signal.Atr.Value;
+        double entry = h.Data.Signal.Last.Close;
+
+        ExitPlan generic = planner.Build(h.Spec, h.Data, Side.Long, entry, null, MarketRegime.TrendUp, SmallCost(atr));
+
+        var withinBounds = new StrategySignal
+        {
+            StrategyName = "T", Direction = Side.Long, Confidence = 0.8,
+            InvalidationPrice = entry - (atr * 3.0),    // шире базового, но внутри границ
+        };
+
+        ExitPlan preferred = planner.Build(h.Spec, h.Data, Side.Long, entry, withinBounds, MarketRegime.TrendUp, SmallCost(atr));
+
+        Assert.True(preferred.IsValid, preferred.Detail);
+        Assert.True(preferred.StopDistance > generic.StopDistance);
+        Assert.Equal(StopMethod.StrategyInvalidation, preferred.StopMethod);
+    }
+
+    [Fact]
+    public void ATradeIsStillRefusedWhenEvenTheNarrowestCandidateIsUnacceptable()
+    {
+        // Отказ обязан остаться возможным: если даже базовый ATR-кандидат выходит за
+        // границы, торговать нечем.
+        var config = new EngineConfig();
+        config.Exit.MaxStopInAtr = 1.0;
+        config.Exit.AtrStopMultiple = 1.6;          // базовый кандидат уже за границей
+
+        PipelineHarness h = WarmMarket(config);
+        ExitPlanner planner = Planner(config, out _);
+
+        double atr = h.Data.Signal.Atr.Value;
+        ExitPlan plan = planner.Build(h.Spec, h.Data, Side.Long, h.Data.Signal.Last.Close, null, MarketRegime.TrendUp, SmallCost(atr));
+
+        Assert.False(plan.IsValid);
+        Assert.Equal(NoTradeReason.InvalidStopPlacement, plan.RejectionReason);
+    }
+
+    [Fact]
     public void TargetsAreWiderInTrendsAndTighterInRanges()
     {
         var config = new EngineConfig();

@@ -93,6 +93,30 @@ public sealed class DecisionJournal
     public void Write(string message) => _sink.Write(message);
 
     /// <summary>
+    /// Самая частая причина отказа и её доля. Возвращает false, когда отказов не было.
+    ///
+    /// Это главный диагностический признак работающей системы. Одна причина, занимающая
+    /// подавляющее большинство отказов, почти всегда означает не рынок, а порог, не
+    /// подходящий для этого брокера или инструмента.
+    /// </summary>
+    public bool TryGetLeadingRejection(out NoTradeReason reason, out double share)
+    {
+        reason = NoTradeReason.None;
+        share = 0;
+
+        if (TotalRejected == 0) return false;
+
+        int best = 0;
+        foreach (KeyValuePair<NoTradeReason, int> kv in _reasonCounts)
+        {
+            if (kv.Value > best) { best = kv.Value; reason = kv.Key; }
+        }
+
+        share = (double)best / TotalRejected;
+        return best > 0;
+    }
+
+    /// <summary>
     /// Summary of why the system has been declining to trade.
     ///
     /// This is the most useful diagnostic the journal produces. A system that takes no

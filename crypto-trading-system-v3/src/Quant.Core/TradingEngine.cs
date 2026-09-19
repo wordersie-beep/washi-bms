@@ -173,7 +173,24 @@ public sealed class TradingEngine
     /// <summary>
     /// Основной цикл: вызывается на закрытии бара сигнального таймфрейма.
     /// </summary>
-    public void OnBarClosed(DateTime nowUtc, string symbolName, Tf timeframe, in Candle bar)
+    /// <param name="isWarmUp">
+    /// true — бар ИСТОРИЧЕСКИЙ, подаётся при старте для наполнения индикаторов.
+    ///
+    /// В этом режиме выполняется всё, что накапливает состояние рынка — ряды, признаки,
+    /// режим с его гистерезисом, — и НЕ выполняется ничего, что принимает решения или
+    /// обращается наружу.
+    ///
+    /// Разделение обязательно. Без него прогрев пятисот баров означает пятьсот оценок
+    /// риска по ценам двухдневной давности, пятьсот попыток входа по котировкам, которых
+    /// уже нет, сверку с брокером на историческом времени и пятьсот записей состояния —
+    /// причём дневная точка отсчёта окажется привязана к историческому дню, и дневной
+    /// лимит убытка после этого считается от капитала, которого на счёте никогда не было.
+    /// Торговля при этом не происходит только случайно: котировки во время прогрева ещё
+    /// нет, и проверка качества данных отвергает кандидата. Полагаться на случайную защиту
+    /// нельзя, а журнал она всё равно забивает сотнями отказов, за которыми не видно
+    /// настоящих.
+    /// </param>
+    public void OnBarClosed(DateTime nowUtc, string symbolName, Tf timeframe, in Candle bar, bool isWarmUp = false)
     {
         SymbolDataSet data = Data(symbolName);
         if (data == null) return;
@@ -190,7 +207,10 @@ public sealed class TradingEngine
         if (timeframe != _config.Data.SignalTimeframe) return;
 
         _anomaly.OnBarClosed();
-        _filterLedger.OnBarClosed(symbolName, bar.High, bar.Low);
+
+        // Учёт ценности фильтров отслеживает ОТКЛОНЁННЫЕ сигналы. Во время прогрева
+        // решений не принимается, отклонять нечего.
+        if (!isWarmUp) _filterLedger.OnBarClosed(symbolName, bar.High, bar.Low);
 
         if (!data.IsReady) return;
 
@@ -206,6 +226,10 @@ public sealed class TradingEngine
         _latestFeatures[symbolName] = features;
         _regimes[symbolName] = _regimeModels[symbolName].Classify(features);
         _lastAnomaly = _anomaly.Evaluate(features);
+
+        // Прогрев заканчивается здесь. Всё выше накапливает состояние рынка и обязано
+        // выполняться; всё ниже принимает решения и обращается наружу.
+        if (isWarmUp) return;
 
         // 2. Состояние счёта и риск.
         AccountSnapshot account = _broker.GetAccount();
@@ -727,6 +751,61 @@ public sealed class TradingEngine
             RejectionReason = outcome?.Reason ?? NoTradeReason.None,
             RejectionDetail = outcome?.Detail,
         };
+
+    /// <summary>
+    /// Одна строка «я жив и вот что делаю».
+    ///
+    /// Существует потому, что молчание правильно работающей системы неотличимо от
+    /// молчания сломанной. На настройках по умолчанию бот отклоняет подавляющее
+    /// большинство сигналов и пишет отказ в журнал только при смене причины — то есть
+    /// после первых строк лог замолкает. Без периодического признака жизни единственный
+    /// способ узнать, жив ли процесс, — ждать сделку, которой может не быть неделями.
+    ///
+    /// Печатается по таймеру, а не по рыночным данным: если бар не приходит, это ровно тот
+    /// случай, когда сообщение нужнее всего.
+    /// </summary>
+    public string RenderHeartbeat(DateTime nowUtc)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendFormat("[жив] {0:HH:mm:ss}Z", nowUtc);
+
+        foreach (KeyValuePair<string, SymbolDataSet> kv in _data)
+        {
+            SymbolDataSet data = kv.Value;
+            sb.AppendFormat(" | {0} баров {1}", kv.Key, data.Signal.BarsProcessed);
+
+            if (!data.IsReady)
+            {
+                long remaining = data.SignalBarsRemaining;
+                sb.Append(remaining > 0
+                    ? $" — ПРОГРЕВ, нужно ещё {remaining}"
+                    : " — ПРОГРЕВ, ждём контекстный таймфрейм");
+                continue;
+            }
+
+            if (_regimes.TryGetValue(kv.Key, out RegimeAssessment regime) && regime.Primary != MarketRegime.Unknown)
+            {
+                sb.AppendFormat(" {0}({1:P0})", regime.Primary, regime.Confidence);
+            }
+        }
+
+        sb.AppendFormat(" | риск {0}", _lastRisk.State);
+        if (!_lastRisk.AllowsNewPositions) sb.AppendFormat(" [БЛОКИРОВКА: {0}]", _lastRisk.BlockingReason);
+
+        sb.AppendFormat(" | позиций {0}", _positions.Count);
+
+        long decisions = _journal.TotalAccepted + _journal.TotalRejected;
+        sb.AppendFormat(" | решений {0} (принято {1})", decisions, _journal.TotalAccepted);
+
+        if (_journal.TryGetLeadingRejection(out NoTradeReason reason, out double share))
+        {
+            sb.AppendFormat(" | чаще всего: {0} {1:P0}", reason, share);
+        }
+
+        if (_haltedByReconciliation) sb.Append(" | !! ОСТАНОВЛЕН ПО СВЕРКЕ !!");
+
+        return sb.ToString();
+    }
 
     public string RenderDashboard(DateTime nowUtc)
     {

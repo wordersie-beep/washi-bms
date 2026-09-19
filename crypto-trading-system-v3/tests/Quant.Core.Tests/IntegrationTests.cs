@@ -49,6 +49,29 @@ internal sealed class EngineHarness
     public DateTime LastTimeUtc { get; private set; }
 
     /// <summary>Прогоняет поток сигнальных баров через весь движок, включая стопы брокера.</summary>
+    /// <summary>Прогоняет бары в режиме ПРОГРЕВА: наполняет данные, но не принимает решений.</summary>
+    public void FeedWarmUp(IEnumerable<Candle> signalBars)
+    {
+        int signalMinutes = (int)Config.Data.SignalTimeframe;
+
+        foreach (Candle bar in signalBars)
+        {
+            LastTimeUtc = bar.OpenTimeUtc.AddMinutes(signalMinutes);
+
+            foreach (Tf tf in Config.Data.Timeframes)
+            {
+                if ((int)tf < signalMinutes) continue;
+
+                int ratio = Math.Max(1, (int)tf / signalMinutes);
+                _pending[tf].Add(bar);
+                if (_pending[tf].Count < ratio) continue;
+
+                Engine.OnBarClosed(LastTimeUtc, Symbol, tf, Aggregate(_pending[tf]), isWarmUp: true);
+                _pending[tf].Clear();
+            }
+        }
+    }
+
     public void Feed(IEnumerable<Candle> signalBars, double spreadFraction = 0.0002)
     {
         int signalMinutes = (int)Config.Data.SignalTimeframe;
