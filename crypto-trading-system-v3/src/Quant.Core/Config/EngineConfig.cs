@@ -434,6 +434,21 @@ public sealed class PortfolioConfig
     /// <summary>Candidates considered per decision cycle before ranking picks the best.</summary>
     public int MaxCandidatesPerCycle { get; set; } = 8;
 
+    /// <summary>
+    /// Окно сбора кандидатов, секунды.
+    ///
+    /// Бары разных инструментов закрываются отдельными событиями платформы, приходящими
+    /// одно за другим. Исполнять каждое немедленно — значит отдавать бюджет риска тому,
+    /// чьё событие пришло первым, а не лучшей возможности: очерёдность событий не имеет
+    /// никакого отношения к качеству сигналов. Поэтому кандидаты, прошедшие все фильтры,
+    /// собираются в пачку, ранжируются и исполняются по убыванию оценки.
+    ///
+    /// Окно намеренно короткое. Оно закрывается досрочно, как только отчитались все
+    /// инструменты с этим временем бара — то есть в обычной работе задержки нет вовсе, а
+    /// окно служит лишь страховкой на случай молчащего инструмента.
+    /// </summary>
+    public double CandidateBatchWindowSeconds { get; set; } = 2.0;
+
     /// <summary>Symbol whose regime defines the market-wide crypto context (spec sections 25-26).</summary>
     public string BenchmarkSymbol { get; set; } = "BTCUSD";
 
@@ -449,6 +464,9 @@ public sealed class PortfolioConfig
         if (ClusterThreshold <= 0 || ClusterThreshold >= 1) problems.Add("ClusterThreshold must be in (0, 1).");
         if (MaxOpenPositions < 1) problems.Add("MaxOpenPositions must be at least 1.");
         if (MaxPositionsPerSymbol < 1) problems.Add("MaxPositionsPerSymbol must be at least 1.");
+        if (MaxCandidatesPerCycle < 1) problems.Add("MaxCandidatesPerCycle must be at least 1 or no candidate could ever be executed.");
+        if (CandidateBatchWindowSeconds < 0) problems.Add("CandidateBatchWindowSeconds cannot be negative.");
+        if (CandidateBatchWindowSeconds > 30) problems.Add("CandidateBatchWindowSeconds above 30 delays entries far past the signal that produced them.");
         if (BenchmarkInfluence < 0 || BenchmarkInfluence > 0.5) problems.Add("BenchmarkInfluence must be in [0, 0.5]; the benchmark adjusts, it does not decide.");
     }
 }
@@ -737,6 +755,22 @@ public sealed class AdaptationConfig
     /// <summary>Shadow trades with positive expectancy required before reactivation (spec section 24).</summary>
     public int ShadowTradesForRecovery { get; set; } = 25;
 
+    /// <summary>
+    /// Сколько виртуальных позиций одной отключённой стратегии ведётся одновременно.
+    ///
+    /// Лимит нужен не ради экономии памяти, а ради независимости наблюдений: десяток
+    /// виртуальных сделок, открытых на одном движении рынка, — это одно наблюдение,
+    /// посчитанное десять раз, и порог восстановления был бы взят фиктивной статистикой.
+    /// </summary>
+    public int MaxConcurrentShadowPositions { get; set; } = 3;
+
+    /// <summary>
+    /// Стоп по времени для виртуальной сделки, если план выхода его не задал. Без него
+    /// виртуальная позиция в боковике могла бы не закрыться никогда и навсегда занять
+    /// место в лимите наблюдений.
+    /// </summary>
+    public int ShadowFallbackTimeStopBars { get; set; } = 48;
+
     /// <summary>Weight a recovered strategy resumes at. Recovery is cautious by construction.</summary>
     public double RecoveryWeightFraction { get; set; } = 0.35;
 
@@ -759,5 +793,7 @@ public sealed class AdaptationConfig
         if (RecoveryWeightFraction <= 0 || RecoveryWeightFraction > 1) problems.Add("RecoveryWeightFraction must be in (0, 1].");
         if (AdaptationIntervalMinutes < 1) problems.Add("AdaptationIntervalMinutes must be at least 1.");
         if (ShadowTradesForRecovery < 10) problems.Add("ShadowTradesForRecovery below 10 is not evidence of recovery.");
+        if (MaxConcurrentShadowPositions < 1) problems.Add("MaxConcurrentShadowPositions must be at least 1 or disabled strategies can never recover.");
+        if (ShadowFallbackTimeStopBars < 1) problems.Add("ShadowFallbackTimeStopBars must be positive.");
     }
 }

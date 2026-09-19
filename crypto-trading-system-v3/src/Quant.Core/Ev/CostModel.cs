@@ -84,9 +84,14 @@ public sealed class CostModel
     {
         if (spec == null || stopDistance <= 0 || price <= 0)
         {
-            // An uncomputable cost is treated as a prohibitive one, so the trade is refused
-            // rather than taken on an unknown cost basis.
-            return new CostEstimate(0, 0, 0, stopDistance > 0 ? stopDistance : 1);
+            // An uncomputable cost is treated as a PROHIBITIVE one.
+            //
+            // Returning zero here would have been the opposite: a trade whose cost basis is
+            // unknown would look like the cheapest trade available, and would therefore be
+            // preferred by expected value and by opportunity ranking. Charging a full 1R
+            // guarantees the expected-value gate refuses it instead.
+            double denominator = stopDistance > 0 ? stopDistance : 1;
+            return new CostEstimate(denominator, 0, 0, denominator);
         }
 
         double spread = Math.Max(0, costingSpread);

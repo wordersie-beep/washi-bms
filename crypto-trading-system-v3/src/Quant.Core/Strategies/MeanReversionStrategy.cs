@@ -67,9 +67,22 @@ public sealed class MeanReversionStrategy : StrategyBase
         }
 
         double stretch = Math.Abs(f.BollingerPercentB - 0.5) * 2.0;
+        // Зеркальные пороги. Асимметричная формула здесь означала бы, что одна сторона
+        // проверяет перекупленность, а другая не проверяет ничего: выражение вида
+        // LinearScale(70 - Rsi, 0, 14) равно единице при любом RSI ниже 56, то есть
+        // практически всегда.
         double oscillatorExtreme = side == Side.Short
             ? MathUtil.LinearScale(f.Rsi, 68, 82)
-            : MathUtil.LinearScale(70 - f.Rsi, 0, 14);
+            : MathUtil.LinearScale(32 - f.Rsi, -14, 14);
+
+        // Вето, а не множитель. Combine — геометрическое среднее шести членов, и обнуление
+        // одного из них снижает уверенность лишь вдвое: возврат к средней от RSI 50 остался
+        // бы возможным, просто с меньшей уверенностью. Для стратегии, которая торгует ИМЕННО
+        // крайность, это не «сигнал послабее», а отсутствие причины входить.
+        if (oscillatorExtreme < 0.15)
+        {
+            return StrategySignal.Neutral(Name, $"осциллятор не в крайности (rsi {f.Rsi:F0})");
+        }
 
         // A range needs two walls. Room back toward the middle is what the trade is paid for.
         double roomToMean = side == Side.Short

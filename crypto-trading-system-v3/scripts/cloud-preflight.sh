@@ -50,7 +50,8 @@ fi
 echo "== 2. Тесты =="
 TEST_OUTPUT=$(cd tests/Quant.Core.Tests && dotnet test --nologo -v q 2>&1)
 if echo "$TEST_OUTPUT" | grep -q "Passed!"; then
-    echo "  OK: $(echo "$TEST_OUTPUT" | grep -oE 'Passed:[[:space:]]+[0-9]+' | head -1)"
+    TEST_COUNT=$(echo "$TEST_OUTPUT" | grep -oE 'Passed:[[:space:]]+[0-9]+' | head -1 | grep -oE '[0-9]+')
+    echo "  OK: $TEST_COUNT тестов"
 else
     echo "  ПРОВАЛ: тесты не прошли"
     echo "$TEST_OUTPUT" | grep -E "Failed|error" | head -10 | sed 's/^/      /'
@@ -65,7 +66,32 @@ scan "Chart / ChartObjects / System.Windows / System.Drawing" \
      "(^|[^a-zA-Z])Chart(Objects|Indicators|Robots|Templates)?\.|System\.Windows|System\.Drawing" \
      "$CORE" "$BOT"
 
-echo "== 5. Нет файловых, сетевых операций и динамической загрузки =="
+echo "== 5. Документация не разошлась с кодом =="
+# Цифры в документации уже один раз отстали от кода и описывали систему, которой нет.
+# Дешевле проверять их машинно, чем помнить об их обновлении.
+if [ -n "${TEST_COUNT:-}" ]; then
+    STALE=$(grep -rlE "(^|[^0-9])(2[0-9]{2}|1[0-9]{2}) (тест|теста|тестов)" README.md docs/*.md INSTALL.md 2>/dev/null \
+            | xargs grep -lE "(^|[^0-9])(2[0-9]{2}|1[0-9]{2}) (тест|теста|тестов)" 2>/dev/null \
+            | xargs grep -hoE "(^|[^0-9])(2[0-9]{2}|1[0-9]{2}) (тест|теста|тестов)" 2>/dev/null \
+            | grep -oE "[0-9]+" | sort -u | grep -v "^${TEST_COUNT}$" || true)
+
+    STALE_CHECK=$(grep -rhoE "[0-9]+/[0-9]+ проходят" docs/*.md 2>/dev/null | grep -v "^${TEST_COUNT}/${TEST_COUNT} " || true)
+
+    if [ -n "$STALE" ] || [ -n "$STALE_CHECK" ]; then
+        echo "  ПРОВАЛ: в документации указано другое число тестов (сейчас $TEST_COUNT)"
+        [ -n "$STALE" ] && echo "      найдено: $(echo "$STALE" | tr '\n' ' ')"
+        [ -n "$STALE_CHECK" ] && echo "      найдено: $STALE_CHECK"
+        grep -rnE "(^|[^0-9])(2[0-9]{2}|1[0-9]{2}) (тест|теста|тестов)|[0-9]+/[0-9]+ проходят" README.md docs/*.md INSTALL.md \
+            | grep -vE "(^|[^0-9])${TEST_COUNT} (тест|теста|тестов)|${TEST_COUNT}/${TEST_COUNT} проходят" | sed 's/^/      /'
+        FAILURES=$((FAILURES + 1))
+    else
+        echo "  OK: число тестов в документации совпадает с фактическим ($TEST_COUNT)"
+    fi
+else
+    echo "  ПРОПУЩЕНО: число тестов неизвестно"
+fi
+
+echo "== 6. Нет файловых, сетевых операций и динамической загрузки =="
 scan "File / Directory / HttpClient / WebRequest / Assembly.Load" \
      "(^|[^a-zA-Z])(File|Directory)\.|HttpClient|WebRequest|Assembly\.Load" \
      "$CORE" "$BOT"

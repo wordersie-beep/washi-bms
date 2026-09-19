@@ -76,7 +76,11 @@ public sealed class CTraderBroker : IBroker
 
             if (result == null || !result.IsSuccessful)
             {
-                return BrokerResult.Fail(DescribeError(result), IsTransient(result));
+                return OutcomeIsUnknown(result)
+                    ? BrokerResult.Unknown(DescribeError(result))
+                    : OutcomeIsUnknown(result)
+                    ? BrokerResult.Unknown(DescribeError(result))
+                    : BrokerResult.Fail(DescribeError(result), IsTransient(result));
             }
 
             Position position = result.Position;
@@ -84,7 +88,8 @@ public sealed class CTraderBroker : IBroker
         }
         catch (Exception ex)
         {
-            return BrokerResult.Fail(ex.GetType().Name + ": " + ex.Message, isTransient: true);
+            // Исключение в момент отправки: приказ мог дойти до биржи, а мог и нет.
+            return BrokerResult.Unknown(ex.GetType().Name + ": " + ex.Message);
         }
     }
 
@@ -95,24 +100,36 @@ public sealed class CTraderBroker : IBroker
             Position position = _robot.Positions.FindById((int)positionId);
             if (position == null) return BrokerResult.Fail("позиция не найдена", isTransient: false);
 
-            double entryPrice = position.EntryPrice;
             double closingPrice = position.CurrentPrice;
 
-            TradeResult result = volumeInUnits <= 0 || volumeInUnits >= position.VolumeInUnits
+            // Объём снимается ДО отправки приказа. После закрытия объект Position уже
+            // изменён платформой — при полном закрытии он показывает нуль, при частичном
+            // остаток. Читать объём оттуда значило бы сообщить движку, что закрыто меньше,
+            // чем закрыто на самом деле: учёт разошёлся бы с брокером, сверка объявила бы
+            // расхождение и принудительно остановила торговлю.
+            double volumeBefore = position.VolumeInUnits;
+            bool fullClose = volumeInUnits <= 0 || volumeInUnits >= volumeBefore;
+
+            TradeResult result = fullClose
                 ? _robot.ClosePosition(position)
                 : _robot.ClosePosition(position, volumeInUnits);
 
             if (result == null || !result.IsSuccessful)
             {
-                return BrokerResult.Fail(DescribeError(result), IsTransient(result));
+                return OutcomeIsUnknown(result)
+                    ? BrokerResult.Unknown(DescribeError(result))
+                    : OutcomeIsUnknown(result)
+                    ? BrokerResult.Unknown(DescribeError(result))
+                    : BrokerResult.Fail(DescribeError(result), IsTransient(result));
             }
 
-            double closed = volumeInUnits <= 0 ? position.VolumeInUnits : Math.Min(volumeInUnits, position.VolumeInUnits);
+            double closed = fullClose ? volumeBefore : Math.Min(volumeInUnits, volumeBefore);
             return BrokerResult.Ok(positionId, closingPrice, closed);
         }
         catch (Exception ex)
         {
-            return BrokerResult.Fail(ex.GetType().Name + ": " + ex.Message, isTransient: true);
+            // Исключение в момент отправки: приказ мог дойти до биржи, а мог и нет.
+            return BrokerResult.Unknown(ex.GetType().Name + ": " + ex.Message);
         }
     }
 
@@ -130,11 +147,14 @@ public sealed class CTraderBroker : IBroker
 
             return result != null && result.IsSuccessful
                 ? BrokerResult.Ok(positionId, newStopPrice, position.VolumeInUnits)
-                : BrokerResult.Fail(DescribeError(result), IsTransient(result));
+                : OutcomeIsUnknown(result)
+                    ? BrokerResult.Unknown(DescribeError(result))
+                    : BrokerResult.Fail(DescribeError(result), IsTransient(result));
         }
         catch (Exception ex)
         {
-            return BrokerResult.Fail(ex.GetType().Name + ": " + ex.Message, isTransient: true);
+            // Исключение в момент отправки: приказ мог дойти до биржи, а мог и нет.
+            return BrokerResult.Unknown(ex.GetType().Name + ": " + ex.Message);
         }
     }
 
@@ -199,6 +219,20 @@ public sealed class CTraderBroker : IBroker
     /// Повторять BadVolume или NoMoney бессмысленно — условия не изменятся от повтора.
     /// Не повторять Timeout или Disconnected — значит терять сделки из-за секундного сбоя связи.
     /// </summary>
+    /// <summary>
+    /// Таймаут и обрыв связи означают, что ответа не получено, — а не что приказ не дошёл.
+    /// Остальные ошибки платформа возвращает, зная, что приказ отвергнут.
+    /// </summary>
+    private static bool OutcomeIsUnknown(TradeResult result)
+    {
+        if (result == null) return true;
+        if (!result.Error.HasValue) return true;
+
+        return result.Error.Value == ErrorCode.Timeout ||
+               result.Error.Value == ErrorCode.Disconnected ||
+               result.Error.Value == ErrorCode.TechnicalError;
+    }
+
     private static bool IsTransient(TradeResult result)
     {
         if (result == null) return true;

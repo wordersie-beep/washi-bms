@@ -55,10 +55,23 @@ public sealed class TradingEngine
     private readonly List<OpenPosition> _positions = new List<OpenPosition>();
     private readonly Dictionary<string, ExitPlan> _plans = new Dictionary<string, ExitPlan>(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Кандидаты, прошедшие все фильтры и ожидающие ранжирования.
+    ///
+    /// Бары разных инструментов приходят отдельными событиями. Без этой пачки бюджет риска
+    /// доставался бы тому, чьё событие пришло первым, — то есть распределялся бы очерёдностью
+    /// событий платформы, а не качеством возможностей.
+    /// </summary>
+    private readonly List<TradeCandidate> _pendingCandidates = new List<TradeCandidate>();
+    private readonly HashSet<string> _symbolsReportedThisCycle = new HashSet<string>(StringComparer.Ordinal);
+    private DateTime _cycleBarOpenTimeUtc = DateTime.MinValue;
+    private DateTime _cycleStartedUtc = DateTime.MinValue;
+
     private readonly StrategyRegistry _strategies;
     private readonly SignalCorrelationTracker _signalCorrelation;
     private readonly PerformanceStore _performance;
     private readonly StrategyWeightEngine _weights;
+    private readonly ShadowTracker _shadow;
     private readonly EnsembleVoter _voter;
     private readonly CalibrationTracker _calibration;
     private readonly BayesianProbabilityModel _probability;
@@ -105,6 +118,7 @@ public sealed class TradingEngine
         _signalCorrelation = new SignalCorrelationTracker(config.Strategy);
         _performance = new PerformanceStore(config.Adaptation);
         _weights = new StrategyWeightEngine(config.Adaptation, config.Strategy, _performance);
+        _shadow = new ShadowTracker(config.Adaptation);
         _voter = new EnsembleVoter(config.Strategy, _signalCorrelation, _weights);
 
         foreach (IStrategy s in _strategies.All)
@@ -145,6 +159,7 @@ public sealed class TradingEngine
     public CalibrationTracker Calibration => _calibration;
     public ExecutionQualityTracker ExecutionQuality => _executionQuality;
     public StrategyWeightEngine Weights => _weights;
+    public ShadowTracker Shadow => _shadow;
     public FilterValueLedger FilterLedger => _filterLedger;
     public CorrelationEngine Correlation => _correlation;
     public RiskEngine Risk => _risk;
@@ -235,20 +250,71 @@ public sealed class TradingEngine
         AccountSnapshot account = _broker.GetAccount();
         _lastRisk = _risk.Evaluate(nowUtc, account, _lastAnomaly.Severity, _anomaly.InRecoveryPeriod);
 
-        // 3. Сопровождение открытых позиций — ДО рассмотрения новых.
-        ManageOpenPositions(nowUtc, account);
+        BeginOrJoinCycle(nowUtc, symbolName, bar.OpenTimeUtc);
 
-        // 4. Периодические задачи.
+        // 3. Виртуальные позиции отключённых стратегий — их единственный путь обратно.
+        _shadow.OnBarClosed(nowUtc, symbolName, bar, _performance.Record);
+
+        // 4. Сопровождение открытых позиций — ДО рассмотрения новых.
+        ManageOpenPositions(nowUtc, account, symbolName);
+
+        // 5. Периодические задачи.
         MaybeReconcile(nowUtc);
         MaybeAdapt(nowUtc);
 
-        // 5. Новые входы.
+        // 6. Новые входы: кандидат встаёт в пачку этого бара.
         if (!_haltedByReconciliation)
         {
             ConsiderEntry(nowUtc, symbolName, data, features, account, global);
         }
 
+        // 7. Пачка исполняется, как только отчитались все инструменты.
+        TryCloseCycle(nowUtc);
+
         SaveState(nowUtc, account);
+    }
+
+    /// <summary>
+    /// Заводит виртуальные сделки по сигналам отключённых стратегий.
+    ///
+    /// Счётчик сигналов сам по себе бесполезен: восстановление требует ЗАПИСИ ИСХОДОВ, а не
+    /// факта, что сигналы были. Поэтому каждый такой сигнал получает настоящий план выхода
+    /// и настоящую оценку издержек — и дальше ведётся по барам до стопа, цели или времени.
+    /// </summary>
+    private void TrackDisabledSignals(
+        DateTime nowUtc, string symbolName, SymbolDataSet data, FeatureVector features,
+        RegimeAssessment regime, IReadOnlyList<StrategySignal> disabledSignals)
+    {
+        if (disabledSignals == null || disabledSignals.Count == 0) return;
+
+        for (int i = 0; i < disabledSignals.Count; i++)
+        {
+            StrategySignal signal = disabledSignals[i];
+            _weights.NoteShadowTrade(signal.StrategyName);
+
+            if (_shadow.OpenCountFor(signal.StrategyName) >= _config.Adaptation.MaxConcurrentShadowPositions) continue;
+
+            double entryPrice = signal.Direction == Side.Long ? data.LatestQuote.Ask : data.LatestQuote.Bid;
+            if (entryPrice <= 0) continue;
+
+            double atr = features.Atr;
+            if (atr <= 0) continue;
+
+            bool stressed = features.SpreadPercentile > 0.85 || features.AtrPercentile > 0.85;
+            CostEstimate costAtOneAtr = _costModel.Estimate(
+                data.Spec, data.Spread.CostingSpread(), atr, features.Price, stressed, _executionQuality.SlippageMultiplier);
+
+            ExitPlan plan = _exitPlanner.Build(
+                data.Spec, data, signal.Direction, entryPrice, signal, regime.Primary, costAtOneAtr);
+
+            if (!plan.IsValid) continue;
+
+            CostEstimate cost = _costModel.Estimate(
+                data.Spec, data.Spread.CostingSpread(), plan.StopDistance,
+                features.Price, stressed, _executionQuality.SlippageMultiplier);
+
+            _shadow.Open(nowUtc, symbolName, signal, plan, entryPrice, regime.Primary, features, cost.TotalR, _config.Mode);
+        }
     }
 
     /// <summary>Контекст рынка от эталонного инструмента (разделы 25–27).</summary>
@@ -291,7 +357,7 @@ public sealed class TradingEngine
             collectDisabled: true, out IReadOnlyList<StrategySignal> disabledSignals);
 
         // Отключённые стратегии продолжают наблюдаться виртуально — это их путь обратно.
-        for (int i = 0; i < disabledSignals.Count; i++) _weights.NoteShadowTrade(disabledSignals[i].StrategyName);
+        TrackDisabledSignals(nowUtc, symbolName, data, features, regime, disabledSignals);
 
         string signalId = ensemble.Leader == null
             ? null
@@ -384,7 +450,113 @@ public sealed class TradingEngine
 
         candidate.OpportunityScore = _ranker.Score(candidate, _positions);
 
-        Execute(nowUtc, candidate, account, exposure, entryPrice);
+        // Кандидат не исполняется здесь: он встаёт в пачку и будет исполнен после
+        // ранжирования против остальных возможностей этого же бара.
+        _pendingCandidates.Add(candidate);
+    }
+
+    /// <summary>
+    /// Отмечает, что инструмент отчитался по бару, и закрывает окно сбора, как только
+    /// отчитались все, у кого есть данные.
+    /// </summary>
+    private void BeginOrJoinCycle(DateTime nowUtc, string symbolName, DateTime barOpenTimeUtc)
+    {
+        if (barOpenTimeUtc != _cycleBarOpenTimeUtc)
+        {
+            // Пришёл бар НОВОГО времени, а прошлая пачка ещё не исполнена: кто-то из
+            // инструментов промолчал. Исполняем накопленное, не дожидаясь молчащего.
+            FlushPendingCandidates(nowUtc);
+
+            _cycleBarOpenTimeUtc = barOpenTimeUtc;
+            _cycleStartedUtc = nowUtc;
+            _symbolsReportedThisCycle.Clear();
+        }
+
+        _symbolsReportedThisCycle.Add(symbolName);
+    }
+
+    /// <summary>
+    /// Закрывает окно сбора, если все инструменты отчитались или окно истекло по времени.
+    /// Вызывается и после обработки бара, и с тика: тики идут часто, поэтому задержка
+    /// исполнения ограничена сверху окном, а не паузой до следующего бара.
+    /// </summary>
+    private void TryCloseCycle(DateTime nowUtc)
+    {
+        if (_pendingCandidates.Count == 0) return;
+
+        bool everyoneReported = _symbolsReportedThisCycle.Count >= _data.Count;
+        bool windowExpired = _cycleStartedUtc != DateTime.MinValue &&
+                             (nowUtc - _cycleStartedUtc).TotalSeconds >= _config.Portfolio.CandidateBatchWindowSeconds;
+
+        if (everyoneReported || windowExpired) FlushPendingCandidates(nowUtc);
+    }
+
+    /// <summary>
+    /// Ранжирует накопленных кандидатов и исполняет их по убыванию оценки.
+    ///
+    /// Лимиты портфеля пересчитываются ПЕРЕД КАЖДЫМ исполнением: первая открытая позиция
+    /// меняет и суммарный риск, и корреляционную картину, и потому кандидат, проходивший
+    /// лимиты в момент постановки в очередь, может их уже не проходить. Пропустить эту
+    /// проверку значило бы открыть пачку позиций, каждая из которых по отдельности
+    /// допустима, а вместе они превышают бюджет.
+    /// </summary>
+    private void FlushPendingCandidates(DateTime nowUtc)
+    {
+        if (_pendingCandidates.Count == 0) return;
+
+        var batch = new List<TradeCandidate>(_pendingCandidates);
+        _pendingCandidates.Clear();
+
+        AccountSnapshot account = _broker.GetAccount();
+        IReadOnlyList<TradeCandidate> ranked = _ranker.Rank(batch, _positions);
+
+        if (batch.Count > 1)
+        {
+            _journal.Write($"РАНЖИРОВАНИЕ: {batch.Count} кандидатов, к исполнению {ranked.Count}, " +
+                           $"лучший {ranked[0].SymbolName} ({ranked[0].OpportunityScore:F3})");
+        }
+
+        for (int i = 0; i < ranked.Count; i++)
+        {
+            TradeCandidate c = ranked[i];
+            double entryPrice = c.Direction == Side.Long ? c.Data.LatestQuote.Ask : c.Data.LatestQuote.Bid;
+
+            if (entryPrice <= 0)
+            {
+                RecordRejection(c, GateOutcome.Reject(NoTradeReason.DataQuality, "нет котировки в момент исполнения"), account);
+                continue;
+            }
+
+            PortfolioExposure exposure = _portfolio.Compute(_positions, account.Equity, _clusters);
+            GateOutcome portfolio = _gate.CheckPortfolio(c, _portfolio, exposure, _clusters, CountPositionsIn(c.SymbolName));
+
+            if (!portfolio.Passed)
+            {
+                RecordRejection(c, portfolio, account);
+                continue;
+            }
+
+            Execute(nowUtc, c, account, exposure, entryPrice);
+            account = _broker.GetAccount();
+        }
+
+        // Кандидаты, не поместившиеся в лимит на цикл, отклоняются явно — с причиной,
+        // которая видна в журнале, а не тихо исчезают.
+        for (int i = 0; i < batch.Count; i++)
+        {
+            if (Contains(ranked, batch[i])) continue;
+            RecordRejection(batch[i], GateOutcome.Reject(NoTradeReason.NotRankedHighEnough,
+                $"оценка {batch[i].OpportunityScore:F3} не вошла в {_config.Portfolio.MaxCandidatesPerCycle} лучших"), account);
+        }
+    }
+
+    private static bool Contains(IReadOnlyList<TradeCandidate> list, TradeCandidate item)
+    {
+        for (int i = 0; i < list.Count; i++)
+        {
+            if (ReferenceEquals(list[i], item)) return true;
+        }
+        return false;
     }
 
     private void Execute(DateTime nowUtc, TradeCandidate c, AccountSnapshot account, PortfolioExposure exposure, double entryPrice)
@@ -450,13 +622,26 @@ public sealed class TradingEngine
         _journal.RecordAcceptance(BuildRecord(c, accepted: true, null, account, exposure));
     }
 
-    private void ManageOpenPositions(DateTime nowUtc, AccountSnapshot account)
+    /// <param name="closedSymbol">
+    /// Символ, бар которого только что закрылся.
+    ///
+    /// Счётчик удержания продвигается ТОЛЬКО у позиций этого символа. Время-стоп задан в
+    /// барах сигнального таймфрейма конкретного инструмента; если считать закрытия любого
+    /// символа, то в портфеле из N инструментов — а эталонный добавляется всегда, значит
+    /// N не меньше двух — стоп по времени срабатывает в N раз раньше задуманного.
+    ///
+    /// Остальные позиции всё равно пересматриваются: цена по ним могла уйти, и стоп или
+    /// цель могли стать достижимы.
+    /// </param>
+    private void ManageOpenPositions(DateTime nowUtc, AccountSnapshot account, string closedSymbol)
     {
         for (int i = _positions.Count - 1; i >= 0; i--)
         {
             OpenPosition p = _positions[i];
             SymbolDataSet data = Data(p.SymbolName);
             if (data == null || !_plans.TryGetValue(p.TradeId, out ExitPlan plan)) continue;
+
+            bool ownBarClosed = string.Equals(p.SymbolName, closedSymbol, StringComparison.Ordinal);
 
             Quote quote = data.LatestQuote;
             if (!quote.IsWellFormed) continue;
@@ -466,7 +651,7 @@ public sealed class TradingEngine
             _latestFeatures.TryGetValue(p.SymbolName, out FeatureVector features);
 
             IReadOnlyList<ExitAction> actions = _positionManager.Evaluate(
-                p, plan, exitPrice, data.Spec, data, features, onClosedBar: true);
+                p, plan, exitPrice, data.Spec, data, features, onClosedBar: ownBarClosed);
 
             for (int a = 0; a < actions.Count; a++)
             {
@@ -474,9 +659,12 @@ public sealed class TradingEngine
                 if (p.CurrentVolumeInUnits <= 0) break;
             }
 
-            if (p.CurrentVolumeInUnits <= 0)
+            if (p.CurrentVolumeInUnits <= 0 || p.OutcomeRecorded)
             {
-                _positions.RemoveAt(i);
+                // Удаление по ссылке, а не по индексу: событие закрытия от платформы могло
+                // прийти синхронно внутри ApplyAction и уже сдвинуть список, и тогда
+                // RemoveAt(i) убрал бы ЧУЖУЮ позицию.
+                _positions.Remove(p);
                 _plans.Remove(p.TradeId);
             }
         }
@@ -531,6 +719,11 @@ public sealed class TradingEngine
     /// <summary>Фиксирует закрытую сделку во всех слоях памяти системы.</summary>
     public void CloseTrade(DateTime nowUtc, OpenPosition p, double exitPrice, ExitReason reason, AccountSnapshot account)
     {
+        // Идемпотентность: позиция учитывается ровно один раз, каким бы путём ни пришло
+        // известие о её закрытии.
+        if (p.OutcomeRecorded) return;
+        p.OutcomeRecorded = true;
+
         double riskAmount = p.RiskAmount > 0 ? p.RiskAmount : p.RiskPerUnit * p.InitialVolumeInUnits;
         double netProfit = p.RealisedProfit - p.RealisedCommission;
         double r = riskAmount > 0 ? netProfit / riskAmount : 0;
@@ -615,7 +808,7 @@ public sealed class TradingEngine
 
             CloseTrade(nowUtc, p, exitPrice, reason, _broker.GetAccount());
 
-            _positions.RemoveAt(i);
+            _positions.Remove(p);
             _plans.Remove(p.TradeId);
             return;
         }
@@ -643,6 +836,10 @@ public sealed class TradingEngine
             double price = p.Direction == Side.Long ? quote.Bid : quote.Ask;
             p.UpdateExcursions(price);
         }
+
+        // Страховка на случай молчащего инструмента: окно сбора кандидатов не должно
+        // оставаться открытым до следующего бара только потому, что кто-то не отчитался.
+        if (_pendingCandidates.Count > 0) TryCloseCycle(quote.TimeUtc);
     }
 
     private void MaybeReconcile(DateTime nowUtc)
@@ -684,6 +881,13 @@ public sealed class TradingEngine
 
         IReadOnlyList<string> changes = _weights.Review(nowUtc);
         for (int i = 0; i < changes.Count; i++) _journal.Write("АДАПТАЦИЯ: " + changes[i]);
+
+        // Стратегия, снова допущенная к торговле, больше не наблюдается виртуально: иначе
+        // одна и та же ситуация породила бы и настоящую сделку, и теневую.
+        foreach (KeyValuePair<string, Adaptation.StrategyState> kv in _weights.States)
+        {
+            if (kv.Value.Status != StrategyStatus.Disabled) _shadow.Forget(kv.Key);
+        }
     }
 
     private int CountPositionsIn(string symbolName)
@@ -918,6 +1122,8 @@ public sealed class TradingEngine
         for (int i = 0; i < state.Positions.Count; i++) persistedById[state.Positions[i].BrokerPositionId] = state.Positions[i];
 
         int recovered = 0, orphaned = 0;
+        var matched = new HashSet<long>();
+
         for (int i = 0; i < brokerPositions.Count; i++)
         {
             BrokerPosition bp = brokerPositions[i];
@@ -926,7 +1132,30 @@ public sealed class TradingEngine
             OpenPosition p = FromPersisted(pp, bp);
             _positions.Add(p);
             _plans[p.TradeId] = RebuildPlan(pp, p);
+            matched.Add(bp.PositionId);
             recovered++;
+        }
+
+        // Позиции, которые были открыты, а у брокера их больше нет: пока робот был
+        // выключен, сработал стоп, цель или ручное закрытие.
+        //
+        // Просто забыть их нельзя. Их исход не попал бы ни в статистику, ни в счётчик
+        // серии убытков, ни в калибровку — то есть перезапуск бесшумно стирал бы
+        // проигранные сделки, а именно они должны были бы ужесточить постуру риска.
+        int closedWhileOffline = 0;
+        for (int i = 0; i < state.Positions.Count; i++)
+        {
+            PersistedPosition pp = state.Positions[i];
+            if (matched.Contains(pp.BrokerPositionId)) continue;
+
+            RecordPositionClosedWhileOffline(nowUtc, pp);
+            closedWhileOffline++;
+        }
+
+        if (closedWhileOffline > 0)
+        {
+            _journal.Write($"ВОССТАНОВЛЕНИЕ: {closedWhileOffline} позиций закрылись, пока робот был выключен — " +
+                           "их исходы учтены в статистике и в счётчике серии.");
         }
 
         _journal.Write($"ВОССТАНОВЛЕНИЕ: {recovered} позиций восстановлено, {orphaned} без контекста, " +
@@ -937,6 +1166,68 @@ public sealed class TradingEngine
             _haltedByReconciliation = true;
             _risk.ForceHalt(nowUtc, $"{orphaned} позиций у брокера не имеют сохранённого контекста");
         }
+    }
+
+    /// <summary>
+    /// Учитывает позицию, закрывшуюся, пока робот был выключен.
+    ///
+    /// Точная цена выхода неизвестна: брокер её уже не показывает, а история сделок может
+    /// быть недоступна. Исход поэтому оценивается КОНСЕРВАТИВНО — как срабатывание стопа.
+    /// Это может недооценить результат, если на самом деле сработала цель, и такая ошибка
+    /// предпочтительна: она ужесточает постуру риска, тогда как противоположная ослабила бы
+    /// её на основании догадки.
+    /// </summary>
+    private void RecordPositionClosedWhileOffline(DateTime nowUtc, PersistedPosition pp)
+    {
+        var side = (Side)pp.Direction;
+        double exitPrice = pp.CurrentStopPrice > 0 ? pp.CurrentStopPrice : pp.InitialStopPrice;
+
+        double perUnit = side == Side.Long ? exitPrice - pp.EntryPrice : pp.EntryPrice - exitPrice;
+        double gross = perUnit * pp.CurrentVolumeInUnits;
+        double riskAmount = pp.RiskAmount > 0 ? pp.RiskAmount : pp.RiskPerUnit * pp.InitialVolumeInUnits;
+
+        var record = new TradeRecord
+        {
+            TradeId = pp.TradeId,
+            SignalId = pp.SignalId,
+            BrokerPositionId = pp.BrokerPositionId,
+            SymbolName = pp.SymbolName,
+            Direction = side,
+            StrategyName = pp.StrategyName,
+            Regime = (MarketRegime)pp.Regime,
+            EnsembleConfidence = pp.EnsembleConfidence,
+            EstimatedWinProbability = pp.EstimatedWinProbability,
+            ExpectedValueR = pp.ExpectedValueR,
+            PlannedRewardToRisk = pp.PlannedRewardToRisk,
+            HourUtc = pp.EntryTimeUtc.Hour,
+            DayOfWeek = pp.EntryTimeUtc.DayOfWeek,
+            Session = SessionClassifier.Classify(pp.EntryTimeUtc),
+            IsWeekend = SessionClassifier.IsWeekend(pp.EntryTimeUtc),
+            AtrAtEntry = pp.AtrAtEntry,
+            SpreadAtEntry = pp.SpreadAtEntry,
+            EntryTimeUtc = pp.EntryTimeUtc,
+            ExitTimeUtc = nowUtc,
+            EntryPrice = pp.EntryPrice,
+            RequestedEntryPrice = pp.EntryPrice,
+            ExitPrice = exitPrice,
+            InitialStopPrice = pp.InitialStopPrice,
+            InitialTargetPrice = pp.Target1Price,
+            VolumeInUnits = pp.InitialVolumeInUnits,
+            RiskAmount = riskAmount,
+            RiskFractionOfEquity = pp.RiskFractionOfEquity,
+            GrossProfit = gross,
+            NetProfit = gross,
+            R = riskAmount > 0 ? gross / riskAmount : 0,
+            MaeR = Math.Max(pp.MaxAdverseExcursionR, 1.0),
+            MfeR = pp.MaxFavourableExcursionR,
+            ExitReason = ExitReason.ManualOrExternal,
+            Mode = _config.Mode,
+        };
+
+        _performance.Record(record);
+        _probability.Observe(record);
+        _risk.OnTradeClosed(nowUtc, record.IsWin);
+        TradesClosed++;
     }
 
     private static PersistedPosition ToPersisted(OpenPosition p) => new PersistedPosition

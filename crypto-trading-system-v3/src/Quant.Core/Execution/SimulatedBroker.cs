@@ -25,6 +25,8 @@ public sealed class SimulatedBroker : IBroker
     private readonly CostModel _costModel;
     private readonly Pcg32 _rng;
     private readonly Dictionary<long, BrokerPosition> _positions = new Dictionary<long, BrokerPosition>();
+    private readonly Dictionary<string, SymbolSpec> _specs = new Dictionary<string, SymbolSpec>(StringComparer.Ordinal);
+    private readonly Dictionary<long, double> _commissionPaid = new Dictionary<long, double>();
     private readonly bool _simulateFailures;
 
     private long _nextPositionId = 1;
@@ -41,6 +43,38 @@ public sealed class SimulatedBroker : IBroker
 
     /// <summary>Текущая котировка по символу; задаётся движком перед каждой операцией.</summary>
     public Dictionary<string, Quote> Quotes { get; } = new Dictionary<string, Quote>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Регистрирует условия инструмента, чтобы виртуальное исполнение брало комиссию.
+    ///
+    /// Без этого симулятор берёт спред и проскальзывание, но не комиссию — и теневой режим
+    /// доказывает лишь то, что стратегия работала бы у брокера, который комиссию не берёт.
+    /// Незарегистрированный инструмент торгуется без комиссии и об этом честно сообщается
+    /// через <see cref="SymbolsWithoutSpec"/>, а не прячется.
+    /// </summary>
+    public void RegisterSymbol(SymbolSpec spec)
+    {
+        if (spec != null) _specs[spec.Name] = spec;
+    }
+
+    /// <summary>Инструменты, торговавшиеся без известных условий — то есть без комиссии.</summary>
+    public HashSet<string> SymbolsWithoutSpec { get; } = new HashSet<string>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Комиссия одной стороны сделки, в валюте счёта.
+    /// Ставка задана за миллион единиц номинала в котируемой валюте.
+    /// </summary>
+    private double CommissionFor(string symbolName, double volumeInUnits, double price)
+    {
+        if (!_specs.TryGetValue(symbolName, out SymbolSpec spec))
+        {
+            SymbolsWithoutSpec.Add(symbolName);
+            return 0;
+        }
+
+        double notional = volumeInUnits * price;
+        return notional / 1_000_000.0 * spec.CommissionPerMillionQuote;
+    }
 
     /// <summary>Условия стресса по символу — влияют на моделируемое проскальзывание.</summary>
     public HashSet<string> StressedSymbols { get; } = new HashSet<string>(StringComparer.Ordinal);
@@ -82,7 +116,16 @@ public sealed class SimulatedBroker : IBroker
             return BrokerResult.Fail($"проскальзывание {slippage:F4} превысило лимит {maxSlippagePrice:F4}", isTransient: true);
         }
 
+        // Комиссия входа списывается немедленно, как у настоящего брокера.
+        double entryCommission = CommissionFor(symbolName, volumeInUnits, fillPrice);
         long id = _nextPositionId++;
+        _commissionPaid[id] = entryCommission;
+
+        _account = new AccountSnapshot(
+            _account.Balance - entryCommission, _account.Equity - entryCommission, _account.Margin,
+            _account.FreeMargin - entryCommission, _account.MarginLevelPercent,
+            _account.StopOutLevelPercent, _account.IsLive, _account.Currency);
+
         _positions[id] = new BrokerPosition
         {
             PositionId = id,
@@ -123,11 +166,18 @@ public sealed class SimulatedBroker : IBroker
         double grossPerUnit = p.Direction == Side.Long ? fillPrice - p.EntryPrice : p.EntryPrice - fillPrice;
         double gross = grossPerUnit * closeVolume;
 
+        // Комиссия выхода — вторая половина круговых издержек.
+        double exitCommission = CommissionFor(p.SymbolName, closeVolume, fillPrice);
+        double net = gross - exitCommission;
+
+        _commissionPaid.TryGetValue(positionId, out double paid);
+        _commissionPaid[positionId] = paid + exitCommission;
+
         _account = new AccountSnapshot(
-            _account.Balance + gross, _account.Equity + gross, _account.Margin, _account.FreeMargin + gross,
+            _account.Balance + net, _account.Equity + net, _account.Margin, _account.FreeMargin + net,
             _account.MarginLevelPercent, _account.StopOutLevelPercent, _account.IsLive, _account.Currency);
 
-        if (closeVolume >= p.VolumeInUnits) _positions.Remove(positionId);
+        if (closeVolume >= p.VolumeInUnits) { _positions.Remove(positionId); _commissionPaid.Remove(positionId); }
         else
         {
             _positions[positionId] = new BrokerPosition

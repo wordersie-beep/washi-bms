@@ -403,10 +403,12 @@ public class CostModelTests
         var model = new CostModel(new ExecutionConfig());
         CostEstimate cost = model.Estimate(null, 10, 100, 50000, false);
 
-        Assert.Equal(0, cost.TotalPrice);
-        // A null spec yields no cost breakdown; the decision engine refuses the trade on the
-        // missing specification rather than proceeding on an unknown cost basis.
+        // Спецификации нет — издержки НЕИЗВЕСТНЫ, и единственная безопасная оценка
+        // неизвестного здесь — запретительная. Ноль означал бы «бесплатно», и любой слой,
+        // который не проверил спецификацию сам, увидел бы идеальную сделку.
         Assert.Equal(100, cost.StopDistance, 8);
+        Assert.Equal(1.0, cost.TotalR, 8);
+        Assert.True(cost.TotalPrice > 0, "Неизвестные издержки не могут считаться нулевыми.");
     }
 
     [Fact]

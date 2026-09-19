@@ -165,7 +165,17 @@ public sealed class PositionSizer
         // --- Margin guard (spec sections 114-115) ----------------------------------------------
         double estimatedMargin = spec.EstimateMargin(units, entryPrice);
         double marginBudget = account.FreeMargin * _config.MaxMarginUtilization;
-        if (estimatedMargin > marginBudget && marginBudget > 0)
+
+        // Нулевая или отрицательная свободная маржа — это отказ, а не пропуск проверки.
+        // Условие «и бюджет положителен» отключало защиту ровно в том состоянии, ради
+        // которого она существует: денег нет, значит сделки нет.
+        if (marginBudget <= 0)
+        {
+            return SizingResult.Rejected(NoTradeReason.MarginGuard,
+                $"свободная маржа {account.FreeMargin:F2} не позволяет открыть позицию");
+        }
+
+        if (estimatedMargin > marginBudget)
         {
             double scaled = units * (marginBudget / estimatedMargin);
             units = spec.NormalizeVolumeDown(scaled);

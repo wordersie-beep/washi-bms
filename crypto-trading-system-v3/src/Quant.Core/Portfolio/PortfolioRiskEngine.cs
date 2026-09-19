@@ -220,13 +220,32 @@ public sealed class PortfolioRiskEngine
             return NoTradeReason.ClusterExposureLimit;
         }
 
-        // Directional limit, on the correlation-adjusted figure. Approximated by assuming
-        // the new position correlates with the book as its mean correlation suggests, which
-        // avoids rebuilding the full quadratic form for a candidate that may be rejected.
+        // Directional limit, on the correlation-adjusted figure.
+        //
+        // The book's correlation-adjusted risk is sqrt(w'Cw) -- a MAGNITUDE, always
+        // non-negative. Adding the candidate's SIGNED risk to it was a unit error: on a
+        // short-heavy book each further short subtracted from the magnitude, so the
+        // projection shrank as exposure grew and the limit never bound at all.
+        //
+        // The candidate is therefore combined on the signed NET exposure, which does carry
+        // a direction, and the correlation-adjusted magnitude is used to scale the result.
+        // The approximation assumes the candidate correlates with the book as its mean
+        // correlation suggests, which avoids rebuilding the full quadratic form for a
+        // candidate that may be rejected anyway.
         double signed = direction == Side.Long ? proposedRiskPercent : -proposedRiskPercent;
-        double meanCorrelation = _correlation.MeanAbsoluteCorrelation(symbol);
-        double projected = Math.Abs(exposure.CorrelationAdjustedDirectionalRiskPercent +
-                                    (signed * MathUtil.Clamp(meanCorrelation, 0.2, 1.0)));
+        double meanCorrelation = MathUtil.Clamp(_correlation.MeanAbsoluteCorrelation(symbol), 0.2, 1.0);
+
+        double projectedNet = Math.Abs(exposure.NetDirectionalRiskPercent + signed);
+
+        // Scale the net figure by how much the book's own correlation structure inflates it
+        // relative to a naive sum; a perfectly diversified book scales down, a perfectly
+        // correlated one does not scale at all.
+        double inflation = MathUtil.SafeDiv(
+            exposure.CorrelationAdjustedDirectionalRiskPercent,
+            Math.Abs(exposure.NetDirectionalRiskPercent),
+            fallback: 1.0);
+
+        double projected = projectedNet * MathUtil.Clamp(inflation, meanCorrelation, 1.5);
 
         if (projected > _config.MaxDirectionalRiskPercent)
         {

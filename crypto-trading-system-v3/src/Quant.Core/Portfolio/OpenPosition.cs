@@ -61,6 +61,16 @@ public sealed class OpenPosition
     public OperatingMode Mode { get; init; }
     public bool IsVirtual { get; init; }
 
+    /// <summary>
+    /// Исход этой позиции уже зафиксирован в памяти системы.
+    ///
+    /// Закрытие может прийти двумя путями одновременно: робот сам отправил закрытие, и
+    /// платформа в ответ синхронно подняла событие Positions.Closed. Без этого флага одна
+    /// сделка попала бы в статистику дважды — удвоив её вес в оценке стратегии, в калибровке
+    /// вероятностей и в счётчике серии убытков.
+    /// </summary>
+    public bool OutcomeRecorded { get; set; }
+
     // --- Mutable journey state ------------------------------------------------------------
     public double MaxFavourableExcursionR { get; set; }
     public double MaxAdverseExcursionR { get; set; }

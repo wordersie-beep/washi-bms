@@ -22,6 +22,22 @@ public sealed class BrokerResult
         IsTransient = isTransient,
     };
 
+    /// <summary>
+    /// Отказ, при котором НЕИЗВЕСТНО, дошёл ли приказ до биржи: таймаут, обрыв связи,
+    /// исключение в момент отправки.
+    ///
+    /// Отличать такой отказ от обычного обязательно. При обычном отказе точно известно, что
+    /// ничего не произошло, и сигнал можно разблокировать для повторной попытки. Здесь же
+    /// позиция могла открыться — и повторная попытка открыла бы вторую.
+    /// </summary>
+    public static BrokerResult Unknown(string error) => new BrokerResult
+    {
+        IsSuccessful = false,
+        Error = error,
+        IsTransient = true,
+        OutcomeUnknown = true,
+    };
+
     public bool IsSuccessful { get; init; }
     public long PositionId { get; init; }
     public double FilledPrice { get; init; }
@@ -35,8 +51,18 @@ public sealed class BrokerResult
     /// </summary>
     public bool IsTransient { get; init; }
 
+    /// <summary>
+    /// Неизвестно, был ли приказ исполнен. Отдельный признак, а не синоним
+    /// <see cref="IsTransient"/>: «нет котировки» повторяема, но её исход точно известен —
+    /// не произошло ничего. Смешивать их значит либо блокировать сигнал навсегда после
+    /// безобидного отказа, либо открывать дубль после таймаута.
+    /// </summary>
+    public bool OutcomeUnknown { get; init; }
+
     public override string ToString() =>
-        IsSuccessful ? $"ok #{PositionId} @{FilledPrice} x{FilledVolume}" : $"fail: {Error}{(IsTransient ? " (повторяемая)" : "")}";
+        IsSuccessful
+            ? $"ok #{PositionId} @{FilledPrice} x{FilledVolume}"
+            : $"fail: {Error}{(OutcomeUnknown ? " (исход неизвестен)" : IsTransient ? " (повторяемая)" : "")}";
 }
 
 /// <summary>Позиция, как её видит брокер. Нужна для сверки (раздел 145).</summary>

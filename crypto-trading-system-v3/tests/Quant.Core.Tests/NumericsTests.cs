@@ -43,7 +43,7 @@ public class RingTests
     {
         var ring = new Ring<int>(3);
         ring.ReplaceNewest(7);
-        Assert.Equal(1, ring.Count);
+        Assert.Single(ring);
         Assert.Equal(7, ring[0]);
     }
 
