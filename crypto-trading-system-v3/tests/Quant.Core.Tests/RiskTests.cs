@@ -244,6 +244,78 @@ public class AnomalyDetectorTests
         };
 
     [Fact]
+    public void EveryAnomalyThresholdIsReadFromTheConfigurationAndActuallyBinds()
+    {
+        // Проверка появилась потому, что мутации прошли незамеченными: пороги детектора
+        // можно было сдвинуть на два порядка, и ни один тест не падал. Порог, который
+        // ничего не держит, отличается от отсутствующего только тем, что его видно.
+        var config = new RiskConfig();
+        var d = new AnomalyDetector(config);
+
+        // Спред относительно ATR: по умолчанию 0.30.
+        Assert.False(d.Evaluate(Features(spreadToAtr: config.AnomalousSpreadToAtr * 0.5)).IsExtremeEvent);
+        AnomalyReport wide = d.Evaluate(Features(spreadToAtr: config.AnomalousSpreadToAtr * 1.5));
+        Assert.True(wide.IsExtremeEvent);
+        Assert.True(wide.Severity >= config.AnomalousSpreadToAtrSeverity);
+
+        // Предельная волатильность, которая всё ещё расширяется.
+        var stillExpanding = new AnomalyDetector(config);
+        AnomalyReport blowing = stillExpanding.Evaluate(Features(
+            atrPercentile: config.ExtremeVolatilityPercentile + 0.005,
+            volExpansion: config.ExpandingVolatilityFraction * 1.5));
+        Assert.True(blowing.Severity >= config.ExtremeVolatilitySeverity);
+
+        // Исчезнувшая ликвидность.
+        AnomalyReport illiquid = new AnomalyDetector(config).Evaluate(
+            Features(spreadPercentile: config.ExtremeSpreadPercentile + 0.01));
+        Assert.True(illiquid.Severity >= config.ExtremeSpreadSeverity);
+
+        // И каждый из них двигается вместе с конфигурацией, а не живёт своей жизнью.
+        var relaxed = new RiskConfig { AnomalousSpreadToAtr = 0.90 };
+        Assert.False(new AnomalyDetector(relaxed)
+            .Evaluate(Features(spreadToAtr: 0.45)).IsExtremeEvent);
+    }
+
+    [Fact]
+    public void TheAnomalyEscalationLadderUsesItsConfiguredRungs()
+    {
+        // Ступени постуры по тяжести аномалии тоже были вписаны в код, и их тоже никто
+        // не проверял: мутация порога до недостижимого значения проходила молча.
+        var config = new EngineConfig();
+        var risk = new RiskEngine(config.Risk, config.Sizing, new DrawdownTracker(),
+            new ExecutionQualityTracker(config.Execution), new PerformanceStore(config.Adaptation),
+            new RiskOfRuinEstimator(seed: 11));
+
+        var account = new AccountSnapshot(10000, 10000, 0, 10000, 2000, 50, false, "USD");
+        double below = config.Risk.AnomalyCautionSeverity * 0.5;
+        double middle = (config.Risk.AnomalyCautionSeverity + config.Risk.AnomalyDefensiveSeverity) / 2.0;
+        double above = Math.Min(1.0, config.Risk.AnomalyDefensiveSeverity + 0.1);
+
+        Assert.Equal(RiskState.Normal, risk.Evaluate(RiskFixtures.T0, account, below, false).State);
+
+        var second = new RiskEngine(config.Risk, config.Sizing, new DrawdownTracker(),
+            new ExecutionQualityTracker(config.Execution), new PerformanceStore(config.Adaptation),
+            new RiskOfRuinEstimator(seed: 12));
+        Assert.Equal(RiskState.Caution, second.Evaluate(RiskFixtures.T0, account, middle, false).State);
+
+        var third = new RiskEngine(config.Risk, config.Sizing, new DrawdownTracker(),
+            new ExecutionQualityTracker(config.Execution), new PerformanceStore(config.Adaptation),
+            new RiskOfRuinEstimator(seed: 13));
+        Assert.Equal(RiskState.Defensive, third.Evaluate(RiskFixtures.T0, account, above, false).State);
+    }
+
+    [Fact]
+    public void AnEscalationRungAboveTheReachableMaximumIsRefusedByValidation()
+    {
+        // Тяжесть аномалии ограничена единицей по построению. Ступень выше неё
+        // недостижима, сколько бы рынок ни ломался, — те же ворота, что и всегда.
+        var config = new EngineConfig();
+        config.Risk.AnomalyDefensiveSeverity = 1.9;
+
+        Assert.Contains(config.Validate(), p => p.Contains("AnomalyDefensiveSeverity"));
+    }
+
+    [Fact]
     public void AQuietMarketProducesNoFindings()
     {
         var d = new AnomalyDetector(new RiskConfig());

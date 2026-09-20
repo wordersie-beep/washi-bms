@@ -130,13 +130,13 @@ public sealed class DataQualityMonitor
         // --- Tick stream health ---------------------------------------------------------
         if (ticks != null && ticks.IsReady)
         {
-            if (ticks.RejectionRate > 0.10)
+            if (ticks.RejectionRate > _config.MaxTickRejectionRate)
             {
                 issues.Add($"high quote rejection rate ({ticks.RejectionRate:P0})");
                 score *= 0.5;
             }
 
-            if (ticks.InterArrivalZScore > 4.0)
+            if (ticks.InterArrivalZScore > _config.StalledFeedZScore)
             {
                 issues.Add($"tick arrivals stalling (z={ticks.InterArrivalZScore:F1})");
                 score *= 0.7;

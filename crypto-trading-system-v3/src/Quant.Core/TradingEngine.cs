@@ -377,7 +377,7 @@ public sealed class TradingEngine
             double atr = features.Atr;
             if (atr <= 0) continue;
 
-            bool stressed = features.SpreadPercentile > 0.85 || features.AtrPercentile > 0.85;
+            bool stressed = features.SpreadPercentile > _config.Execution.StressedMarketPercentile || features.AtrPercentile > _config.Execution.StressedMarketPercentile;
             CostEstimate costAtOneAtr = _costModel.Estimate(
                 data.Spec, data.Spread.CostingSpread(), atr, features.Price, stressed, _executionQuality.SlippageMultiplier);
 
@@ -404,16 +404,17 @@ public sealed class TradingEngine
     /// позиции выбирается под будущее.
     /// </summary>
     private double CorrelationPenaltyFor(string symbolName, GlobalMarketContext global) =>
-        CorrelationPenalty(_correlation.MeanAbsoluteCorrelation(symbolName), global);
+        CorrelationPenalty(_correlation.MeanAbsoluteCorrelation(symbolName), global,
+            _config.Portfolio.CorrelationStressThreshold);
 
     /// <summary>
     /// Чистая функция — вынесена ради проверяемости: поведение, спрятанное в приватном
     /// методе, проверяется только косвенно, а косвенная проверка легко оказывается
     /// проверкой чего-то другого.
     /// </summary>
-    public static double CorrelationPenalty(double measured, GlobalMarketContext global)
+    public static double CorrelationPenalty(double measured, GlobalMarketContext global, double stressThreshold)
     {
-        if (global == null || !global.IsAvailable || !global.IsCorrelationStressed) return measured;
+        if (global == null || !global.IsAvailable || !global.IsCorrelationStressed(stressThreshold)) return measured;
 
         return Math.Max(measured, MathUtil.Clamp01(global.UniverseCorrelation));
     }
@@ -528,7 +529,7 @@ public sealed class TradingEngine
 
         // Издержки при стопе в одну ATR — масштабируются планировщиком выхода под реальный стоп.
         double atr = features.Atr;
-        bool stressed = features.SpreadPercentile > 0.85 || features.AtrPercentile > 0.85;
+        bool stressed = features.SpreadPercentile > _config.Execution.StressedMarketPercentile || features.AtrPercentile > _config.Execution.StressedMarketPercentile;
         CostEstimate costAtOneAtr = _costModel.Estimate(
             data.Spec, data.Spread.CostingSpread(), atr, features.Price, stressed, _executionQuality.SlippageMultiplier);
 
@@ -731,7 +732,7 @@ public sealed class TradingEngine
 
         SymbolDataSet data = c.Data;
         double predictedSlippage = _costModel.OneWaySlippage(
-            data.Spread.CostingSpread(), c.Features.SpreadPercentile > 0.85, _executionQuality.SlippageMultiplier);
+            data.Spread.CostingSpread(), c.Features.SpreadPercentile > _config.Execution.StressedMarketPercentile, _executionQuality.SlippageMultiplier);
 
         BrokerResult result = _execution.Open(
             c.SignalId, c.SymbolName, c.Direction, c.Sizing.VolumeInUnits,

@@ -389,7 +389,7 @@ public sealed class StrategyWeightEngine
         // Recovery demands a clearly positive shadow record, not merely a non-negative one,
         // and the bar rises with each previous failure.
         double requiredExpectancy = 0.05 * Math.Max(1, state.DisableCount);
-        if (shadow.RecentExpectancyR <= requiredExpectancy || shadow.ProfitFactor < 1.1) return;
+        if (shadow.RecentExpectancyR <= requiredExpectancy || shadow.ProfitFactor < _config.ShadowRecoveryProfitFactor) return;
 
         state.Status = StrategyStatus.Recovering;
         state.RecoveringSinceUtc = nowUtc;

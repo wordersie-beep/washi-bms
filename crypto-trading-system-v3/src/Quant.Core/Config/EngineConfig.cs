@@ -187,6 +187,18 @@ public sealed class DataConfig
     /// <summary>Quotes older than this are stale; the symbol stops accepting new entries.</summary>
     public double MaxQuoteAgeSeconds { get; set; } = 30;
 
+    /// <summary>Доля отклонённых тиков, выше которой поток данных считается испорченным.</summary>
+    public double MaxTickRejectionRate { get; set; } = 0.10;
+
+    /// <summary>Z-оценка интервалов между тиками, выше которой поток считается замершим.</summary>
+    public double StalledFeedZScore { get; set; } = 4.0;
+
+    /// <summary>Границы корзин волатильности по перцентилю ATR.</summary>
+    public double ExtremeVolatilityBucket { get; set; } = 0.95;
+    public double HighVolatilityBucket { get; set; } = 0.75;
+    public double NormalVolatilityBucket { get; set; } = 0.25;
+    public double LowVolatilityBucket { get; set; } = 0.05;
+
     /// <summary>A single-tick price jump beyond this many ATR is rejected as a bad print.</summary>
     public double MaxTickJumpInAtr { get; set; } = 3.0;
 
@@ -254,6 +266,11 @@ public sealed class DataConfig
         if (PercentileWindow < 50) problems.Add("PercentileWindow below 50 makes percentile ranks meaningless.");
         if (EmaFastPeriods >= EmaSlowPeriods) problems.Add("EmaFastPeriods must be shorter than EmaSlowPeriods.");
         if (MaxQuoteAgeSeconds <= 0) problems.Add("MaxQuoteAgeSeconds must be positive.");
+        if (MaxTickRejectionRate <= 0 || MaxTickRejectionRate >= 1) problems.Add("MaxTickRejectionRate must be in (0, 1).");
+        if (StalledFeedZScore <= 0) problems.Add("StalledFeedZScore must be positive.");
+        if (!(ExtremeVolatilityBucket > HighVolatilityBucket && HighVolatilityBucket > NormalVolatilityBucket &&
+              NormalVolatilityBucket > LowVolatilityBucket && LowVolatilityBucket > 0))
+            problems.Add("Границы корзин волатильности должны строго убывать: иначе верхние корзины недостижимы.");
         if (Array.IndexOf(Timeframes, SignalTimeframe) < 0) problems.Add("SignalTimeframe must be one of the aggregated timeframes.");
         if (Array.IndexOf(Timeframes, ContextTimeframe) < 0) problems.Add("ContextTimeframe must be one of the aggregated timeframes.");
         if ((int)ContextTimeframe <= (int)SignalTimeframe) problems.Add("ContextTimeframe must be slower than SignalTimeframe.");
@@ -510,6 +527,11 @@ public sealed class PortfolioConfig
     /// <summary>Correlation at or above which two symbols join the same risk cluster.</summary>
     public double ClusterThreshold { get; set; } = 0.70;
 
+    /// <summary>
+    /// Средняя корреляция вселенной, выше которой диверсификация считается исчезнувшей.
+    /// </summary>
+    public double CorrelationStressThreshold { get; set; } = 0.80;
+
     /// <summary>Timeframe on which returns are sampled for correlation.</summary>
     public Tf CorrelationTimeframe { get; set; } = Tf.M15;
 
@@ -562,6 +584,7 @@ public sealed class PortfolioConfig
     {
         if (CorrelationWindows == null || CorrelationWindows.Length == 0) problems.Add("At least one correlation window is required.");
         if (ClusterThreshold <= 0 || ClusterThreshold >= 1) problems.Add("ClusterThreshold must be in (0, 1).");
+        if (CorrelationStressThreshold <= 0 || CorrelationStressThreshold > 1) problems.Add("CorrelationStressThreshold must be in (0, 1].");
         if (MaxOpenPositions < 1) problems.Add("MaxOpenPositions must be at least 1.");
         if (MaxPositionsPerSymbol < 1) problems.Add("MaxPositionsPerSymbol must be at least 1.");
         if (MaxCandidatesPerCycle < 1) problems.Add("MaxCandidatesPerCycle must be at least 1 or no candidate could ever be executed.");
@@ -641,6 +664,51 @@ public sealed class RiskConfig
     /// <summary>Z-score at which a price, volume, spread or velocity reading is an anomaly.</summary>
     public double AnomalyZThreshold { get; set; } = 4.0;
 
+    /// <summary>
+    /// Пороги детектора аномалий.
+    ///
+    /// Раньше все они были вписаны прямо в детектор. Это нарушало правило, на котором
+    /// стоит вся система: ни один слой не читает магическое число, потому что порог,
+    /// до которого не дотягивается анализ чувствительности, нельзя ни проверить, ни
+    /// опровергнуть — его можно только принять на веру.
+    /// </summary>
+    public double ShockMoveInAtr { get; set; } = 3.0;
+
+    /// <summary>Движение за бар, после которого событие считается экстремальным.</summary>
+    public double ExtremeMoveInAtr { get; set; } = 5.0;
+
+    /// <summary>Перцентиль ATR, выше которого волатильность считается предельной.</summary>
+    public double ExtremeVolatilityPercentile { get; set; } = 0.99;
+
+    /// <summary>Расширение волатильности, подтверждающее, что предел ещё не достигнут.</summary>
+    public double ExpandingVolatilityFraction { get; set; } = 0.30;
+    public double ExtremeVolatilitySeverity { get; set; } = 0.85;
+
+    /// <summary>Перцентиль спреда, выше которого ликвидность считается исчезнувшей.</summary>
+    public double ExtremeSpreadPercentile { get; set; } = 0.98;
+    public double ExtremeSpreadSeverity { get; set; } = 0.70;
+
+    /// <summary>Спред как доля ATR, выше которой торговать нечем.</summary>
+    public double AnomalousSpreadToAtr { get; set; } = 0.30;
+    public double AnomalousSpreadToAtrSeverity { get; set; } = 0.80;
+
+    /// <summary>
+    /// Совместная дислокация: по отдельности каждое чтение терпимо, вместе они описывают
+    /// рынок, который разваливается. Три порога сразу — и именно поэтому они ниже, чем
+    /// пороги одиночных срабатываний.
+    /// </summary>
+    public double DislocationMoveInAtr { get; set; } = 2.0;
+    public double DislocationVolumeZ { get; set; } = 2.0;
+    public double DislocationSpreadPercentile { get; set; } = 0.90;
+    public double DislocationSeverity { get; set; } = 0.90;
+
+    /// <summary>Доля от MinExecutionQuality, ниже которой исполнение считается рухнувшим.</summary>
+    public double ExecutionCollapseFraction { get; set; } = 0.6;
+
+    /// <summary>Тяжесть аномалии, поднимающая постуру до Defensive и до Caution.</summary>
+    public double AnomalyDefensiveSeverity { get; set; } = 0.8;
+    public double AnomalyCautionSeverity { get; set; } = 0.5;
+
     /// <summary>Bars of normal conditions required after an extreme event (spec section 66).</summary>
     public int RecoveryBarsAfterExtremeEvent { get; set; } = 12;
 
@@ -667,6 +735,39 @@ public sealed class RiskConfig
         if (MaxDrawdown30dPercent > MaxDrawdownAllTimePercent) problems.Add("The 30d drawdown limit must not exceed the all-time limit.");
         if (RuinThresholdFraction <= 0 || RuinThresholdFraction >= 1) problems.Add("RuinThresholdFraction must be in (0, 1).");
         if (MinMarginLevelPercent < 100) problems.Add("MinMarginLevelPercent below 100 permits trading while under-margined.");
+        if (ExtremeMoveInAtr <= ShockMoveInAtr) problems.Add("ExtremeMoveInAtr must exceed ShockMoveInAtr.");
+        if (ShockMoveInAtr <= 0) problems.Add("ShockMoveInAtr must be positive.");
+        if (AnomalyDefensiveSeverity <= AnomalyCautionSeverity)
+            problems.Add("AnomalyDefensiveSeverity must exceed AnomalyCautionSeverity; the ladder must be monotonic.");
+        if (ExecutionCollapseFraction <= 0 || ExecutionCollapseFraction >= 1)
+            problems.Add("ExecutionCollapseFraction must be in (0, 1); at 1 the collapse rung is unreachable.");
+
+        // Тяжесть аномалии ограничена единицей по построению: порог выше неё делает
+        // соответствующую ступень недостижимой, сколько бы рынок ни ломался.
+        foreach ((double value, string name) in new (double, string)[]
+        {
+            (AnomalyDefensiveSeverity, nameof(AnomalyDefensiveSeverity)),
+            (AnomalyCautionSeverity, nameof(AnomalyCautionSeverity)),
+            (ExtremeVolatilitySeverity, nameof(ExtremeVolatilitySeverity)),
+            (ExtremeSpreadSeverity, nameof(ExtremeSpreadSeverity)),
+            (AnomalousSpreadToAtrSeverity, nameof(AnomalousSpreadToAtrSeverity)),
+            (DislocationSeverity, nameof(DislocationSeverity)),
+        })
+        {
+            if (value <= 0 || value > 1)
+                problems.Add($"{name} ({value:F2}) вне диапазона (0, 1]: тяжесть аномалии ограничена единицей по построению.");
+        }
+
+        foreach ((double value, string name) in new (double, string)[]
+        {
+            (ExtremeVolatilityPercentile, nameof(ExtremeVolatilityPercentile)),
+            (ExtremeSpreadPercentile, nameof(ExtremeSpreadPercentile)),
+            (DislocationSpreadPercentile, nameof(DislocationSpreadPercentile)),
+        })
+        {
+            if (value <= 0 || value > 1)
+                problems.Add($"{name} ({value:F2}) вне диапазона (0, 1]: перцентиль не бывает больше единицы.");
+        }
     }
 }
 
@@ -739,6 +840,15 @@ public sealed class ExitConfig
 
     public int MinSampleForMaeStops { get; set; } = 30;
 
+    /// <summary>Доверие к сегменту статистики, ниже которого распределение MAE не применяется.</summary>
+    public double MaeTrustMinimum { get; set; } = 0.5;
+
+    /// <summary>
+    /// Доля риска, которую могут съесть издержки круга, прежде чем сделка объявляется
+    /// неспособной окупиться. Порог отклоняет кандидатов и обязан быть виден снаружи.
+    /// </summary>
+    public double MaxCostShareOfRisk { get; set; } = 0.35;
+
     /// <summary>First target, in R, and the fraction of the position closed there.</summary>
     public double Target1R { get; set; } = 1.2;
     public double Target1ClosePercent { get; set; } = 0.40;
@@ -780,6 +890,19 @@ public sealed class ExitConfig
     internal void Validate(List<string> problems)
     {
         if (MinStopInAtr <= 0 || MinStopInAtr >= MaxStopInAtr) problems.Add("MinStopInAtr must be positive and below MaxStopInAtr.");
+        // Кандидат от волатильности — единственный, который есть ВСЕГДА: уровень
+        // инвалидации и структурный уровень опциональны. Если он сам не укладывается в
+        // границы, гарантированного запасного варианта не остаётся, и планировщик
+        // отказывает всякий раз, когда двух других не нашлось.
+        if (AtrStopMultiple < MinStopInAtr || AtrStopMultiple > MaxStopInAtr)
+        {
+            problems.Add(
+                $"AtrStopMultiple ({AtrStopMultiple:F2}) вне границ [{MinStopInAtr:F2}, {MaxStopInAtr:F2}]: " +
+                "базовый кандидат на стоп сам нарушает ограничение, и ни один кандидат не " +
+                "пройдёт этот фильтр никогда, когда структурного уровня рядом нет.");
+        }
+        if (MaeTrustMinimum <= 0 || MaeTrustMinimum > 1) problems.Add("MaeTrustMinimum must be in (0, 1].");
+        if (MaxCostShareOfRisk <= 0 || MaxCostShareOfRisk >= 1) problems.Add("MaxCostShareOfRisk must be in (0, 1).");
         if (Target1R <= 0 || Target2R <= Target1R) problems.Add("Target2R must exceed Target1R and both must be positive.");
         if (Target1ClosePercent + Target2ClosePercent >= 1.0) problems.Add("Partial closes must leave a runner: Target1 + Target2 close percentages must be below 100%.");
         if (Target1ClosePercent <= 0 || Target2ClosePercent <= 0) problems.Add("Partial close percentages must be positive.");
@@ -816,6 +939,13 @@ public sealed class ExecutionConfig
     /// <summary>Assumed slippage in normal conditions, as a fraction of the spread.</summary>
     public double NormalSlippageSpreadFraction { get; set; } = 0.35;
 
+    /// <summary>
+    /// Перцентиль спреда или ATR, выше которого рынок считается напряжённым и издержки
+    /// считаются по стрессовой модели. Жил тремя копиями в трёх местах движка: поменять
+    /// одну и не заметить двух — вопрос времени, а не внимательности.
+    /// </summary>
+    public double StressedMarketPercentile { get; set; } = 0.85;
+
     /// <summary>Assumed slippage under stress, as a fraction of the spread.</summary>
     public double StressSlippageSpreadFraction { get; set; } = 1.5;
 
@@ -837,6 +967,7 @@ public sealed class ExecutionConfig
     internal void Validate(List<string> problems)
     {
         if (MaxSlippageInAtr <= 0) problems.Add("MaxSlippageInAtr must be positive.");
+        if (StressedMarketPercentile <= 0 || StressedMarketPercentile >= 1) problems.Add("StressedMarketPercentile must be in (0, 1).");
         if (MaxSlippageSpreadMultiple <= 0) problems.Add("MaxSlippageSpreadMultiple must be positive.");
         if (MaxOrderRetries < 0 || MaxOrderRetries > 5) problems.Add("MaxOrderRetries must be in [0, 5].");
         if (StressSlippageSpreadFraction < NormalSlippageSpreadFraction) problems.Add("Stress slippage must not be below normal slippage.");
@@ -865,6 +996,12 @@ public sealed class AdaptationConfig
 
     /// <summary>Profit factor below which a strategy is considered degraded.</summary>
     public double DegradedProfitFactor { get; set; } = 0.95;
+
+    /// <summary>Профит-фактор в тени, ниже которого стратегию не возвращают в работу.</summary>
+    public double ShadowRecoveryProfitFactor { get; set; } = 1.1;
+
+    /// <summary>Доля прибыли в пяти лучших сделках, выше которой результат признаётся концентрированным.</summary>
+    public double MaxProfitConcentrationTop5 { get; set; } = 0.60;
 
     /// <summary>Hours a disabled strategy must shadow-trade before it may be reconsidered.</summary>
     public int ShadowHoursBeforeRecovery { get; set; } = 72;
@@ -926,6 +1063,8 @@ public sealed class AdaptationConfig
     internal void Validate(List<string> problems)
     {
         if (RecentPerformanceHalfLife <= 0) problems.Add("RecentPerformanceHalfLife must be positive.");
+        if (ShadowRecoveryProfitFactor <= 1.0) problems.Add("ShadowRecoveryProfitFactor at or below 1.0 would restore a strategy that loses money in shadow.");
+        if (MaxProfitConcentrationTop5 <= 0 || MaxProfitConcentrationTop5 >= 1) problems.Add("MaxProfitConcentrationTop5 must be in (0, 1).");
         if (MinTradesForDisable < MinTradesForWeighting) problems.Add("MinTradesForDisable must be at least MinTradesForWeighting.");
         if (RecoveryWeightFraction <= 0 || RecoveryWeightFraction > 1) problems.Add("RecoveryWeightFraction must be in (0, 1].");
         if (AdaptationIntervalMinutes < 1) problems.Add("AdaptationIntervalMinutes must be at least 1.");

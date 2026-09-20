@@ -207,12 +207,12 @@ public sealed class FeatureEngine
         return Math.Sign(a) == Math.Sign(b) ? magnitude : -magnitude;
     }
 
-    private static VolatilityBucket Bucket(double atrPercentile)
+    private VolatilityBucket Bucket(double atrPercentile)
     {
-        if (atrPercentile >= 0.95) return VolatilityBucket.Extreme;
-        if (atrPercentile >= 0.75) return VolatilityBucket.High;
-        if (atrPercentile >= 0.25) return VolatilityBucket.Normal;
-        if (atrPercentile >= 0.05) return VolatilityBucket.Low;
+        if (atrPercentile >= _config.ExtremeVolatilityBucket) return VolatilityBucket.Extreme;
+        if (atrPercentile >= _config.HighVolatilityBucket) return VolatilityBucket.High;
+        if (atrPercentile >= _config.NormalVolatilityBucket) return VolatilityBucket.Normal;
+        if (atrPercentile >= _config.LowVolatilityBucket) return VolatilityBucket.Low;
         return VolatilityBucket.VeryLow;
     }
 

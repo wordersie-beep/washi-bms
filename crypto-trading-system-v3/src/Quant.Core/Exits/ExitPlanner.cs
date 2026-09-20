@@ -132,7 +132,7 @@ public sealed class ExitPlanner
         (SegmentStats stats, double trust) = _performance.BestAvailable(
             leader?.StrategyName ?? "unknown", regime, data.SymbolName, _config.MinSampleForMaeStops);
 
-        if (stats.MaeSampleSize >= _config.MinSampleForMaeStops && trust >= 0.5)
+        if (stats.MaeSampleSize >= _config.MinSampleForMaeStops && trust >= _config.MaeTrustMinimum)
         {
             // MAE записан в R против стопа, действовавшего на тот момент, поэтому
             // масштабируется выбранным расстоянием обратно в единицы цены.
@@ -172,7 +172,7 @@ public sealed class ExitPlanner
         // chosen. If round-trip costs eat a large share of the risk, the trade cannot pay.
         double costPrice = costAtOneAtr.TotalPrice;
         double costR = MathUtil.SafeDiv(costPrice, chosen, 1.0);
-        if (costR > 0.35)
+        if (costR > _config.MaxCostShareOfRisk)
         {
             return ExitPlan.Rejected(NoTradeReason.PoorRiskReward,
                 $"round-trip costs are {costR:P0} of the risk; the trade cannot pay for itself");

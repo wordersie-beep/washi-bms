@@ -633,7 +633,7 @@ public class QuantCryptoV3Bot : Robot
             PerformanceReport report = MetricsCalculator.Compute(
                 _engine.Performance.Trades, Account.Balance, _engine.Risk.LastRuinEstimate.Probability);
 
-            Print(report.Render());
+            Print(report.Render(_config.Adaptation.MaxProfitConcentrationTop5));
         }
         catch (Exception ex)
         {
@@ -669,7 +669,7 @@ public class QuantCryptoV3Bot : Robot
                 bySymbol[trades[i].SymbolName] = current + trades[i].NetProfit;
             }
 
-            return FitnessCalculator.Compute(report, null, bySymbol).Fitness;
+            return FitnessCalculator.Compute(report, _config.Adaptation.MaxProfitConcentrationTop5, null, bySymbol).Fitness;
         }
         catch (Exception)
         {

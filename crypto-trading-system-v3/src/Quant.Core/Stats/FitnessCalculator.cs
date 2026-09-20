@@ -59,6 +59,7 @@ public static class FitnessCalculator
     /// <param name="symbolContributions">Вклад каждого символа в прибыль, для проверки на зависимость от одного инструмента.</param>
     public static FitnessBreakdown Compute(
         PerformanceReport report,
+        double concentrationWarning,
         PerformanceReport stressedReport = null,
         IReadOnlyDictionary<string, double> symbolContributions = null)
     {
@@ -124,10 +125,10 @@ public static class FitnessCalculator
             multiplier *= 0.25;
         }
 
-        if (report.ProfitConcentrationTop5 > 0.60)
+        if (report.ProfitConcentrationTop5 > concentrationWarning)
         {
             penalties.Add($"{report.ProfitConcentrationTop5:P0} прибыли создано 5% сделок");
-            multiplier *= 1.0 - MathUtil.Clamp01((report.ProfitConcentrationTop5 - 0.60) / 0.40) * 0.7;
+            multiplier *= 1.0 - MathUtil.Clamp01((report.ProfitConcentrationTop5 - concentrationWarning) / (1.0 - concentrationWarning)) * 0.7;
         }
 
         if (report.LongestLosingStreak > 12)

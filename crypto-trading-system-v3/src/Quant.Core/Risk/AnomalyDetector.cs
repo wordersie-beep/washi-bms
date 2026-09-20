@@ -82,11 +82,11 @@ public sealed class AnomalyDetector
 
         // --- Price velocity --------------------------------------------------------------
         double moveInAtr = Math.Abs(f.Return1InAtr);
-        if (moveInAtr > 3.0)
+        if (moveInAtr > _config.ShockMoveInAtr)
         {
             findings.Add($"price moved {moveInAtr:F1} ATR in one bar");
-            severity = Math.Max(severity, MathUtil.LinearScale(moveInAtr, 3.0, 6.0));
-            if (moveInAtr > 5.0) extreme = true;
+            severity = Math.Max(severity, MathUtil.LinearScale(moveInAtr, _config.ShockMoveInAtr, _config.ShockMoveInAtr * 2));
+            if (moveInAtr > _config.ExtremeMoveInAtr) extreme = true;
         }
 
         // --- Tick-level velocity ----------------------------------------------------------
@@ -111,24 +111,24 @@ public sealed class AnomalyDetector
             severity = Math.Max(severity, MathUtil.LinearScale(f.AtrZScore, z, z * 2));
         }
 
-        if (f.AtrPercentile > 0.99 && f.VolatilityExpansion > 0.30)
+        if (f.AtrPercentile > _config.ExtremeVolatilityPercentile && f.VolatilityExpansion > _config.ExpandingVolatilityFraction)
         {
             findings.Add("volatility at an extreme and still expanding");
-            severity = Math.Max(severity, 0.85);
+            severity = Math.Max(severity, _config.ExtremeVolatilitySeverity);
             extreme = true;
         }
 
         // --- Liquidity ------------------------------------------------------------------------
-        if (f.SpreadPercentile > 0.98)
+        if (f.SpreadPercentile > _config.ExtremeSpreadPercentile)
         {
             findings.Add($"spread at the {f.SpreadPercentile:P0} percentile");
-            severity = Math.Max(severity, 0.7);
+            severity = Math.Max(severity, _config.ExtremeSpreadSeverity);
         }
 
-        if (f.SpreadToAtr > 0.30)
+        if (f.SpreadToAtr > _config.AnomalousSpreadToAtr)
         {
             findings.Add($"spread is {f.SpreadToAtr:P0} of ATR");
-            severity = Math.Max(severity, 0.8);
+            severity = Math.Max(severity, _config.AnomalousSpreadToAtrSeverity);
             extreme = true;
         }
 
@@ -144,10 +144,11 @@ public sealed class AnomalyDetector
         // a violent move, on abnormal volume, with spreads widening. Any one is noise; all
         // three at once is a dislocation, and treating it as three separate mild warnings is
         // how a system trades straight into one.
-        if (moveInAtr > 2.0 && f.VolumeZScore > 2.0 && f.SpreadPercentile > 0.90)
+        if (moveInAtr > _config.DislocationMoveInAtr && f.VolumeZScore > _config.DislocationVolumeZ &&
+            f.SpreadPercentile > _config.DislocationSpreadPercentile)
         {
             findings.Add("simultaneous price, volume and spread dislocation");
-            severity = Math.Max(severity, 0.9);
+            severity = Math.Max(severity, _config.DislocationSeverity);
             extreme = true;
         }
 

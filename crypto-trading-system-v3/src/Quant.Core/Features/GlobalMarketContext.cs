@@ -45,7 +45,7 @@ public sealed class GlobalMarketContext
     /// Whether the complex is moving as one block. When true, apparent diversification is
     /// an illusion and portfolio limits must bind harder.
     /// </summary>
-    public bool IsCorrelationStressed => UniverseCorrelation >= 0.80;
+    public bool IsCorrelationStressed(double threshold) => UniverseCorrelation >= threshold;
 
     /// <summary>
     /// Probability adjustment for a directional idea, in -1..+1, where positive means the

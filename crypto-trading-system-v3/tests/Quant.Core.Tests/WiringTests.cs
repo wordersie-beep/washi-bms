@@ -343,22 +343,23 @@ public class WiringTests
         var calm = new GlobalMarketContext { IsAvailable = true, UniverseCorrelation = 0.35 };
         var stressed = new GlobalMarketContext { IsAvailable = true, UniverseCorrelation = 0.92 };
 
-        Assert.False(calm.IsCorrelationStressed);
-        Assert.True(stressed.IsCorrelationStressed);
+        double stressThreshold = new EngineConfig().Portfolio.CorrelationStressThreshold;
+        Assert.False(calm.IsCorrelationStressed(stressThreshold));
+        Assert.True(stressed.IsCorrelationStressed(stressThreshold));
 
         // Инструмент, по истории почти независимый от книги.
         const double measured = 0.15;
 
         // В спокойном рынке он таким и считается.
-        Assert.Equal(measured, TradingEngine.CorrelationPenalty(measured, calm), 6);
+        Assert.Equal(measured, TradingEngine.CorrelationPenalty(measured, calm, stressThreshold), 6);
 
         // В стрессе — нет: штраф поднимается до общей корреляции вселенной, и размер
         // позиции уменьшается. Это и есть разница между «измерено» и «учтено».
-        Assert.Equal(0.92, TradingEngine.CorrelationPenalty(measured, stressed), 6);
+        Assert.Equal(0.92, TradingEngine.CorrelationPenalty(measured, stressed, stressThreshold), 6);
 
         // Уже коррелированный инструмент не получает поблажки от того, что вселенная
         // коррелирована слабее его самого.
-        Assert.Equal(0.97, TradingEngine.CorrelationPenalty(0.97, stressed), 6);
+        Assert.Equal(0.97, TradingEngine.CorrelationPenalty(0.97, stressed, stressThreshold), 6);
     }
 
     // ── Частота проверки состояния ───────────────────────────────────────────────

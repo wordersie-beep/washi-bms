@@ -182,15 +182,15 @@ public sealed class RiskEngine
 
         // --- Execution quality (spec section 59) --------------------------------------------
         double executionQuality = _execution.Quality;
-        if (executionQuality < _config.MinExecutionQuality * 0.6)
+        if (executionQuality < _config.MinExecutionQuality * _config.ExecutionCollapseFraction)
             Escalate(RiskState.Halt, NoTradeReason.ExecutionQuality, $"execution quality {executionQuality:P0} has collapsed");
         else if (executionQuality < _config.MinExecutionQuality)
             Escalate(RiskState.Defensive, NoTradeReason.ExecutionQuality, $"execution quality {executionQuality:P0} below the {_config.MinExecutionQuality:P0} floor");
 
         // --- Anomalies and post-event recovery ----------------------------------------------
-        if (anomalySeverity > 0.8)
+        if (anomalySeverity > _config.AnomalyDefensiveSeverity)
             Escalate(RiskState.Defensive, NoTradeReason.AnomalyDetected, $"market anomaly severity {anomalySeverity:F2}");
-        else if (anomalySeverity > 0.5)
+        else if (anomalySeverity > _config.AnomalyCautionSeverity)
             Escalate(RiskState.Caution, NoTradeReason.AnomalyDetected, $"market anomaly severity {anomalySeverity:F2}");
 
         if (inRecoveryPeriod)

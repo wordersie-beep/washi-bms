@@ -281,7 +281,7 @@ public class EndToEndTests
         if (trades.Count < 5) { _out.WriteLine("сделок слишком мало для отчёта"); return; }
 
         PerformanceReport report = MetricsCalculator.Compute(trades, 100000);
-        _out.WriteLine(report.Render());
+        _out.WriteLine(report.Render(new Quant.Core.Config.EngineConfig().Adaptation.MaxProfitConcentrationTop5));
 
         Assert.Equal(trades.Count, report.Trades);
         Assert.InRange(report.WinRate, 0.0, 1.0);

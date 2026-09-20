@@ -62,11 +62,6 @@ public sealed class RegimeAssessment
     /// </summary>
     public double VolatilityState { get; init; }
 
-    /// <summary>True when volatility is elevated, whatever the structural label says.</summary>
-    public bool IsHighVolatility => VolatilityState > 0.5;
-
-    /// <summary>True when volatility is compressed, whatever the structural label says.</summary>
-    public bool IsLowVolatility => VolatilityState < -0.5;
 
     /// <summary>Directional bias implied by the regime; None for non-directional regimes.</summary>
     public Side DirectionalBias =>

@@ -226,4 +226,37 @@ public class UnreachableGateTests
         Assert.Contains("sized down to fit", problems);
         Assert.DoesNotContain("ни один кандидат не пройдёт этот фильтр никогда", problems);
     }
+
+    [Theory]
+    [InlineData(0.3)]   // уже нижней границы
+    [InlineData(9.0)]   // шире верхней
+    public void ConfigurationValidationCatchesAStopFallbackOutsideItsOwnBounds(double multiple)
+    {
+        // Кандидатов на стоп три: уровень инвалидации стратегии, структурный уровень и
+        // базовый — от волатильности. Первые два опциональны, третий есть ВСЕГДА, и
+        // именно поэтому на нём держится вся конструкция.
+        //
+        // Если он сам не укладывается в границы, гарантированного запасного варианта
+        // больше нет: планировщик отказывает всякий раз, когда структурного уровня рядом
+        // не нашлось. Обе величины лежат в одной секции конфигурации и по отдельности
+        // проходят собственную валидацию — сравнить их между собой было некому.
+        var config = new EngineConfig();
+        config.Exit.AtrStopMultiple = multiple;
+
+        string problems = string.Join(" | ", config.Validate());
+
+        Assert.Contains("AtrStopMultiple", problems);
+        Assert.Contains("ни один кандидат не пройдёт этот фильтр никогда", problems);
+    }
+
+    [Fact]
+    public void TheDefaultStopFallbackSitsInsideItsOwnBounds()
+    {
+        var config = new EngineConfig();
+
+        Assert.True(config.Exit.AtrStopMultiple >= config.Exit.MinStopInAtr &&
+                    config.Exit.AtrStopMultiple <= config.Exit.MaxStopInAtr,
+            $"базовый стоп {config.Exit.AtrStopMultiple:F2} ATR вне границ " +
+            $"[{config.Exit.MinStopInAtr:F2}, {config.Exit.MaxStopInAtr:F2}]");
+    }
 }

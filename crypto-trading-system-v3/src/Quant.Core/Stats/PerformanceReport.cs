@@ -46,7 +46,11 @@ public sealed class PerformanceReport
     /// <summary>Матожидание, пересчитанное без лучшего 5% сделок (раздел 99).</summary>
     public double ExpectancyExcludingTailWinnersR { get; init; }
 
-    public string Render()
+    /// <summary>
+    /// Порог концентрации передаётся снаружи: то же число читает оценщик качества, и
+    /// две его копии в двух файлах — готовая ошибка «поменял одну, забыл другую».
+    /// </summary>
+    public string Render(double concentrationWarning)
     {
         var sb = new StringBuilder();
         sb.AppendLine("=============== СТАТИСТИЧЕСКИЙ ОТЧЁТ ===============");
@@ -81,7 +85,7 @@ public sealed class PerformanceReport
         sb.AppendFormat("  Концентрация убытка       худшие 5%: {0:P1}", LossConcentrationTop5).AppendLine();
         sb.AppendFormat("  Матожидание без хвоста    {0,12:F4} R", ExpectancyExcludingTailWinnersR).AppendLine();
 
-        if (ProfitConcentrationTop5 > 0.60)
+        if (ProfitConcentrationTop5 > concentrationWarning)
         {
             sb.AppendLine("  >>> ВНИМАНИЕ: большая часть прибыли создана несколькими сделками.");
             sb.AppendLine("      Такой результат почти не отличим от удачи и не должен считаться доказательством преимущества.");
@@ -91,5 +95,10 @@ public sealed class PerformanceReport
         return sb.ToString();
     }
 
-    public override string ToString() => Render();
+    /// <summary>
+    /// Отладочный вывод. Суждение о концентрации прибыли не выносится: его выносит тот,
+    /// кто знает порог, а подставить сюда число значило бы вернуть то самое магическое
+    /// значение, ради устранения которого порог и стал параметром.
+    /// </summary>
+    public override string ToString() => Render(double.PositiveInfinity);
 }
