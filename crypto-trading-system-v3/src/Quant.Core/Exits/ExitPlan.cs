@@ -71,8 +71,44 @@ public sealed class ExitPlan
     /// <summary>Price whose breach means the entry reason no longer holds.</summary>
     public double? InvalidationPrice { get; init; }
 
-    /// <summary>Reward-to-risk at the first target — what the expected-value engine is asked to price.</summary>
-    public double RewardToRisk => Target1R;
+    /// <summary>
+    /// Отношение прибыли к риску ДЛЯ ВСЕГО ПЛАНА, а не для первой цели.
+    ///
+    /// Позиция закрывается по частям: доля на первой цели, доля на второй, остаток ведётся
+    /// трейлингом. Мерить план одной лишь первой целью — значит систематически занижать его
+    /// и не замечать вторую половину собственной конструкции.
+    ///
+    /// Ошибка была не безобидной: при настройках по умолчанию первая цель равна 1.2R, а
+    /// минимально допустимое отношение — 1.3. Ворота отвергали КАЖДОГО кандидата, в любом
+    /// рынке, всегда, и система не совершала ни одной сделки — при том что каждый её слой
+    /// по отдельности работал правильно.
+    ///
+    /// Остаток засчитывается по ВТОРОЙ цели, а не по трейлингу: чтобы стать остатком, цена
+    /// обязана была до второй цели дойти, а что даст трейлинг дальше — неизвестно, и
+    /// приписывать ему прибыль значило бы обещать.
+    ///
+    /// Это геометрия плана, а не ожидание: вероятность достижения целей оценивает
+    /// отдельный слой, и смешивать две вещи в одном числе значило бы считать вероятность
+    /// дважды.
+    /// </summary>
+    public double RewardToRisk
+    {
+        get
+        {
+            double atFirst = MathUtil.Clamp01(Target1ClosePercent);
+            double atSecond = MathUtil.Clamp01(Target2ClosePercent);
+            double runner = Math.Max(0, 1.0 - atFirst - atSecond);
+
+            double total = atFirst + atSecond + runner;
+            if (total <= 0 || Target1R <= 0) return Target1R;
+
+            double second = Target2R > Target1R ? Target2R : Target1R;
+            return ((atFirst * Target1R) + ((atSecond + runner) * second)) / total;
+        }
+    }
+
+    /// <summary>Отношение по первой цели — для отчётов и сравнения с планом.</summary>
+    public double RewardToRiskAtFirstTarget => Target1R;
 
     public override string ToString() =>
         IsValid

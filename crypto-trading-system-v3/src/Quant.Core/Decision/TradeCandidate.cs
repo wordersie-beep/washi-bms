@@ -44,6 +44,14 @@ public sealed class TradeCandidate
     /// <summary>Composite ranking score; only meaningful once the candidate has cleared the gates.</summary>
     public double OpportunityScore { get; set; }
 
+    /// <summary>
+    /// Порог ясности режима, действующий В ЭТОТ МОМЕНТ на этом инструменте.
+    ///
+    /// Приходит от кандидата, а не из настроек, потому что он не константа: это перцентиль
+    /// от собственного распределения классификатора, и у каждого инструмента оно своё.
+    /// </summary>
+    public double RegimeClarityThreshold { get; set; }
+
     public override string ToString() =>
         string.Format("{0} {1} {2} conf={3:P0}", SymbolName, Direction, Leader?.StrategyName ?? "-", Ensemble?.Confidence ?? 0);
 }

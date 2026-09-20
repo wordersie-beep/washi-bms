@@ -88,6 +88,22 @@ public sealed class EngineConfig
             problems.Add("MaxTotalOpenRiskPercent is below RiskPerTradePercent; no trade could ever be opened.");
         }
 
+        // Достижимость ворот по отношению прибыли к риску.
+        //
+        // Проверка межсекционная, и именно поэтому её не было: обе величины по отдельности
+        // разумны, противоречие возникает только вместе. Ценой была система, которая не
+        // могла совершить ни одной сделки ни при каких условиях.
+        double runnerShare = Math.Max(0, 1.0 - Exit.Target1ClosePercent - Exit.Target2ClosePercent);
+        double achievableRr = (Exit.Target1ClosePercent * Exit.Target1R) +
+                              ((Exit.Target2ClosePercent + runnerShare) * Math.Max(Exit.Target1R, Exit.Target2R));
+
+        if (achievableRr < Ev.MinRewardToRisk)
+        {
+            problems.Add(
+                $"Планируемое отношение прибыли к риску ({achievableRr:F2}) ниже минимально " +
+                $"допустимого ({Ev.MinRewardToRisk:F2}): ни один кандидат не пройдёт этот фильтр никогда.");
+        }
+
         if (Risk.DailyLossLimitPercent >= Risk.WeeklyLossLimitPercent)
         {
             problems.Add("WeeklyLossLimitPercent must exceed DailyLossLimitPercent.");
@@ -244,8 +260,31 @@ public sealed class RegimeConfig
     /// <summary>Risk multiplier applied while a regime transition is unconfirmed.</summary>
     public double TransitionRiskMultiplier { get; set; } = 0.5;
 
-    /// <summary>Minimum regime confidence (0..1) required to open a position.</summary>
-    public double MinConfidenceToTrade { get; set; } = 0.55;
+    /// <summary>
+    /// Абсолютный ПОЛ уверенности режима. Ниже него не торгуем никогда, каким бы ясным
+    /// чтение ни казалось на фоне остальных: «лучшее из плохого» — всё ещё плохое.
+    /// </summary>
+    public double MinConfidenceToTrade { get; set; } = 0.30;
+
+    /// <summary>
+    /// Доля собственных чтений классификатора, которые считаются НЕДОСТАТОЧНО ясными.
+    ///
+    /// 0.70 означает: торговать в верхних тридцати процентах по ясности режима.
+    ///
+    /// Заменяет абсолютный порог, потому что уверенность классификатора — это мера отрыва
+    /// победителя от второго места, и её шкала зависит от числа режимов, инструмента и
+    /// таймфрейма. Круглое число на такой шкале задаёт разное намерение на разных
+    /// инструментах: там, где медиана 0.35, порог 0.55 пропускает верхнюю десятую часть и
+    /// в сочетании с прочими фильтрами даёт НОЛЬ сделок; там, где медиана 0.70, тот же
+    /// порог не ограничивает ничего.
+    /// </summary>
+    public double RegimeClarityPercentile { get; set; } = 0.70;
+
+    /// <summary>Порог до набора выборки, пока о распределении говорить рано.</summary>
+    public double UncalibratedConfidenceThreshold { get; set; } = 0.45;
+
+    /// <summary>Чтений классификатора, после которых распределению можно доверять.</summary>
+    public int ClaritySampleMinimum { get; set; } = 100;
 
     internal void Validate(List<string> problems)
     {
@@ -255,6 +294,9 @@ public sealed class RegimeConfig
         if (ConfirmationBars < 1) problems.Add("ConfirmationBars must be at least 1.");
         if (TransitionRiskMultiplier <= 0 || TransitionRiskMultiplier > 1) problems.Add("TransitionRiskMultiplier must be in (0, 1].");
         if (MinConfidenceToTrade < 0 || MinConfidenceToTrade > 1) problems.Add("MinConfidenceToTrade must be in [0, 1].");
+        if (RegimeClarityPercentile < 0 || RegimeClarityPercentile >= 1) problems.Add("RegimeClarityPercentile must be in [0, 1).");
+        if (UncalibratedConfidenceThreshold < MinConfidenceToTrade) problems.Add("UncalibratedConfidenceThreshold must not be below the absolute floor.");
+        if (ClaritySampleMinimum < 20) problems.Add("ClaritySampleMinimum below 20 turns noise into a calibration.");
     }
 }
 

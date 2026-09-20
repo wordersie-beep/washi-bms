@@ -38,6 +38,24 @@ public sealed class DrawdownTracker
     /// <summary>Drawdown from the all-time peak, as a percentage of that peak.</summary>
     public double AllTimeDrawdownPercent => PercentBelow(AllTimePeak);
 
+    /// <summary>
+    /// Сдвигает пик и всю историю на величину движения денег по счёту.
+    ///
+    /// Без этого внесённые деньги поднимают исторический пик, и просадка навсегда меряется
+    /// от уровня, которого торговля не достигала: лимит просадки срабатывал бы от первого
+    /// же отката к тому капиталу, который был до пополнения.
+    /// </summary>
+    public void NoteCashFlow(double delta)
+    {
+        if (!MathUtil.IsFinite(delta) || delta == 0) return;
+
+        AllTimePeak = Math.Max(0, AllTimePeak + delta);
+        for (int i = 0; i < _history.Count; i++)
+        {
+            _history[i] = new EquityPoint(_history[i].TimeUtc, Math.Max(0, _history[i].Equity + delta));
+        }
+    }
+
     public void Observe(DateTime nowUtc, double equity)
     {
         if (!MathUtil.IsFinite(equity) || equity <= 0) return;

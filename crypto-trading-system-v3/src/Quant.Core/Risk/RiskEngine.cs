@@ -45,6 +45,7 @@ public sealed class RiskEngine
 
     private RiskState _state = RiskState.Normal;
     private DateTime _stateEnteredUtc = DateTime.MinValue;
+    private NoTradeReason _stateEnteredReason = NoTradeReason.None;
     private double _equityAtStateEntry;
 
     private DateTime _dayStartUtc = DateTime.MinValue;
@@ -79,6 +80,22 @@ public sealed class RiskEngine
     public int ConsecutiveWins => _consecutiveWins;
     public DateTime? CooldownUntilUtc => _cooldownUntilUtc;
     public RuinEstimate LastRuinEstimate => _lastRuin;
+    /// <summary>
+    /// Сдвигает точки отсчёта на величину движения денег по счёту.
+    ///
+    /// Сдвиг, а не пересчёт: дневной убыток, накопленный ДО пополнения, остаётся убытком.
+    /// Обнулить его внесением денег значило бы дать способ снимать дневной лимит переводом
+    /// со сберегательного счёта.
+    /// </summary>
+    public void NoteCashFlow(double delta)
+    {
+        if (!MathUtil.IsFinite(delta) || delta == 0) return;
+
+        _dayStartEquity += delta;
+        _weekStartEquity += delta;
+        _equityAtStateEntry += delta;
+    }
+
     public double DayStartEquity => _dayStartEquity;
     public double WeekStartEquity => _weekStartEquity;
 
@@ -209,7 +226,7 @@ public sealed class RiskEngine
         }
 
         // --- Transition with hysteresis -------------------------------------------------------
-        ApplyTransition(nowUtc, target, account.Equity, reasons);
+        ApplyTransition(nowUtc, target, account.Equity, blocking, reasons);
 
         // --- Multiplier -------------------------------------------------------------------------
         double multiplier = MultiplierFor(_state);
@@ -267,7 +284,28 @@ public sealed class RiskEngine
     /// recovery, because a posture that relaxes the moment a number dips back under its
     /// threshold will re-trigger on the next tick and has achieved nothing but churn.
     /// </summary>
-    private void ApplyTransition(DateTime nowUtc, RiskState target, double equity, List<string> reasons)
+    /// <summary>
+    /// Требует ли причина повышения постуры ВОССТАНОВЛЕНИЯ КАПИТАЛА для выхода.
+    ///
+    /// Различие существенное. Дневной убыток, серия убытков и просадка — это потери денег,
+    /// и ослаблять постуру, пока деньги не вернулись, значит снимать защиту на самом дне.
+    ///
+    /// Аномалия рынка, качество исполнения, уровень маржи и риск разорения — не потери.
+    /// Требовать от них денежного восстановления значит запереть систему: разовый всплеск
+    /// волатильности навсегда урезает аппетит к риску, потому что условие выхода не имеет
+    /// к причине входа никакого отношения, а в системе, которая торгует редко, капитал
+    /// может не двигаться неделями.
+    /// </summary>
+    private static bool RequiresEquityRecovery(NoTradeReason reason) => reason switch
+    {
+        NoTradeReason.DailyLossLimit => true,
+        NoTradeReason.WeeklyLossLimit => true,
+        NoTradeReason.DrawdownLimit => true,
+        NoTradeReason.ConsecutiveLossCooldown => true,
+        _ => false,
+    };
+
+    private void ApplyTransition(DateTime nowUtc, RiskState target, double equity, NoTradeReason cause, List<string> reasons)
     {
         if (_stateEnteredUtc == DateTime.MinValue)
         {
@@ -280,6 +318,7 @@ public sealed class RiskEngine
             _state = target;
             _stateEnteredUtc = nowUtc;
             _equityAtStateEntry = equity;
+            _stateEnteredReason = cause;
 
             if (target >= RiskState.Defensive && _consecutiveLosses >= _config.LossesBeforeCooldown)
             {
@@ -297,13 +336,20 @@ public sealed class RiskEngine
             return;
         }
 
-        // Equity must have recovered a meaningful share of the way back, not merely stopped
-        // falling.
-        double recoveryNeeded = _equityAtStateEntry * (1.0 + ((_config.RecoveryHysteresisFraction * _config.DailyLossLimitPercent) / 100.0));
-        if (_state >= RiskState.Defensive && equity < recoveryNeeded)
+        // Восстановление капитала требуется ТОЛЬКО когда постуру подняли потери. Для
+        // остальных причин условием выхода служит исчезновение самой причины: к этому
+        // месту оно уже установлено — target ниже текущего состояния.
+        if (_state >= RiskState.Defensive && RequiresEquityRecovery(_stateEnteredReason))
         {
-            reasons.Add($"holding {_state} until equity recovers to {recoveryNeeded:F2}");
-            return;
+            double recoveryNeeded = _equityAtStateEntry *
+                (1.0 + ((_config.RecoveryHysteresisFraction * _config.DailyLossLimitPercent) / 100.0));
+
+            if (equity < recoveryNeeded)
+            {
+                reasons.Add($"holding {_state} until equity recovers to {recoveryNeeded:F2} " +
+                            $"(entered on {_stateEnteredReason})");
+                return;
+            }
         }
 
         // Step down one level at a time. Jumping from Halt straight to Normal discards the
@@ -311,6 +357,7 @@ public sealed class RiskEngine
         _state = (RiskState)((int)_state - 1);
         _stateEnteredUtc = nowUtc;
         _equityAtStateEntry = equity;
+        _stateEnteredReason = NoTradeReason.None;
         reasons.Add($"de-escalated to {_state}");
     }
 
@@ -453,9 +500,17 @@ public sealed class RiskEngine
     public string LastForcedHaltReason { get; private set; }
 
     /// <summary>Restores persisted counters after a restart (spec section 146).</summary>
+    /// <remarks>
+    /// Границы периодов НОРМАЛИЗУЮТСЯ к полуночи и к понедельнику. Смена периода
+    /// определяется точным равенством дат, и значение со временем внутри суток при первой
+    /// же оценке молча заменило бы восстановленную точку отсчёта текущим капиталом — то
+    /// есть обнулило бы накопленный дневной убыток ровно тогда, когда он важен.
+    /// </remarks>
     public void Restore(RiskState state, int consecutiveLosses, int consecutiveWins, DateTime? cooldownUntilUtc,
         DateTime dayStartUtc, double dayStartEquity, DateTime weekStartUtc, double weekStartEquity, DateTime nowUtc)
     {
+        dayStartUtc = dayStartUtc.Date;
+        weekStartUtc = weekStartUtc.Date.AddDays(-(((int)weekStartUtc.DayOfWeek + 6) % 7));
         _state = state;
         _stateEnteredUtc = nowUtc;
         _consecutiveLosses = Math.Max(0, consecutiveLosses);

@@ -53,6 +53,7 @@ public sealed class TradingEngine
     private readonly Dictionary<string, FeatureVector> _latestFeatures = new Dictionary<string, FeatureVector>(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> _lastSignalBar = new Dictionary<string, DateTime>(StringComparer.Ordinal);
     private readonly Dictionary<string, MarketSchedule> _schedules = new Dictionary<string, MarketSchedule>(StringComparer.Ordinal);
+    private readonly Dictionary<string, RegimeConfidenceScale> _clarity = new Dictionary<string, RegimeConfidenceScale>(StringComparer.Ordinal);
     private readonly List<OpenPosition> _positions = new List<OpenPosition>();
     private readonly Dictionary<string, ExitPlan> _plans = new Dictionary<string, ExitPlan>(StringComparer.Ordinal);
 
@@ -95,6 +96,10 @@ public sealed class TradingEngine
     private readonly FilterValueLedger _filterLedger;
     private readonly Dashboard _dashboard;
     private readonly AlertWatcher _watcher = new AlertWatcher();
+    private readonly CashFlowDetector _cashFlow = new CashFlowDetector();
+
+    /// <summary>Суммарная чистая прибыль по закрытым сделкам — опора для распознавания пополнений.</summary>
+    private double _realisedNetTotal;
 
     private RiskAssessment _lastRisk;
     private AnomalyReport _lastAnomaly;
@@ -181,6 +186,7 @@ public sealed class TradingEngine
         _regimeModels[symbolName] = new StatisticalRegimeModel(_config.Regime);
         _regimes[symbolName] = RegimeAssessment.Unknown;
         _schedules[symbolName] = schedule ?? MarketSchedule.Unknown;
+        _clarity[symbolName] = new RegimeConfidenceScale(minSamples: _config.Regime.ClaritySampleMinimum);
     }
 
     /// <summary>
@@ -277,6 +283,13 @@ public sealed class TradingEngine
 
         _latestFeatures[symbolName] = features;
         _regimes[symbolName] = _regimeModels[symbolName].Classify(features);
+
+        // Шкала уверенности строится из собственных чтений классификатора, в том числе на
+        // прогреве: порог «яснее обычного» не имеет смысла без представления об обычном.
+        if (_clarity.TryGetValue(symbolName, out RegimeConfidenceScale scale))
+        {
+            scale.Observe(_regimes[symbolName].Confidence);
+        }
         _lastAnomaly = _anomaly.Evaluate(features);
 
         // Прогрев заканчивается здесь. Всё выше накапливает состояние рынка и обязано
@@ -285,6 +298,12 @@ public sealed class TradingEngine
 
         // 2. Состояние счёта и риск.
         AccountSnapshot account = _broker.GetAccount();
+
+        // Пополнение и вывод — не результат торговли. Не отличать их значит читать
+        // внесённые деньги как заработанные: пик капитала подскакивает до уровня, которого
+        // торговля не достигала, дневная точка отсчёта остаётся на старой, а защитная
+        // постура снимается условием восстановления, выполненным деньгами из кармана.
+        ApplyCashFlowIfAny(account);
         _lastRisk = _risk.Evaluate(nowUtc, account, _lastAnomaly.Severity, _anomaly.InRecoveryPeriod);
 
         BeginOrJoinCycle(nowUtc, symbolName, bar.OpenTimeUtc);
@@ -313,6 +332,7 @@ public sealed class TradingEngine
                     Data = data,
                     Features = features,
                     Regime = _regimes[symbolName],
+                    RegimeClarityThreshold = RegimeClarityThresholdFor(symbolName),
                     DataQuality = _dataQuality.Evaluate(
                         nowUtc, data.Spec, data.LatestQuote, data.Signal, data.Ticks, data.Spread, ScheduleOf(symbolName)),
                 },
@@ -398,6 +418,41 @@ public sealed class TradingEngine
         return Math.Max(measured, MathUtil.Clamp01(global.UniverseCorrelation));
     }
 
+    private void ApplyCashFlowIfAny(AccountSnapshot account)
+    {
+        double delta = _cashFlow.Detect(account.Balance, account.Equity, _realisedNetTotal);
+        if (delta == 0) return;
+
+        _risk.NoteCashFlow(delta);
+        _drawdown.NoteCashFlow(delta);
+
+        _journal.Write($"ДВИЖЕНИЕ ПО СЧЁТУ: {delta:+0.00;-0.00} — " +
+                       (delta > 0 ? "пополнение" : "вывод") +
+                       ". Точки отсчёта риска и пик капитала сдвинуты; результатом торговли это не считается.");
+    }
+
+    /// <summary>Суммарная чистая прибыль по закрытым реальным сделкам.</summary>
+    public double RealisedNetTotal => _realisedNetTotal;
+
+    /// <summary>Распознанные движения денег по счёту.</summary>
+    public CashFlowDetector CashFlow => _cashFlow;
+
+    /// <summary>
+    /// Порог ясности режима для инструмента: перцентиль от его собственного распределения,
+    /// но не ниже абсолютного пола.
+    /// </summary>
+    public double RegimeClarityThresholdFor(string symbolName) =>
+        _clarity.TryGetValue(symbolName, out RegimeConfidenceScale scale)
+            ? scale.ThresholdFor(
+                _config.Regime.RegimeClarityPercentile,
+                _config.Regime.MinConfidenceToTrade,
+                _config.Regime.UncalibratedConfidenceThreshold)
+            : _config.Regime.UncalibratedConfidenceThreshold;
+
+    /// <summary>Шкала уверенности классификатора по инструменту — для отчётов.</summary>
+    public RegimeConfidenceScale ClarityScale(string symbolName) =>
+        _clarity.TryGetValue(symbolName, out RegimeConfidenceScale scale) ? scale : null;
+
     /// <summary>Контекст рынка от эталонного инструмента (разделы 25–27).</summary>
     private GlobalMarketContext BuildGlobalContext()
     {
@@ -454,6 +509,7 @@ public sealed class TradingEngine
             Regime = regime,
             Ensemble = ensemble,
             DataQuality = quality,
+            RegimeClarityThreshold = RegimeClarityThresholdFor(symbolName),
         };
 
         GateOutcome pre = _gate.CheckPreTrade(candidate, _lastRisk, _lastAnomaly, _lastSignalBar, nowUtc);
@@ -894,6 +950,7 @@ public sealed class TradingEngine
         _probability.Observe(record);
         _risk.OnTradeClosed(nowUtc, record.IsWin);
         TradesClosed++;
+        if (!record.IsVirtual) _realisedNetTotal += record.NetProfit;
 
         _journal.Write($"ЗАКРЫТА {record}");
     }
@@ -1464,6 +1521,7 @@ public sealed class TradingEngine
 
             _performance.Record(record);
             _probability.Observe(record);
+            if (!record.IsVirtual) _realisedNetTotal += record.NetProfit;
             replayed++;
         }
 

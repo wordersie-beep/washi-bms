@@ -174,7 +174,11 @@ public class HeartbeatTests
         h.Feed(sim.Generate(1200, 0.0004, 0.0025), spreadFraction: 0.00005);
 
         // Капитал падает ниже дневного лимита.
-        h.Broker.SetAccount(new AccountSnapshot(90000, 90000, 0, 90000, 2000, 50, false, "USD"));
+        //
+        // Падает ИМЕННО КАПИТАЛ, баланс остаётся прежним: так выглядит убыток по открытой
+        // позиции. Уронить заодно и баланс значило бы смоделировать вывод денег со счёта —
+        // распознаватель движений по счёту так это и прочитал бы, и был бы прав.
+        h.Broker.SetAccount(new AccountSnapshot(100000, 90000, 0, 90000, 2000, 50, false, "USD"));
         h.Feed(sim.Generate(5, 0.0004, 0.0025), spreadFraction: 0.00005);
 
         string line = h.Engine.RenderHeartbeat(h.LastTimeUtc);

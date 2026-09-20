@@ -79,10 +79,11 @@ public sealed class TradeGate
             return GateOutcome.Reject(NoTradeReason.RegimeMismatch, $"regime {regime.Primary} is hostile to new risk");
         }
 
-        if (regime.Confidence < _config.Regime.MinConfidenceToTrade)
+        if (regime.Confidence < candidate.RegimeClarityThreshold)
         {
             return GateOutcome.Reject(NoTradeReason.LowRegimeConfidence,
-                $"regime confidence {regime.Confidence:P0} below the {_config.Regime.MinConfidenceToTrade:P0} minimum");
+                $"regime confidence {regime.Confidence:P0} below the {candidate.RegimeClarityThreshold:P0} minimum " +
+                $"(верхние {1 - _config.Regime.RegimeClarityPercentile:P0} чтений этого классификатора)");
         }
 
         // 5. Ensemble conviction.
