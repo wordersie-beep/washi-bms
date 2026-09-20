@@ -94,7 +94,8 @@ public sealed class PositionSizer
         double correlationPenalty,
         double dataQualityScore,
         double executionQuality,
-        double remainingRiskBudgetPercent)
+        double remainingRiskBudgetPercent,
+        bool isColdStart = false)
     {
         if (spec == null) return SizingResult.Rejected(NoTradeReason.BrokerConstraint, "symbol specification unavailable");
         if (!account.IsUsable) return SizingResult.Rejected(NoTradeReason.DataQuality, "account snapshot unusable");
@@ -124,6 +125,10 @@ public sealed class PositionSizer
         double volatility = VolatilityTargetFactor(atrPercentile);
         double correlation = MathUtil.Clamp(1.0 - (0.5 * MathUtil.Clamp01(correlationPenalty)), 0.5, 1.0);
         double dataQuality = MathUtil.Clamp(dataQualityScore, 0.3, 1.0);
+
+        // Холодный старт: система торгует без истории, ради истории. Это цена разрыва
+        // замкнутого круга — и платить её должен РАЗМЕР, а не отказ от защиты.
+        double coldStart = isColdStart ? MathUtil.Clamp01(_config.ColdStartRiskMultiplier) : 1.0;
         double execution = MathUtil.Clamp(executionQuality, 0.3, 1.0);
 
         factors["riskState"] = riskState;
@@ -135,9 +140,10 @@ public sealed class PositionSizer
         factors["correlation"] = correlation;
         factors["dataQuality"] = dataQuality;
         factors["execution"] = execution;
+        if (isColdStart) factors["coldStart"] = coldStart;
 
         double riskPercent = _config.RiskPerTradePercent
-            * riskState * regime * confidence * edge * strategy * volatility * correlation * dataQuality * execution;
+            * riskState * regime * confidence * edge * strategy * volatility * correlation * dataQuality * execution * coldStart;
 
         // --- Hard caps -------------------------------------------------------------------
         // Applied last and unconditionally. Whatever the factors produced, this is the line

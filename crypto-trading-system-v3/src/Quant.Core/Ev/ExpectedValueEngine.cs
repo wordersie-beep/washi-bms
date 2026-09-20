@@ -91,13 +91,29 @@ public sealed class ExpectedValueEngine
         double evStandardError = probability.StandardError * (expectedWinR + expectedLossR);
         double lowerBound = ev - (_config.EdgeConfidenceZ * evStandardError);
 
-        // --- Required edge -------------------------------------------------------------------
-        double requiredEdge = RequiredEdge(costR, evStandardError, regimeConfidence, volatilityStress, probability);
+        // --- Холодный старт ------------------------------------------------------------------
+        //
+        // Пока истории нет, три штрафа в требуемом преимуществе наказывают за отсутствие
+        // данных — а данные берутся только из сделок. Требуемое доходило до 0.8R при базовом
+        // пороге 0.10R, и первая сделка была невозможна никогда.
+        //
+        // В холодном старте решение принимается по ТОЧЕЧНОЙ оценке, а не по нижней границе:
+        // ширина границы тоже измеряет незнание, а не риск сделки. Структурные требования —
+        // положительное ожидание после издержек, отношение прибыли к риску, стоимость —
+        // остаются в полной силе, и позиция открывается пробным объёмом.
+        bool coldStart = _config.ColdStartTrades > 0 && _performance.TotalTrades < _config.ColdStartTrades;
+
+        double requiredEdge = RequiredEdge(
+            costR, evStandardError, regimeConfidence, volatilityStress, probability, coldStart);
+
+        double decisionEdge = coldStart ? ev : lowerBound;
 
         return new ExpectedValueResult
         {
             ExpectedValueR = ev,
             LowerBoundR = lowerBound,
+            DecisionEdgeR = decisionEdge,
+            IsColdStart = coldStart,
             RequiredEdgeR = requiredEdge,
             ExpectedWinR = expectedWinR,
             ExpectedLossR = expectedLossR,
@@ -166,7 +182,8 @@ public sealed class ExpectedValueEngine
         double evStandardError,
         double regimeConfidence,
         double volatilityStress,
-        ProbabilityEstimate probability)
+        ProbabilityEstimate probability,
+        bool coldStart)
     {
         double edge = _config.BaseMinimumEdgeR;
 
@@ -174,7 +191,11 @@ public sealed class ExpectedValueEngine
         edge += costR * Math.Max(0, _config.CostEdgeMultiplier - 1.0);
 
         // Statistical uncertainty.
-        edge += evStandardError * _config.UncertaintyEdgeMultiplier;
+        //
+        // В холодном старте не начисляется: ширина оценки без истории измеряет незнание, а
+        // не риск конкретной сделки, и наказывать за неё значит требовать доказательства,
+        // которое можно добыть только сделкой.
+        if (!coldStart) edge += evStandardError * _config.UncertaintyEdgeMultiplier;
 
         // Regime ambiguity.
         edge += 0.15 * (1.0 - MathUtil.Clamp01(regimeConfidence));
@@ -186,13 +207,22 @@ public sealed class ExpectedValueEngine
         // alone captures, because the standard error itself is estimated from that sample.
         // Границы берутся из самой оценки, а не зашиты здесь: иначе одно и то же понятие
         // «достаточной выборки» существовало бы в двух местах с разными числами.
-        double sampleThinness = 1.0 - MathUtil.LinearScale(
-            probability.EffectiveSample, probability.MinSample, probability.FullTrustSample * 1.5);
-        edge += 0.15 * sampleThinness;
+        //
+        // В холодном старте не начисляется по той же причине: выборка тонка именно потому,
+        // что сделок ещё не было.
+        if (!coldStart)
+        {
+            double sampleThinness = 1.0 - MathUtil.LinearScale(
+                probability.EffectiveSample, probability.MinSample, probability.FullTrustSample * 1.5);
+            edge += 0.15 * sampleThinness;
+        }
 
         // Poor calibration: if the model's stated probabilities have not matched reality,
         // every number feeding this calculation is suspect.
-        edge += 0.20 * (1.0 - probability.CalibrationQuality);
+        //
+        // В холодном старте калибровки нет не потому, что модель ошибалась, а потому что
+        // сверять было не с чем.
+        if (!coldStart) edge += 0.20 * (1.0 - probability.CalibrationQuality);
 
         return MathUtil.Clamp(edge, _config.BaseMinimumEdgeR, 2.0);
     }

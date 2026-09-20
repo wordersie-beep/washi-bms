@@ -425,10 +425,41 @@ public class CostModelTests
 
 public class ExpectedValueEngineTests
 {
-    private static ExpectedValueEngine Engine(out PerformanceStore store, EngineConfig config = null)
+    /// <param name="coldStart">
+    /// По умолчанию хранилище наполняется историей, чтобы движок НЕ был в холодном старте.
+    ///
+    /// Иначе большинство этих тестов проверяло бы не то, что заявляет: в холодном старте
+    /// штрафы за отсутствие данных сняты сознательно — они наказывают за состояние,
+    /// выйти из которого можно только сделкой. Свойства «неопределённость поднимает
+    /// планку» и «плохая калибровка поднимает планку» относятся к системе, у которой
+    /// история уже есть.
+    /// </param>
+    private static ExpectedValueEngine Engine(out PerformanceStore store, EngineConfig config = null,
+        bool coldStart = false)
     {
         config ??= new EngineConfig();
         store = new PerformanceStore(config.Adaptation);
+
+        if (!coldStart)
+        {
+            for (int i = 0; i < config.Ev.ColdStartTrades + 5; i++)
+            {
+                store.Record(new TradeRecord
+                {
+                    TradeId = "seed-" + i,
+                    SymbolName = "SEED",
+                    StrategyName = "Seed",
+                    Direction = Side.Long,
+                    Regime = MarketRegime.Unknown,
+                    EntryTimeUtc = RiskFixtures.T0.AddHours(i),
+                    ExitTimeUtc = RiskFixtures.T0.AddHours(i).AddMinutes(30),
+                    R = i % 2 == 0 ? 1.0 : -1.0,
+                    ExitReason = ExitReason.StopLoss,
+                    Mode = OperatingMode.Paper,
+                });
+            }
+        }
+
         return new ExpectedValueEngine(config.Ev, store);
     }
 

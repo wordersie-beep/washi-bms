@@ -213,7 +213,8 @@ public sealed class TradeGate
         if (!ev.IsAcceptable)
         {
             return GateOutcome.Reject(NoTradeReason.InsufficientEdge,
-                $"edge lower bound {ev.LowerBoundR:F3}R below the {ev.RequiredEdgeR:F3}R required");
+                $"edge {ev.DecisionEdgeR:F3}R below the {ev.RequiredEdgeR:F3}R required" +
+                (ev.IsColdStart ? " (холодный старт: решение по точечной оценке, объём пробный)" : ""));
         }
 
         return GateOutcome.Pass;

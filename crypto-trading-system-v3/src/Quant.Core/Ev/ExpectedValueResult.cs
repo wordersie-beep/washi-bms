@@ -12,6 +12,7 @@ public sealed class ExpectedValueResult
     {
         ExpectedValueR = double.NegativeInfinity,
         LowerBoundR = double.NegativeInfinity,
+        DecisionEdgeR = double.NegativeInfinity,
         RequiredEdgeR = 0,
         Rationale = reason,
     };
@@ -25,6 +26,18 @@ public sealed class ExpectedValueResult
     /// the estimate's own error bars gets traded as though it were real.
     /// </summary>
     public double LowerBoundR { get; init; }
+
+    /// <summary>
+    /// Величина, по которой принимается решение: нижняя граница в обычном режиме и точечная
+    /// оценка в холодном старте.
+    ///
+    /// Отдельное поле, а не выбор на месте: иначе каждый читатель делал бы этот выбор сам,
+    /// и рано или поздно один из них выбрал бы иначе.
+    /// </summary>
+    public double DecisionEdgeR { get; init; }
+
+    /// <summary>Решение принято без истории, пробным объёмом.</summary>
+    public bool IsColdStart { get; init; }
 
     /// <summary>Edge the trade had to clear, above zero, to be worth taking (spec section 18).</summary>
     public double RequiredEdgeR { get; init; }
@@ -50,10 +63,10 @@ public sealed class ExpectedValueResult
     public string Rationale { get; init; }
 
     /// <summary>The single gate: the lower bound must clear the required edge.</summary>
-    public bool IsAcceptable => MathUtil.IsFinite(LowerBoundR) && LowerBoundR >= RequiredEdgeR;
+    public bool IsAcceptable => MathUtil.IsFinite(DecisionEdgeR) && DecisionEdgeR >= RequiredEdgeR;
 
     /// <summary>How far past the required edge the trade sits. Feeds opportunity ranking.</summary>
-    public double EdgeSurplusR => MathUtil.IsFinite(LowerBoundR) ? LowerBoundR - RequiredEdgeR : double.NegativeInfinity;
+    public double EdgeSurplusR => MathUtil.IsFinite(DecisionEdgeR) ? DecisionEdgeR - RequiredEdgeR : double.NegativeInfinity;
 
     public override string ToString() =>
         MathUtil.IsFinite(ExpectedValueR)

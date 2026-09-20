@@ -424,6 +424,21 @@ public sealed class EvConfig
     /// </summary>
     public double EdgeConfidenceZ { get; set; } = 1.0;
 
+    /// <summary>
+    /// Число реальных сделок, до которого система считается НЕ ИМЕЮЩЕЙ ИСТОРИИ.
+    ///
+    /// Существует потому, что три штрафа в требуемом преимуществе наказывают за отсутствие
+    /// данных: тонкая выборка, плохая калибровка и ширина оценки. Все три снимаются только
+    /// сделками — а сделок нет, пока штрафы действуют. Требуемое преимущество доходило до
+    /// 0.8R при базовом пороге 0.10R, и первая сделка была невозможна никогда.
+    ///
+    /// Замкнутый круг разрывается не ослаблением требований к сделке, а переносом защиты в
+    /// РАЗМЕР: пока истории нет, решение принимается по точечной оценке с полными
+    /// структурными требованиями, а позиция открывается пробным, минимальным объёмом.
+    /// Ноль отключает холодный старт полностью.
+    /// </summary>
+    public int ColdStartTrades { get; set; } = 20;
+
     /// <summary>Minimum reward-to-risk at the first target.</summary>
     public double MinRewardToRisk { get; set; } = 1.3;
 
@@ -450,6 +465,7 @@ public sealed class EvConfig
         if (MinRewardToRisk <= 0) problems.Add("MinRewardToRisk must be positive.");
         if (MfeTargetQuantile <= 0 || MfeTargetQuantile >= 1) problems.Add("MfeTargetQuantile must be in (0, 1).");
         if (AssumedLossR < 1.0) problems.Add("AssumedLossR below 1.0 assumes stops fill better than requested.");
+        if (ColdStartTrades < 0) problems.Add("ColdStartTrades cannot be negative.");
         if (EdgeConfidenceZ < 0) problems.Add("EdgeConfidenceZ cannot be negative.");
     }
 }
@@ -628,6 +644,14 @@ public sealed class SizingConfig
     public double RiskPerTradePercent { get; set; } = 0.35;
 
     /// <summary>Floor on risk per trade; below this, the trade is skipped rather than shrunk further.</summary>
+    /// <summary>
+    /// Множитель размера позиции, пока у системы нет истории.
+    ///
+    /// Цена разрыва замкнутого круга: первые сделки совершаются ради данных, и стоить они
+    /// должны соответственно. Это не ослабление защиты, а её перенос — из отказа в размер.
+    /// </summary>
+    public double ColdStartRiskMultiplier { get; set; } = 0.35;
+
     public double MinRiskPerTradePercent { get; set; } = 0.05;
 
     /// <summary>Weight of signal confidence in sizing, 0..1.</summary>

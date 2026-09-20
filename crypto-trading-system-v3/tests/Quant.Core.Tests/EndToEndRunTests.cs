@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Quant.Core;
 using Quant.Core.Config;
+using Quant.Core.Journal;
 using Quant.Core.Primitives;
 using Quant.Core.Risk;
 using Quant.Core.Stats;
@@ -84,6 +85,10 @@ public class EndToEndRunTests
         foreach (string a in alerts.Take(20)) _out.WriteLine(a);
 
         _out.WriteLine("");
+        _out.WriteLine(Quant.Core.Journal.DecisionFunnel.Render(
+            harness.Engine.Funnel(), harness.Engine.Journal.TotalAccepted));
+
+        _out.WriteLine("");
         _out.WriteLine("════════ ИТОГОВЫЙ ДАШБОРД ════════");
         _out.WriteLine(harness.Engine.RenderDashboard(harness.LastTimeUtc));
 
@@ -114,12 +119,16 @@ public class EndToEndRunTests
             "ни один кандидат не дошёл до оценки ожидания — где-то раньше стоят непроходимые ворота: " +
             string.Join(", ", reasons.OrderByDescending(k => k.Value).Take(5).Select(k => $"{k.Key}={k.Value}")));
 
-        // 3. Ни одни ворота не отвергают всё, что до них доходит, по структурной причине.
-        //    Отношение прибыли к риску плана обязано быть достижимым.
-        Assert.True(config.Exit.Target1R * config.Exit.Target1ClosePercent +
-                    Math.Max(config.Exit.Target1R, config.Exit.Target2R) *
-                    (1 - config.Exit.Target1ClosePercent) >= config.Ev.MinRewardToRisk,
-            "план выхода не способен достичь минимально допустимого отношения прибыли к риску");
+        // 3. Ни один СТРУКТУРНЫЙ фильтр не отвергает всё, что до него доходит.
+        //
+        //    Экономические фильтры сюда не входят: на рынке без преимущества отказать всем
+        //    — правильное поведение, а случайное блуждание преимущества не содержит.
+        //    Структурный же порог, который не проходит никто, недостижим по построению —
+        //    и это ровно тот дефект, который был найден.
+        IReadOnlyList<DecisionFunnel.Stage> blocked = harness.Engine.ImpassableGates();
+        Assert.True(blocked.Count == 0,
+            "структурно непроходимые фильтры: " +
+            string.Join(", ", blocked.Select(b => $"{b.Reason} ({b.Reached} дошло, 0 прошло)")));
 
         // 4. Риск на сделку не превышал жёсткий предел НИ РАЗУ.
         IReadOnlyList<TradeRecord> trades = harness.Engine.Performance.Trades;

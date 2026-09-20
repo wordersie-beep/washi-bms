@@ -596,7 +596,8 @@ public sealed class TradingEngine
             ensemble.Weights != null && ensemble.Weights.TryGetValue(ensemble.Leader.StrategyName, out double w) ? w : 0.2,
             features.AtrPercentile,
             CorrelationPenaltyFor(symbolName, global),
-            quality.Score, _executionQuality.Quality, budget);
+            quality.Score, _executionQuality.Quality, budget,
+            isColdStart: candidate.ExpectedValue.IsColdStart);
 
         GateOutcome portfolio = _gate.CheckPortfolio(candidate, _portfolio, exposure, _clusters, CountPositionsIn(symbolName));
         if (!portfolio.Passed) { RecordRejection(candidate, portfolio, account); return; }
@@ -1234,6 +1235,19 @@ public sealed class TradingEngine
         });
     }
 
+    /// <summary>
+    /// Воронка решений: сколько кандидатов дошло до каждого фильтра и сколько прошло.
+    ///
+    /// Фильтр с нулевой долей прошедших при большой выборке — не осторожность, а поломка.
+    /// Отличить одно от другого по журналу отказов невозможно: он выглядит одинаково.
+    /// </summary>
+    public IReadOnlyList<DecisionFunnel.Stage> Funnel() =>
+        DecisionFunnel.Build(_journal.ReasonCounts, _journal.TotalAccepted);
+
+    /// <summary>Фильтры, не пропустившие НИ ОДНОГО кандидата при достаточной выборке.</summary>
+    public IReadOnlyList<DecisionFunnel.Stage> ImpassableGates(long minimumSample = 50) =>
+        DecisionFunnel.Impassable(Funnel(), minimumSample);
+
     /// <summary>Когда система в последний раз чем-то отличалась от самой себя.</summary>
     public DateTime LastChangeUtc => _watcher.LastChangeUtc;
 
@@ -1250,6 +1264,23 @@ public sealed class TradingEngine
         // Монте-Карло дописывается, когда сделок достаточно. Раньше этого момента
         // распределение построить не из чего, и печатать его значило бы выдать шум за
         // оценку риска.
+        // Воронка дописывается, когда решений накопилось достаточно, чтобы доли что-то
+        // значили. Она отвечает на вопрос, который обычная сводка причин отказа не
+        // различает: фильтр осторожен или сломан.
+        IReadOnlyList<DecisionFunnel.Stage> funnel = Funnel();
+        if (_journal.TotalAccepted + _journal.TotalRejected >= 200 && funnel.Count > 0)
+        {
+            dashboard += Environment.NewLine + DecisionFunnel.Render(funnel, _journal.TotalAccepted);
+
+            IReadOnlyList<DecisionFunnel.Stage> blocked = DecisionFunnel.Impassable(funnel);
+            if (blocked.Count > 0)
+            {
+                dashboard += Environment.NewLine +
+                    "  ВНИМАНИЕ: перечисленные фильтры не пропустили ни одного кандидата. " +
+                    "Это может означать не осторожность, а недостижимый порог.";
+            }
+        }
+
         MonteCarloResult mc = RunMonteCarlo(paths: _config.Adaptation.MonteCarloPaths);
         return mc.Paths > 0 ? dashboard + Environment.NewLine + mc.Render() : dashboard;
     }
