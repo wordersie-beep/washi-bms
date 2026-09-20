@@ -284,6 +284,15 @@ public sealed class StrategyConfig
     /// <summary>Observations used for the rolling strategy-signal correlation estimate.</summary>
     public int SignalCorrelationWindow { get; set; } = 100;
 
+    /// <summary>
+    /// Наблюдений, ниже которых эмпирическая корреляция сигналов не считается известной.
+    ///
+    /// До этого порога действует только структурная оценка — по объявленным семействам
+    /// признаков. Корреляция по десятку наблюдений это шум, и принимать её за знание
+    /// значит то завышать, то занижать число независимых голосов случайным образом.
+    /// </summary>
+    public int MinSamplesForSignalCorrelation { get; set; } = 30;
+
     /// <summary>Regime-fit score below which a strategy abstains rather than votes weakly.</summary>
     public double MinRegimeFit { get; set; } = 0.25;
 
@@ -303,6 +312,7 @@ public sealed class StrategyConfig
     {
         if (MaxSingleStrategyWeight <= 0 || MaxSingleStrategyWeight > 1) problems.Add("MaxSingleStrategyWeight must be in (0, 1].");
         if (MinActiveStrategyWeight < 0 || MinActiveStrategyWeight >= MaxSingleStrategyWeight) problems.Add("MinActiveStrategyWeight must be below MaxSingleStrategyWeight.");
+        if (MinSamplesForSignalCorrelation < 10) problems.Add("MinSamplesForSignalCorrelation below 10 turns noise into a correlation estimate.");
         if (SignalCorrelationWindow < 20) problems.Add("SignalCorrelationWindow below 20 is not estimable.");
         if (SignalExpiryBars < 1) problems.Add("SignalExpiryBars must be at least 1.");
         if (MaxChaseInAtr <= 0) problems.Add("MaxChaseInAtr must be positive.");

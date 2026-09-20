@@ -15,14 +15,28 @@ public readonly struct ProbabilityEstimate
 {
     public static readonly ProbabilityEstimate Unavailable = new ProbabilityEstimate(0.5, 0.5, 0, 0, "no estimate available");
 
-    public ProbabilityEstimate(double pWin, double standardError, double effectiveSample, double calibrationQuality, string basis)
+    public ProbabilityEstimate(
+        double pWin, double standardError, double effectiveSample, double calibrationQuality, string basis,
+        int minSample = 20, int fullTrustSample = 100)
     {
         PWin = MathUtil.Clamp01(pWin);
         StandardError = Math.Max(0, standardError);
         EffectiveSample = Math.Max(0, effectiveSample);
         CalibrationQuality = MathUtil.Clamp01(calibrationQuality);
         Basis = basis;
+        MinSample = Math.Max(1, minSample);
+        FullTrustSample = Math.Max(MinSample + 1, fullTrustSample);
     }
+
+    /// <summary>
+    /// Выборка, ниже которой срез не несёт самостоятельной информации, и выборка, при
+    /// которой его оценке можно доверять без иерархической поддержки.
+    ///
+    /// Приходят из настроек, а не зашиты здесь: это ровно те числа, ради которых и нужен
+    /// анализ чувствительности, и спрятать их в формуле значит вывести их из-под него.
+    /// </summary>
+    public int MinSample { get; }
+    public int FullTrustSample { get; }
 
     /// <summary>Posterior mean probability that the trade reaches its target before its stop.</summary>
     public double PWin { get; }
@@ -50,7 +64,9 @@ public readonly struct ProbabilityEstimate
     /// Distinct from the probability: you can be very confident that something is unlikely.
     /// </summary>
     public double Confidence =>
-        MathUtil.Clamp01(MathUtil.LinearScale(EffectiveSample, 10, 120) * (0.4 + (0.6 * CalibrationQuality)));
+        MathUtil.Clamp01(
+            MathUtil.LinearScale(EffectiveSample, MinSample * 0.5, FullTrustSample * 1.2) *
+            (0.4 + (0.6 * CalibrationQuality)));
 
     /// <summary>Lower confidence bound on the win probability, <paramref name="z"/> sigma below the mean.</summary>
     public double LowerBound(double z) => MathUtil.Clamp01(PWin - (z * StandardError));

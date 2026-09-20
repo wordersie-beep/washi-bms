@@ -74,7 +74,7 @@ public sealed class SignalCorrelationTracker
         double empirical = 0;
         if (_history.TryGetValue(a, out RollingWindow wa) && _history.TryGetValue(b, out RollingWindow wb))
         {
-            double correlation = wa.CorrelationWith(wb, _config.SignalCorrelationWindow, minSample: 30);
+            double correlation = wa.CorrelationWith(wb, _config.SignalCorrelationWindow, _config.MinSamplesForSignalCorrelation);
             empirical = Math.Max(0, correlation);
         }
 
@@ -124,7 +124,10 @@ public sealed class SignalCorrelationTracker
             {
                 maxOverlap = Math.Max(maxOverlap, Overlap(strategyNames[i], strategyNames[j]));
             }
-            total += 1.0 - maxOverlap;
+            // Выше порога стратегии считаются ОДНИМ свидетельством, а не двумя: остаточный
+            // вклад в треть голоса означал бы, что восемь стратегий, читающих одно и то же,
+            // дают почти три независимых подтверждения. Ниже порога скидка непрерывна.
+            total += maxOverlap >= _config.SignalCorrelationThreshold ? 0.0 : 1.0 - maxOverlap;
         }
 
         return Math.Max(1.0, total);

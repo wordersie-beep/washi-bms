@@ -184,7 +184,10 @@ public sealed class ExpectedValueEngine
 
         // Thin evidence: a very small effective sample demands more than the standard error
         // alone captures, because the standard error itself is estimated from that sample.
-        double sampleThinness = 1.0 - MathUtil.LinearScale(probability.EffectiveSample, 20, 150);
+        // Границы берутся из самой оценки, а не зашиты здесь: иначе одно и то же понятие
+        // «достаточной выборки» существовало бы в двух местах с разными числами.
+        double sampleThinness = 1.0 - MathUtil.LinearScale(
+            probability.EffectiveSample, probability.MinSample, probability.FullTrustSample * 1.5);
         edge += 0.15 * sampleThinness;
 
         // Poor calibration: if the model's stated probabilities have not matched reality,

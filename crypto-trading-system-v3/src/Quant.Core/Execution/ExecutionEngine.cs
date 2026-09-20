@@ -64,18 +64,26 @@ public sealed class ExecutionEngine
     private readonly IdempotencyGuard _idempotency;
     private readonly string _instanceId;
 
+    private readonly Action<int> _delay;
+
     public ExecutionEngine(
         ExecutionConfig config,
         IBroker broker,
         ExecutionQualityTracker quality,
         IdempotencyGuard idempotency,
-        string instanceId)
+        string instanceId,
+        Action<int> delay = null)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _broker = broker ?? throw new ArgumentNullException(nameof(broker));
         _quality = quality ?? throw new ArgumentNullException(nameof(quality));
         _idempotency = idempotency ?? throw new ArgumentNullException(nameof(idempotency));
         _instanceId = instanceId ?? "default";
+
+        // Пауза вынесена в параметр, чтобы тесты не ждали по-настоящему. Умолчание —
+        // обычный сон потока: повторов не больше трёх, и торговый цикл всё равно ждёт
+        // ответа брокера.
+        _delay = delay ?? (ms => { if (ms > 0) System.Threading.Thread.Sleep(ms); });
     }
 
     /// <summary>Метка ордера. Префикс позволяет найти свои позиции после перезапуска.</summary>
@@ -144,6 +152,12 @@ public sealed class ExecutionEngine
             }
 
             log?.Invoke($"попытка {attempt + 1} не удалась ({result.Error})");
+
+            // Пауза перед повтором. Немедленный повтор почти наверняка встретит ту же
+            // причину: отсутствующая котировка не появляется за микросекунду, а реквота
+            // означает, что цена как раз движется. Повтор без паузы — это способ получить
+            // три отказа вместо одного и испортить статистику качества исполнения.
+            if (attempt < _config.MaxOrderRetries) _delay(_config.RetryDelayMs);
         }
 
         if (result == null || !result.IsSuccessful)

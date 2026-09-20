@@ -137,7 +137,9 @@ public sealed class BayesianProbabilityModel : ISignalProbabilityModel
                 standardError,
                 posterior.Strength,
                 _calibration.Quality(),
-                basis);
+                basis,
+                _config.MinSampleForBucket,
+                _config.FullTrustSample);
         }
         catch (Exception)
         {

@@ -299,7 +299,27 @@ public sealed class TradingEngine
         MaybeAdapt(nowUtc);
 
         // 6. Новые входы: кандидат встаёт в пачку этого бара.
-        if (!_haltedByReconciliation)
+        if (_haltedByReconciliation)
+        {
+            // Отказ записывается, а не пропускается молча. Иначе самое важное состояние
+            // системы — расхождение с брокером — не видно в сводке причин отказа, и
+            // человек смотрит на бота, который «просто ничего не делает».
+            RecordRejection(
+                new TradeCandidate
+                {
+                    TimeUtc = nowUtc,
+                    SymbolName = symbolName,
+                    Data = data,
+                    Features = features,
+                    Regime = _regimes[symbolName],
+                    DataQuality = _dataQuality.Evaluate(
+                        nowUtc, data.Spec, data.LatestQuote, data.Signal, data.Ticks, data.Spread, ScheduleOf(symbolName)),
+                },
+                GateOutcome.Reject(NoTradeReason.ReconciliationPending,
+                    "торговля остановлена до устранения расхождения с брокером"),
+                account);
+        }
+        else
         {
             ConsiderEntry(nowUtc, symbolName, data, features, account, global);
         }
@@ -412,6 +432,17 @@ public sealed class TradingEngine
         };
 
         GateOutcome pre = _gate.CheckPreTrade(candidate, _lastRisk, _lastAnomaly, _lastSignalBar, nowUtc);
+
+        // «Сигнала нет» и «все, у кого было мнение, отключены» — разные диагнозы, и лечатся
+        // они по-разному. Первый говорит о тихом рынке, второй — о том, что система сама
+        // вывела из работы всё, что могло торговать. Без этого различия в сводке причин
+        // отказа месяц простоя выглядит как месяц спокойного рынка.
+        if (!pre.Passed && pre.Reason == NoTradeReason.NoSignal && disabledSignals.Count > 0)
+        {
+            pre = GateOutcome.Reject(NoTradeReason.StrategyDisabled,
+                $"мнение было у {disabledSignals.Count} отключённых стратегий, у работающих — нет");
+        }
+
         if (!pre.Passed) { RecordRejection(candidate, pre, account); return; }
 
         // Издержки при стопе в одну ATR — масштабируются планировщиком выхода под реальный стоп.
@@ -457,7 +488,12 @@ public sealed class TradingEngine
             candidate.Probability.StandardError,
             candidate.Probability.EffectiveSample,
             candidate.Probability.CalibrationQuality,
-            candidate.Probability.Basis);
+            candidate.Probability.Basis,
+
+            // Пороги выборки переносятся: смещение от эталона не делает оценку ни более,
+            // ни менее обоснованной.
+            candidate.Probability.MinSample,
+            candidate.Probability.FullTrustSample);
         candidate.Probability = adjusted;
 
         candidate.ExpectedValue = _expectedValue.Evaluate(

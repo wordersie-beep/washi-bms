@@ -30,7 +30,7 @@ src/
   Quant.Core/                     вся логика, НОЛЬ зависимостей от cAlgo
   QuantCryptoV3/QuantCryptoV3/    cBot: адаптер платформы, ~849 строк
 tests/
-  Quant.Core.Tests/               328 тестов, работают без cTrader
+  Quant.Core.Tests/               334 тестов, работают без cTrader
 ```
 
 `Quant.Core` не ссылается на `cAlgo.API` вообще. Это даёт три вещи:
