@@ -201,6 +201,7 @@ public class QuantCryptoV3Bot : Robot
     private readonly Dictionary<Tf, TimeFrame> _timeframes = new Dictionary<Tf, TimeFrame>();
 
     private DateTime _lastDashboardUtc = DateTime.MinValue;
+    private DateTime _lastHeartbeatUtc = DateTime.MinValue;
     private bool _initialisationFailed;
 
     protected override void OnStart()
@@ -264,7 +265,10 @@ public class QuantCryptoV3Bot : Robot
             // Признак жизни идёт по ТАЙМЕРУ, а не по рыночным данным. Если бары перестали
             // приходить, это ровно тот случай, когда сообщение нужнее всего, — а событийный
             // путь в этот момент молчит вместе с рынком.
-            Timer.Start(TimeSpan.FromMinutes(Math.Max(1, HeartbeatIntervalMinutes)));
+            // Таймер идёт КАЖДУЮ МИНУТУ независимо от интервала признака жизни: проверять
+            // состояние и печатать его — разные вещи. Изменения должны быть видны сразу,
+            // а рутинная строка — раз в заданный интервал.
+            Timer.Start(TimeSpan.FromMinutes(1));
 
             Print($"QuantCryptoV3 запущен. Режим {_config.Mode}. Символы: {string.Join(", ", _symbols)}. " +
                   $"Счёт {(Account.IsLive ? "РЕАЛЬНЫЙ" : "демо")}, капитал {Account.Equity:F2} {Account.Asset.Name}.");
@@ -285,7 +289,8 @@ public class QuantCryptoV3Bot : Robot
             ReportTradingHours();
 
             Print(_engine.RenderHeartbeat(Server.TimeInUtc));
-            Print($"Признак жизни будет печататься каждые {HeartbeatIntervalMinutes} мин, дашборд — каждые {DashboardIntervalMinutes} мин.");
+            Print($"Состояние проверяется КАЖДУЮ МИНУТУ; об изменениях сообщается сразу. " +
+                  $"Признак жизни — раз в {HeartbeatIntervalMinutes} мин, дашборд — раз в {DashboardIntervalMinutes} мин.");
             Print("Если бот не торгует — это штатное поведение: настройки по умолчанию отклоняют " +
                   "подавляющее большинство сигналов. Причины видны в признаке жизни и в дашборде.");
 
@@ -549,7 +554,23 @@ public class QuantCryptoV3Bot : Robot
         {
             DateTime now = Server.TimeInUtc;
 
-            Print(_engine.RenderHeartbeat(now));
+            // 1. Изменения — немедленно. Это и есть смысл ежеминутной проверки: узнать о
+            //    событии сразу, а не прочитать через четверть часа в общей сводке.
+            IReadOnlyList<string> alerts = _engine.CollectAlerts(now);
+            for (int i = 0; i < alerts.Count; i++)
+            {
+                Print($"[{now:HH:mm:ss}Z] {alerts[i]}");
+            }
+
+            // 2. Признак жизни — по своему интервалу. Печатать его каждую минуту значило бы
+            //    заливать журнал 1440 одинаковыми строками в сутки, среди которых теряется
+            //    единственная важная. Он отвечает на другой вопрос: жив ли процесс вообще.
+            if (_lastHeartbeatUtc == DateTime.MinValue ||
+                (now - _lastHeartbeatUtc).TotalMinutes >= Math.Max(1, HeartbeatIntervalMinutes))
+            {
+                _lastHeartbeatUtc = now;
+                Print(_engine.RenderHeartbeat(now));
+            }
 
             if (_lastDashboardUtc == DateTime.MinValue) _lastDashboardUtc = now;
             if ((now - _lastDashboardUtc).TotalMinutes >= DashboardIntervalMinutes)

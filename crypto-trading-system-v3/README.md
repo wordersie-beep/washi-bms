@@ -6,7 +6,7 @@
 cTrader Algo / cTrader Cloud.
 
 ```
-24 496 строк C#   ·   307 тестов   ·   собирается в QuantCryptoV3.algo без предупреждений
+24 900 строк C#   ·   307 тестов   ·   собирается в QuantCryptoV3.algo без предупреждений
 ```
 
 ## Что это
@@ -49,7 +49,7 @@ crypto-trading-system-v3/
 │   │   ├── Stats/  Journal/  State/  Config/
 │   │   └── TradingEngine.cs             оркестратор
 │   └── QuantCryptoV3/QuantCryptoV3/     cBot: адаптер платформы
-├── tests/Quant.Core.Tests/              344 тестов, работают без cTrader
+├── tests/Quant.Core.Tests/              354 тестов, работают без cTrader
 └── docs/                                14 документов
 ```
 

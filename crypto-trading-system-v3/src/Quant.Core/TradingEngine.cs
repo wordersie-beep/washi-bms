@@ -94,6 +94,7 @@ public sealed class TradingEngine
     private readonly ExecutionEngine _execution;
     private readonly FilterValueLedger _filterLedger;
     private readonly Dashboard _dashboard;
+    private readonly AlertWatcher _watcher = new AlertWatcher();
 
     private RiskAssessment _lastRisk;
     private AnomalyReport _lastAnomaly;
@@ -1137,6 +1138,47 @@ public sealed class TradingEngine
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Что изменилось с прошлой проверки. Пустой список — не значит «всё плохо молчит»,
+    /// значит «ничего не произошло».
+    ///
+    /// Вызывается часто, поэтому не делает ничего тяжёлого: читает уже посчитанное
+    /// состояние и сравнивает его с предыдущим снимком.
+    /// </summary>
+    public IReadOnlyList<string> CollectAlerts(DateTime nowUtc)
+    {
+        var marketOpen = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var ready = new Dictionary<string, bool>(StringComparer.Ordinal);
+
+        foreach (KeyValuePair<string, SymbolDataSet> kv in _data)
+        {
+            marketOpen[kv.Key] = ScheduleOf(kv.Key).IsOpenAt(nowUtc);
+            ready[kv.Key] = kv.Value.IsReady;
+        }
+
+        var strategies = new Dictionary<string, StrategyStatus>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Adaptation.StrategyState> kv in _weights.States)
+        {
+            strategies[kv.Key] = kv.Value.Status;
+        }
+
+        return _watcher.Compare(nowUtc, new WatchedState
+        {
+            Risk = _lastRisk.State,
+            Blocking = _lastRisk.BlockingReason,
+            HaltedByReconciliation = _haltedByReconciliation,
+            OpenPositions = _positions.Count,
+            TradesClosed = TradesClosed,
+            Equity = _broker.GetAccount().Equity,
+            MarketOpen = marketOpen,
+            SymbolReady = ready,
+            Strategies = strategies,
+        });
+    }
+
+    /// <summary>Когда система в последний раз чем-то отличалась от самой себя.</summary>
+    public DateTime LastChangeUtc => _watcher.LastChangeUtc;
 
     public string RenderDashboard(DateTime nowUtc)
     {

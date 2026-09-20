@@ -361,6 +361,25 @@ public class WiringTests
         Assert.Equal(0.97, TradingEngine.CorrelationPenalty(0.97, stressed), 6);
     }
 
+    // ── Частота проверки состояния ───────────────────────────────────────────────
+
+    [Fact]
+    public void TheBotChecksItsStateEveryMinuteRegardlessOfTheHeartbeatInterval()
+    {
+        // Файл бота зависит от cAlgo и не участвует в тестах, поэтому проверяется исходник.
+        // Защита слабая, но лучше её отсутствия: привязать таймер обратно к интервалу
+        // признака жизни значит снова узнавать об остановке торговли через четверть часа.
+        string bot = System.IO.File.ReadAllText(
+            SourcePath("src/QuantCryptoV3/QuantCryptoV3/QuantCryptoV3Bot.cs"));
+
+        Assert.Contains("Timer.Start(TimeSpan.FromMinutes(1));", bot);
+        Assert.Contains("_engine.CollectAlerts(now)", bot);
+
+        // И признак жизни печатается по СВОЕМУ интервалу, а не на каждом срабатывании.
+        Assert.Contains("HeartbeatIntervalMinutes", bot);
+        Assert.Contains("_lastHeartbeatUtc", bot);
+    }
+
     // ── Вспомогательное ──────────────────────────────────────────────────────────
 
     private static SymbolSpec Spec() =>
