@@ -148,13 +148,32 @@ public sealed class StrategyWeightEngine
     /// Long-term performance factor, 0.2..1.2, shrunk toward neutral by how much the slice
     /// can be trusted.
     /// </summary>
-    private double LongTermFactor(SegmentStats stats, double trust)
+    private double LongTermFactor(SegmentStats stats, double trust) =>
+        LongTermPerformanceFactor(stats, trust, _config);
+
+    /// <summary>
+    /// Чистая функция — вынесена ради проверяемости: иначе её поведение проверяется только
+    /// через итоговый вес, где его перебивают соседние множители, и тест начинает измерять
+    /// не то, что заявляет.
+    /// </summary>
+    public static double LongTermPerformanceFactor(SegmentStats stats, double trust, AdaptationConfig config)
     {
-        if (stats.TotalTrades < _config.MinTradesForWeighting) return 1.0;
+        if (stats.TotalTrades < config.MinTradesForWeighting) return 1.0;
 
         double expectancyScore = MathUtil.Clamp(0.5 + (stats.ExpectancyR * 2.0), 0.2, 1.2);
         double profitFactorScore = MathUtil.Clamp(stats.ProfitFactor / 1.3, 0.2, 1.2);
-        double raw = (expectancyScore * 0.6) + (profitFactorScore * 0.4);
+
+        // Разброс учитывается отдельно от среднего. Две стратегии с одинаковым ожиданием
+        // +0.1R — это разные вещи, если одна даёт его ровно, а вторая чередует +2R и −1.8R:
+        // вторая уводит счёт в просадку, из которой первая не выходила бы вовсе.
+        //
+        // Штрафуется ТОЛЬКО нижний разброс (мера в духе Сортино): большие выигрыши — это
+        // не риск, и наказывать за них значило бы предпочитать стратегию, которая срезает
+        // прибыль, той, которая её берёт.
+        double stabilityScore = MathUtil.Clamp(
+            0.5 + (stats.DownsideAdjustedExpectancy * 0.5), 0.2, 1.2);
+
+        double raw = (expectancyScore * 0.45) + (profitFactorScore * 0.30) + (stabilityScore * 0.25);
 
         // Shrink toward 1.0 (no opinion) in proportion to how little the slice is trusted.
         return MathUtil.Clamp(1.0 + ((raw - 1.0) * MathUtil.Clamp01(trust)), 0.2, 1.2);
@@ -165,14 +184,35 @@ public sealed class StrategyWeightEngine
     /// recent estimate. This is the guard against a handful of trades swinging the weight:
     /// the adjustment is proportional to how much evidence is actually behind it.
     /// </summary>
-    private double RecentFactor(SegmentStats stats)
+    private double RecentFactor(SegmentStats stats) => RecentPerformanceFactor(stats);
+
+    /// <summary>
+    /// Фактор недавней результативности, 0.3..1.15.
+    ///
+    /// Поправка на доказательность сохранена: горстка сделок не должна двигать вес.
+    /// К ней добавлена поправка на разброс, и только к НАГРАДЕ, не к штрафу.
+    ///
+    /// Причина та же, что и в долгосрочном факторе: недавняя полоса +2.1R/−1.9R при том же
+    /// среднем, что и +0.6R/−0.4R, — это не лучший результат, а более шумный. Повышать за
+    /// неё вес значит наращивать размер позиции ровно там, где просадка вероятнее.
+    /// Штраф не смягчается сознательно: плохой результат остаётся плохим независимо от того,
+    /// каким ровным он был.
+    /// </summary>
+    public static double RecentPerformanceFactor(SegmentStats stats)
     {
         double effective = stats.RecentEffectiveSample;
         if (effective < 5) return 1.0;
 
         double raw = MathUtil.Clamp(0.5 + (stats.RecentExpectancyR * 2.0), 0.3, 1.15);
         double evidence = MathUtil.LinearScale(effective, 5, 30);
-        return MathUtil.Clamp(1.0 + ((raw - 1.0) * evidence), 0.3, 1.15);
+        double adjustment = (raw - 1.0) * evidence;
+
+        if (adjustment > 0)
+        {
+            adjustment *= MathUtil.LinearScale(stats.DownsideAdjustedExpectancy, 0, 0.30);
+        }
+
+        return MathUtil.Clamp(1.0 + adjustment, 0.3, 1.15);
     }
 
     /// <summary>

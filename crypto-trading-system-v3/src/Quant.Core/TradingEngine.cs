@@ -373,6 +373,30 @@ public sealed class TradingEngine
         }
     }
 
+    /// <summary>
+    /// Штраф за корреляцию для сайзинга.
+    ///
+    /// Берётся БОЛЬШЕЕ из корреляции инструмента с книгой и общей корреляции вселенной.
+    /// Второе нужно потому, что в стрессе корреляции сходятся к единице: инструмент,
+    /// выглядевший независимым по истории, перестаёт им быть ровно тогда, когда
+    /// независимость нужнее всего. Измеренная корреляция описывает прошлое, а размер
+    /// позиции выбирается под будущее.
+    /// </summary>
+    private double CorrelationPenaltyFor(string symbolName, GlobalMarketContext global) =>
+        CorrelationPenalty(_correlation.MeanAbsoluteCorrelation(symbolName), global);
+
+    /// <summary>
+    /// Чистая функция — вынесена ради проверяемости: поведение, спрятанное в приватном
+    /// методе, проверяется только косвенно, а косвенная проверка легко оказывается
+    /// проверкой чего-то другого.
+    /// </summary>
+    public static double CorrelationPenalty(double measured, GlobalMarketContext global)
+    {
+        if (global == null || !global.IsAvailable || !global.IsCorrelationStressed) return measured;
+
+        return Math.Max(measured, MathUtil.Clamp01(global.UniverseCorrelation));
+    }
+
     /// <summary>Контекст рынка от эталонного инструмента (разделы 25–27).</summary>
     private GlobalMarketContext BuildGlobalContext()
     {
@@ -514,7 +538,7 @@ public sealed class TradingEngine
             candidate.ExpectedValue.EdgeSurplusR,
             ensemble.Weights != null && ensemble.Weights.TryGetValue(ensemble.Leader.StrategyName, out double w) ? w : 0.2,
             features.AtrPercentile,
-            _correlation.MeanAbsoluteCorrelation(symbolName),
+            CorrelationPenaltyFor(symbolName, global),
             quality.Score, _executionQuality.Quality, budget);
 
         GateOutcome portfolio = _gate.CheckPortfolio(candidate, _portfolio, exposure, _clusters, CountPositionsIn(symbolName));
@@ -1119,10 +1143,16 @@ public sealed class TradingEngine
         AccountSnapshot account = _broker.GetAccount();
         PortfolioExposure exposure = _portfolio.Compute(_positions, account.Equity, _clusters);
 
-        return _dashboard.Render(
+        string dashboard = _dashboard.Render(
             nowUtc, _config.Mode, account, _lastRisk, exposure, _positions,
             _regimes, BuildSymbolStatus(nowUtc), _weights.States, _performance, _calibration,
             _executionQuality, _journal);
+
+        // Монте-Карло дописывается, когда сделок достаточно. Раньше этого момента
+        // распределение построить не из чего, и печатать его значило бы выдать шум за
+        // оценку риска.
+        MonteCarloResult mc = RunMonteCarlo(paths: _config.Adaptation.MonteCarloPaths);
+        return mc.Paths > 0 ? dashboard + Environment.NewLine + mc.Render() : dashboard;
     }
 
     /// <summary>
@@ -1165,6 +1195,37 @@ public sealed class TradingEngine
     }
 
     // --- Персистентность ------------------------------------------------------------------
+
+    /// <summary>
+    /// Прогоняет накопленные результаты через Монте-Карло (раздел 90).
+    ///
+    /// Историческая максимальная просадка — это ОДНА реализация из распределения. Судить по
+    /// ней о том, чего ждать дальше, — значит принимать удачную последовательность за
+    /// свойство системы. Перемешивание с кластеризацией убытков показывает, каким мог бы
+    /// быть тот же набор сделок, выпади он в другом порядке.
+    ///
+    /// Возвращает результат с нулём путей, если сделок слишком мало: распределение по
+    /// десятку наблюдений — это не распределение.
+    /// </summary>
+    public MonteCarloResult RunMonteCarlo(
+        int paths = 2000, double lossClustering = 0.20, double slippagePerTradeR = 0)
+    {
+        IReadOnlyList<TradeRecord> trades = _performance.Trades;
+        var returns = new List<double>(trades.Count);
+        for (int i = 0; i < trades.Count; i++)
+        {
+            if (!trades[i].IsVirtual) returns.Add(trades[i].R);
+        }
+
+        var simulator = new MonteCarloSimulator(paths, _config.RandomSeed);
+
+        // Порог тяжёлой просадки берётся из настроенного лимита, а не из круглого числа:
+        // «тяжёлая» — это та, после которой система остановится.
+        double severeR = _config.Risk.MaxDrawdownAllTimePercent / Math.Max(0.01, _config.Sizing.RiskPerTradePercent);
+
+        return simulator.Run(returns, tradesPerPath: 0, lossClustering: lossClustering,
+            severeDrawdownR: severeR, slippagePerTradeR: slippagePerTradeR);
+    }
 
     /// <summary>
     /// Принудительно записывает состояние. Нужно тестам и корректной остановке бота:

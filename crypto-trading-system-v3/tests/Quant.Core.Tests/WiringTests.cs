@@ -2,14 +2,17 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using Quant.Core.Adaptation;
 using Quant.Core.Config;
 using Quant.Core.Decision;
 using Quant.Core.Execution;
+using Quant.Core.Features;
 using Quant.Core.Exits;
 using Quant.Core.Primitives;
 using Quant.Core.Probability;
 using Quant.Core.Risk;
 using Quant.Core.State;
+using Quant.Core.Stats;
 using Quant.Core.Strategies;
 using Xunit;
 
@@ -177,6 +180,185 @@ public class WiringTests
 
         Assert.True(lenient.Confidence > strict.Confidence,
             $"более мягкие пороги обязаны давать больше уверенности: {lenient.Confidence:F3} против {strict.Confidence:F3}");
+    }
+
+    // ── Стабильность в весе стратегии ────────────────────────────────────────────
+
+    [Fact]
+    public void AStrategyWithTheSameExpectancyButWilderSwingsIsWeightedLower()
+    {
+        // Приоритет системы: СТАБИЛЬНОСТЬ выше ПРИБЫЛЬНОСТИ. Две стратегии с одинаковым
+        // ожиданием — разные вещи, если одна даёт его ровно, а вторая чередует +2.1R и
+        // −1.9R: вторая уводит счёт в просадку, из которой первая не выходила бы вовсе.
+        //
+        // Проверяются сами факторы, а не итоговый вес: в итоговом весе их перебивают
+        // соседние множители, и тест начал бы измерять не то, что заявляет. Первая версия
+        // этого теста именно так и ошибалась.
+        // Данные подобраны так, что ожидание И профит-фактор СОВПАДАЮТ, а различается
+        // только нижний разброс. Иначе тест проходил бы и без поправки на стабильность —
+        // за счёт профит-фактора, — то есть измерял бы не то, что заявляет.
+        var config = new EngineConfig();
+
+        var steadyR = new List<double>();
+        var wildR = new List<double>();
+        for (int i = 0; i < 30; i++)
+        {
+            steadyR.Add(0.5);
+            wildR.Add(0.5);
+        }
+        for (int i = 0; i < 30; i++)
+        {
+            steadyR.Add(-0.3);                       // ровные убытки
+            wildR.Add(i < 15 ? -0.599 : -0.001);     // та же сумма, но рвано
+        }
+
+        SegmentStats steady = StatsOfSequence(config, "Ровная", steadyR);
+        SegmentStats wild = StatsOfSequence(config, "Рваная", wildR);
+
+        Assert.Equal(steady.ExpectancyR, wild.ExpectancyR, 6);
+        Assert.Equal(steady.ProfitFactor, wild.ProfitFactor, 4);
+        Assert.True(steady.DownsideAdjustedExpectancy > wild.DownsideAdjustedExpectancy);
+
+        double steadyLong = StrategyWeightEngine.LongTermPerformanceFactor(steady, trust: 1.0, config.Adaptation);
+        double wildLong = StrategyWeightEngine.LongTermPerformanceFactor(wild, trust: 1.0, config.Adaptation);
+
+        Assert.True(steadyLong > wildLong,
+            $"долгосрочный фактор: ровная {steadyLong:F4} против рваной {wildLong:F4}");
+    }
+
+    [Fact]
+    public void ANoisyRecentStretchEarnsASmallerBonusThanItsMeanAloneWouldGive()
+    {
+        // Та же причина в факторе недавности: повышать вес за шумную полосу значит
+        // наращивать размер позиции ровно там, где просадка вероятнее.
+        //
+        // Утверждать, что шумная стратегия получит МЕНЬШИЙ фактор, чем ровная, было бы
+        // неверно: если её недавнее среднее действительно выше, какой-то бонус ей положен.
+        // Проверяется то, что реально изменено, — разброс УМЕНЬШАЕТ бонус против того,
+        // который дало бы одно лишь среднее.
+        var config = new EngineConfig();
+        SegmentStats wild = StatsOf(config, 2.1, -1.9);
+
+        double actual = StrategyWeightEngine.RecentPerformanceFactor(wild);
+        double meanOnly = BonusFromMeanAlone(wild);
+
+        Assert.True(meanOnly > 1.0, $"условие теста: одно лишь среднее давало бы бонус ({meanOnly:F4})");
+        Assert.True(actual < meanOnly,
+            $"разброс обязан срезать бонус: {actual:F4} против {meanOnly:F4} по одному среднему");
+
+        // Ровная стратегия свой бонус почти сохраняет — штраф за разброс к ней не применим.
+        SegmentStats steady = StatsOf(config, 1.2, -0.4);
+        double steadyActual = StrategyWeightEngine.RecentPerformanceFactor(steady);
+        double steadyMeanOnly = BonusFromMeanAlone(steady);
+
+        Assert.True(steadyMeanOnly > 1.0);
+        Assert.True(steadyActual / steadyMeanOnly > actual / meanOnly,
+            $"ровная теряет меньше: {steadyActual / steadyMeanOnly:F3} против {actual / meanOnly:F3}");
+    }
+
+    [Fact]
+    public void APoorRecentStretchIsNotSoftenedByBeingSteady()
+    {
+        // Штраф не смягчается сознательно: плохой результат остаётся плохим независимо от
+        // того, каким ровным он был. Иначе поправка на разброс превратилась бы в способ
+        // удержать вес у стратегии, которая просто теряет деньги аккуратно.
+        var config = new EngineConfig();
+        SegmentStats losing = StatsOf(config, 0.3, -0.5);
+
+        double actual = StrategyWeightEngine.RecentPerformanceFactor(losing);
+        double meanOnly = BonusFromMeanAlone(losing);
+
+        Assert.True(meanOnly < 1.0, $"условие теста: недавний результат отрицательный ({meanOnly:F4})");
+        Assert.Equal(meanOnly, actual, 9);
+    }
+
+    /// <summary>Фактор недавности БЕЗ поправки на разброс — как было до исправления.</summary>
+    private static double BonusFromMeanAlone(SegmentStats stats)
+    {
+        double effective = stats.RecentEffectiveSample;
+        if (effective < 5) return 1.0;
+
+        double raw = Math.Clamp(0.5 + (stats.RecentExpectancyR * 2.0), 0.3, 1.15);
+        double evidence = Math.Clamp((effective - 5) / 25.0, 0, 1);
+        return Math.Clamp(1.0 + ((raw - 1.0) * evidence), 0.3, 1.15);
+    }
+
+    private static SegmentStats StatsOfSequence(EngineConfig config, string name, IReadOnlyList<double> returns)
+    {
+        var performance = new PerformanceStore(config.Adaptation);
+        for (int i = 0; i < returns.Count; i++) performance.Record(TradeFor(name, returns[i], i));
+        return performance.Get(PerformanceStore.StrategyKey(name));
+    }
+
+    private static SegmentStats StatsOf(EngineConfig config, double win, double loss)
+    {
+        var performance = new PerformanceStore(config.Adaptation);
+        string name = "S" + win.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        for (int i = 0; i < 60; i++)
+        {
+            performance.Record(TradeFor(name, i % 2 == 0 ? win : loss, i));
+        }
+
+        return performance.Get(PerformanceStore.StrategyKey(name));
+    }
+
+    private static TradeRecord TradeFor(string strategy, double r, int i) => new TradeRecord
+    {
+        TradeId = strategy + i,
+        SymbolName = "BTCUSD",
+        StrategyName = strategy,
+        Direction = Side.Long,
+        Regime = MarketRegime.TrendUp,
+        EntryTimeUtc = RiskFixtures.T0.AddHours(i),
+        ExitTimeUtc = RiskFixtures.T0.AddHours(i).AddMinutes(30),
+        R = r,
+        NetProfit = r * 100,
+        ExitReason = r > 0 ? ExitReason.TakeProfit1 : ExitReason.StopLoss,
+        Mode = OperatingMode.Paper,
+    };
+
+    private static TradeRecord TradeWithR(double r) => new TradeRecord
+    {
+        TradeId = Guid.NewGuid().ToString("N"),
+        SymbolName = "BTCUSD",
+        StrategyName = "Test",
+        Direction = Side.Long,
+        EntryTimeUtc = RiskFixtures.T0,
+        ExitTimeUtc = RiskFixtures.T0.AddMinutes(30),
+        R = r,
+        NetProfit = r * 100,
+        ExitReason = r > 0 ? ExitReason.TakeProfit1 : ExitReason.StopLoss,
+        Mode = OperatingMode.Paper,
+    };
+
+    // ── Корреляционный стресс вселенной ──────────────────────────────────────────
+
+    [Fact]
+    public void UniverseCorrelationStressIsNotJustMeasuredButActedOn()
+    {
+        // В стрессе корреляции сходятся к единице: инструмент, выглядевший независимым по
+        // истории, перестаёт им быть ровно тогда, когда независимость нужнее всего.
+        // Измеренная корреляция описывает прошлое, а размер позиции выбирается под будущее.
+        var calm = new GlobalMarketContext { IsAvailable = true, UniverseCorrelation = 0.35 };
+        var stressed = new GlobalMarketContext { IsAvailable = true, UniverseCorrelation = 0.92 };
+
+        Assert.False(calm.IsCorrelationStressed);
+        Assert.True(stressed.IsCorrelationStressed);
+
+        // Инструмент, по истории почти независимый от книги.
+        const double measured = 0.15;
+
+        // В спокойном рынке он таким и считается.
+        Assert.Equal(measured, TradingEngine.CorrelationPenalty(measured, calm), 6);
+
+        // В стрессе — нет: штраф поднимается до общей корреляции вселенной, и размер
+        // позиции уменьшается. Это и есть разница между «измерено» и «учтено».
+        Assert.Equal(0.92, TradingEngine.CorrelationPenalty(measured, stressed), 6);
+
+        // Уже коррелированный инструмент не получает поблажки от того, что вселенная
+        // коррелирована слабее его самого.
+        Assert.Equal(0.97, TradingEngine.CorrelationPenalty(0.97, stressed), 6);
     }
 
     // ── Вспомогательное ──────────────────────────────────────────────────────────

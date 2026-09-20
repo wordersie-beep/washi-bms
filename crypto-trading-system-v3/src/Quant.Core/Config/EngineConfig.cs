@@ -796,6 +796,14 @@ public sealed class AdaptationConfig
     public int PersistedTradeHistory { get; set; } = 300;
 
     /// <summary>
+    /// Путей в симуляции Монте-Карло для отчёта о распределении просадок.
+    ///
+    /// Считается при выводе дашборда, то есть редко. Меньше тысячи путей дают заметно
+    /// шумные хвосты, а именно хвосты здесь и интересны.
+    /// </summary>
+    public int MonteCarloPaths { get; set; } = 2000;
+
+    /// <summary>
     /// Стоп по времени для виртуальной сделки, если план выхода его не задал. Без него
     /// виртуальная позиция в боковике могла бы не закрыться никогда и навсегда занять
     /// место в лимите наблюдений.
@@ -824,6 +832,7 @@ public sealed class AdaptationConfig
         if (RecoveryWeightFraction <= 0 || RecoveryWeightFraction > 1) problems.Add("RecoveryWeightFraction must be in (0, 1].");
         if (AdaptationIntervalMinutes < 1) problems.Add("AdaptationIntervalMinutes must be at least 1.");
         if (ShadowTradesForRecovery < 10) problems.Add("ShadowTradesForRecovery below 10 is not evidence of recovery.");
+        if (MonteCarloPaths < 500) problems.Add("MonteCarloPaths below 500 gives noisy tails, which are the only part that matters.");
         if (PersistedTradeHistory < 0) problems.Add("PersistedTradeHistory cannot be negative.");
         if (MaxConcurrentShadowPositions < 1) problems.Add("MaxConcurrentShadowPositions must be at least 1 or disabled strategies can never recover.");
         if (ShadowFallbackTimeStopBars < 1) problems.Add("ShadowFallbackTimeStopBars must be positive.");
