@@ -83,9 +83,41 @@ public sealed class EngineConfig
             problems.Add($"RiskPerTradePercent ({Sizing.RiskPerTradePercent:F3}) exceeds the hard cap ({Risk.HardMaxRiskPerTradePercent:F3}).");
         }
 
+        // Достижимость потолков экспозиции.
+        //
+        // Тот же класс дефекта, что и ворота по отношению прибыли к риску, и найден той же
+        // воронкой. Потолок сравнивается с риском кандидата, а риск кандидата ограничен
+        // снизу полом сайзера: меньше MinRiskPerTradePercent тот не выдаёт НИЧЕГО, он
+        // отказывает (SizeBelowMinimum). Потолок ниже этого пола отвергает первую же
+        // позицию на пустой книге — то есть любую, всегда и в любом рынке.
+        //
+        // Проверка была одна из четырёх, и она проверяла не то: потолок ниже ПОЛНОГО
+        // размера заставляет уменьшиться, и это нормально; невозможность начинается ниже
+        // пола. Три потолка из четырёх не проверялись вовсе.
+        var exposureCeilings = new (double Limit, string Name)[]
+        {
+            (Risk.MaxTotalOpenRiskPercent, nameof(Risk.MaxTotalOpenRiskPercent)),
+            (Portfolio.MaxSymbolRiskPercent, nameof(Portfolio.MaxSymbolRiskPercent)),
+            (Portfolio.MaxClusterRiskPercent, nameof(Portfolio.MaxClusterRiskPercent)),
+            (Portfolio.MaxDirectionalRiskPercent, nameof(Portfolio.MaxDirectionalRiskPercent)),
+        };
+
+        foreach ((double limit, string name) in exposureCeilings)
+        {
+            if (limit < Sizing.MinRiskPerTradePercent)
+            {
+                problems.Add(
+                    $"{name} ({limit:F3}) ниже пола сайзера MinRiskPerTradePercent " +
+                    $"({Sizing.MinRiskPerTradePercent:F3}): первая же позиция на пустой книге будет " +
+                    "отвергнута — ни один кандидат не пройдёт этот фильтр никогда.");
+            }
+        }
+
         if (Risk.MaxTotalOpenRiskPercent < Sizing.RiskPerTradePercent)
         {
-            problems.Add("MaxTotalOpenRiskPercent is below RiskPerTradePercent; no trade could ever be opened.");
+            problems.Add(
+                $"MaxTotalOpenRiskPercent ({Risk.MaxTotalOpenRiskPercent:F3}) is below RiskPerTradePercent " +
+                $"({Sizing.RiskPerTradePercent:F3}); every trade will be sized down to fit.");
         }
 
         // Достижимость ворот по отношению прибыли к риску.

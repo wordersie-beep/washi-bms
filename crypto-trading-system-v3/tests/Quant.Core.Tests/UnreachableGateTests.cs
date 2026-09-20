@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using Quant.Core.Config;
 using Quant.Core.Exits;
+using Quant.Core.Portfolio;
 using Quant.Core.Primitives;
 using Quant.Core.Risk;
 using Quant.Core.Stats;
@@ -130,5 +132,98 @@ public class UnreachableGateTests
         Assert.Equal(hit.State, still.State);
         Assert.Contains(still.Reasons, r => r.Contains("daily loss"));
 
+    }
+
+    [Fact]
+    public void AnExposureCeilingBelowTheSizerFloorRefusesTheVeryFirstPosition()
+    {
+        // Ровно та же конструкция, что и сломанные ворота по прибыли к риску, только в
+        // другом слое: потолок сравнивается с риском кандидата, а риск кандидата снизу
+        // ограничен полом сайзера — ниже MinRiskPerTradePercent тот не выдаёт уменьшенную
+        // позицию, он ОТКАЗЫВАЕТ. Потолок ниже пола отвергает первую позицию на пустой
+        // книге, то есть любую и всегда.
+        var config = new EngineConfig();
+        config.Portfolio.MaxSymbolRiskPercent = config.Sizing.MinRiskPerTradePercent / 2.0;
+
+        var portfolio = new PortfolioRiskEngine(config.Portfolio, config.Risk, new CorrelationEngine(config.Portfolio));
+        var clusters = new Dictionary<string, int> { ["BTCUSD"] = 0 };
+
+        // Пустая книга: ничего не открыто, экспозиция нулевая.
+        PortfolioExposure empty = portfolio.Compute(Array.Empty<OpenPosition>(), 10000, clusters);
+
+        // Самая маленькая позиция, какую сайзер вообще способен выдать.
+        NoTradeReason verdict = portfolio.CheckLimits(
+            empty, "BTCUSD", Side.Long, config.Sizing.MinRiskPerTradePercent, clusters, 0, out string detail);
+
+        Assert.Equal(NoTradeReason.SymbolExposureLimit, verdict);
+        Assert.NotNull(detail);
+    }
+
+    [Fact]
+    public void EveryExposureCeilingAdmitsTheSmallestPositionTheSizerCanProduce()
+    {
+        // Настройки по умолчанию обязаны пропускать первую позицию через ВСЕ потолки
+        // сразу. Каждый из них по отдельности разумен; противоречие возникает только
+        // вместе с полом сайзера, который живёт в другой секции конфигурации.
+        var config = new EngineConfig();
+        var portfolio = new PortfolioRiskEngine(config.Portfolio, config.Risk, new CorrelationEngine(config.Portfolio));
+        var clusters = new Dictionary<string, int> { ["BTCUSD"] = 0 };
+
+        PortfolioExposure empty = portfolio.Compute(Array.Empty<OpenPosition>(), 10000, clusters);
+
+        foreach (Side side in new[] { Side.Long, Side.Short })
+        {
+            NoTradeReason verdict = portfolio.CheckLimits(
+                empty, "BTCUSD", side, config.Sizing.MinRiskPerTradePercent, clusters, 0, out string detail);
+
+            Assert.True(verdict == NoTradeReason.None,
+                $"{side}: минимальная позиция {config.Sizing.MinRiskPerTradePercent:F3}% отвергнута " +
+                $"как {verdict} — {detail}");
+        }
+    }
+
+    [Theory]
+    [InlineData("MaxTotalOpenRiskPercent")]
+    [InlineData("MaxSymbolRiskPercent")]
+    [InlineData("MaxClusterRiskPercent")]
+    [InlineData("MaxDirectionalRiskPercent")]
+    public void ConfigurationValidationCatchesAnUnreachableExposureCeiling(string ceiling)
+    {
+        // Проверка была одна из четырёх — для общего потолка, — и проверяла не то:
+        // потолок ниже ПОЛНОГО размера заставляет уменьшиться, и это законно.
+        // Невозможность начинается ниже пола сайзера, и трёх потолков не было вовсе.
+        var config = new EngineConfig();
+        double impossible = config.Sizing.MinRiskPerTradePercent / 2.0;
+
+        switch (ceiling)
+        {
+            case "MaxTotalOpenRiskPercent": config.Risk.MaxTotalOpenRiskPercent = impossible; break;
+            case "MaxSymbolRiskPercent": config.Portfolio.MaxSymbolRiskPercent = impossible; break;
+            case "MaxClusterRiskPercent": config.Portfolio.MaxClusterRiskPercent = impossible; break;
+            case "MaxDirectionalRiskPercent": config.Portfolio.MaxDirectionalRiskPercent = impossible; break;
+        }
+
+        string problems = string.Join(" | ", config.Validate());
+
+        Assert.Contains(ceiling, problems);
+        Assert.Contains("ни один кандидат не пройдёт этот фильтр никогда", problems);
+    }
+
+    [Fact]
+    public void ACeilingBelowTheFullSizeIsReportedAsDownsizingNotAsImpossibility()
+    {
+        // Обратная сторона: кричать «никогда» там, где всё лишь уменьшится, — это тот же
+        // ущерб, что и молчать о настоящей невозможности. Отличить их обязана сама
+        // проверка, иначе на неё перестанут смотреть.
+        var config = new EngineConfig();
+        config.Risk.MaxTotalOpenRiskPercent = config.Sizing.RiskPerTradePercent / 2.0;
+
+        Assert.True(config.Risk.MaxTotalOpenRiskPercent > config.Sizing.MinRiskPerTradePercent,
+            "тест бессмыслен, если потолок опустился ниже пола сайзера");
+
+        string problems = string.Join(" | ", config.Validate());
+
+        Assert.Contains("sized down to fit", problems);
+        Assert.DoesNotContain("ни один кандидат не пройдёт этот фильтр никогда", problems);
     }
 }
