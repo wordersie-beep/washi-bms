@@ -36,9 +36,12 @@
 - **B-02** · [auto] · blocked: B-01 · 1 ночь — Забрать код BridgeWard из деплоя Netlify в приватный
   репо `bridgeward` (статический PWA: деплой и есть исходник), добавить `CHANGELOG.md`
   и `PROJECT_STATE.md`, подключить автодеплой из GitHub.
-- **B-03** · [auto] · proposed · 1 ночь — Разбор конкурентов (Lorry Route, NaviTruck, HeadRoom,
-  lowclearancemap.com, Sygic Truck, CoPilot): цены, функции, отзывы на 1–2★.
-  Готово, когда: `research/bridgeward-competitors.md` + 3 отличия Pro.
+- **B-03** · [auto] · proposed · 1 ночь — Разбор конкурентов. **Первым — HeadRoom** (режим Sentry
+  с фоновыми предупреждениями, $4,99/мес): сколько из 123 известных мостов NI+RoI есть в их
+  базе и с какой высотой. Затем Lorry Route, NaviTruck, Sygic Truck, CoPilot: цены, функции,
+  отзывы на 1–2★. Готово, когда: `research/bridgeward-competitors.md` + вывод «у BridgeWard
+  есть реальное отличие по Ирландии: да/нет» + 3 отличия Pro. Если «нет» — предложить
+  владельцу заморозить B-07.
 - **B-04** · [auto] · proposed · 1 ночь — Лендинг «BridgeWard Pro» с листом ожидания
   (Netlify Forms), дисклеймер, черновик политики конфиденциальности. Готово, когда: PR
   с превью и скриншотом, публикует владелец.

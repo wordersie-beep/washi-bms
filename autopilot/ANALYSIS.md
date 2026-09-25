@@ -12,7 +12,9 @@
    (App Store, Apify Store). Там покупателей приводит сама площадка, а Claude Code силён именно в коде.
 4. **Основная ставка — фабрика Apify-акторов** на открытых данных, там больше всего автопилота.
    **Дополнительная — BridgeWard Pro**: твоё нечестное преимущество (реальная боль, которую ты
-   знаешь изнутри, и готовый продукт). Обе ставки питает один ночной конвейер данных о габаритах.
+   знаешь изнутри, и готовый продукт). Прямой конкурент есть (HeadRoom), поэтому первым делом
+   проверяем, насколько мы точнее по Ирландии. Обе ставки питает один ночной конвейер данных
+   о габаритах.
 5. **Реалистично через 12 месяцев:** медиана ≈ €200–700 в месяц, удачный сценарий €2–3 тыс.,
    плохой — около нуля. Решение «продолжаем или закрываем» — по порогам в `PLAN.md`, а не на вере.
 
@@ -132,9 +134,13 @@
 
 **Доказательства спроса.** В Ирландии 80 ударов в железнодорожные мосты за 2024 год
 (95 — за 2023-й). В Британии, по данным Network Rail, 1 666 за 2024/25 год: один удар каждые
-пять часов и около £13 тыс. ущерба за каждый. Люди
-уже платят конкурентам: Lorry Route — подписка £9,99, HeadRoom — $4,99 в месяц, есть NaviTruck
-и lowclearancemap.com. Но это навигаторы, а не «сторож» поверх твоего навигатора.
+пять часов и около £13 тыс. ущерба за каждый. Люди уже платят именно за такую функцию:
+у HeadRoom (Low Clearance Map) есть режим Sentry с фоновыми предупреждениями о мостах —
+$4,99 в месяц или $45 в год. Lorry Route — подписка £9,99, есть NaviTruck. **Спрос доказан,
+но конкурент прямой.** Отличие BridgeWard — не идея «сторожа», а точность по Ирландии
+(NI + RoI, проверено водителем в рейсах), цена, локальное сообщество и ирландские флоты.
+Первое, что проверяем: насколько хорошо HeadRoom покрывает 123 известных тебе моста. Если
+хорошо — ставка B слабеет, и это надо увидеть до написания Swift-кода.
 
 **Нечестное преимущество.** Ты сам целевой пользователь, продукт уже работает (123 моста NI+RoI).
 Можешь тестировать в реальных рейсах, и у тебя есть прямой доступ к водителям для первых отзывов.
@@ -148,8 +154,9 @@ P50 через 12 мес: **€50–250 в месяц** (B2C) + 1–3 флота
 черновики ответов.
 **Твоё время:** тест в рейсах (и так за рулём), 1 пост в неделю в группах водителей
 (текст готовит агент), решение по ценам.
-**Риски:** ответственность за безопасность → дисклеймер «вспомогательная информация», точность
-данных важнее функций, геолокация только на устройстве. На iOS можно следить максимум
+**Риски:** прямой конкурент с большой базой (HeadRoom) → выигрываем только точностью по
+Ирландии и локальной дистрибуцией. Ответственность за безопасность → дисклеймер
+«вспомогательная информация», точность данных важнее функций, геолокация только на устройстве. На iOS можно следить максимум
 за 20 регионами одновременно → динамический пересчёт ближайших мостов. App Review.
 **Тест — 14 дней после запуска лендинга (к концу недели 3):** лендинг + лист ожидания +
 3 поста → ≥ 50 подписок **или** ≥ 10 водителей активно пользуются бесплатным PWA. Нет —
@@ -204,7 +211,7 @@ P50 через 12 мес: **€50–250 в месяц** (B2C) + 1–3 флота
 - Telegram: [Scrile](https://www.scrile.com/blog/telegram-monetization)
 - Project Vend: [Anthropic](https://www.anthropic.com/research/project-vend-2)
 - Claude Code Routines: [документация](https://code.claude.com/docs/en/routines), [анонс](https://claude.com/blog/introducing-routines-in-claude-code)
-- Мосты: [TheJournal.ie, Irish Rail](https://www.thejournal.ie/bridge-strike-irish-rail-cameras-6652754-Mar2025/), [Irish Rail — высоты мостов](https://www.irishrail.ie/en-ie/about-us/rail-bridge-heights-and-level-crossings/rail-bridge-heights), [Network Rail](https://www.networkrail.co.uk/stories/a-vehicle-hits-a-rail-bridge-every-five-hours/), конкуренты: [Lorry Route](https://apps.apple.com/gb/app/lorry-route-hgv-navigation/id1369645432), [NaviTruck](https://apps.apple.com/mt/app/navitruck-gps-truck-caravan/id1629899453), [lowclearancemap.com](https://lowclearancemap.com/uk)
+- Мосты: [TheJournal.ie, Irish Rail](https://www.thejournal.ie/bridge-strike-irish-rail-cameras-6652754-Mar2025/), [Irish Rail — высоты мостов](https://www.irishrail.ie/en-ie/about-us/rail-bridge-heights-and-level-crossings/rail-bridge-heights), [Network Rail](https://www.networkrail.co.uk/stories/a-vehicle-hits-a-rail-bridge-every-five-hours/), конкуренты: [HeadRoom / Sentry Mode](https://lowclearancemap.com/headroom), [HeadRoom в App Store](https://apps.apple.com/us/app/headroom-nav/id6758680389), [Lorry Route](https://apps.apple.com/gb/app/lorry-route-hgv-navigation/id1369645432), [NaviTruck](https://apps.apple.com/mt/app/navitruck-gps-truck-caravan/id1629899453), [lowclearancemap.com](https://lowclearancemap.com/uk)
 - OSM maxheight: [wiki](https://wiki.openstreetmap.org/wiki/Key:maxheight), [мосты UK](https://wiki.openstreetmap.org/wiki/Bridge_heights_in_the_United_Kingdom)
 - Дефицит водителей (IRU, 2025): [IRU](https://www.iru.org/news-resources/newsroom/operators-deeply-concerned-worsening-driver-shortage-new-iru-report)
 - Ирландия: [Form 11 и пороги](https://www.citizensinformation.ie/en/money-and-tax/tax/income-tax/tax-return-non-paye-income/), [НДС-пороги](https://www.revenue.ie/en/vat/vat-registration/who-should-register-for-vat/vat-thresholds.aspx), [лицензия кадрового агентства](https://www.workplacerelations.ie/en/what_you_should_know/employer-obligations/employment-agencies/)
