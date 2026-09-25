@@ -1,4 +1,4 @@
-# QuantAI_Scalper_M1_MicroDepot_Pro — cBot для cTrader (v1.2.0)
+# QuantAI_Scalper_M1_MicroDepot_Pro — cBot для cTrader (v1.2.1)
 
 Скальпер EURUSD на M1/M5 для микро-депозита (от 50 EUR). Ловит микро-импульсы по тиковому ускорению,
 входит на пробое сквиза у 20 EMA (Боб Вольман) или после ложного прокола 10-барного экстремума,
@@ -35,14 +35,15 @@ cTrader.Automate 1.0.9, 1.0.14 и 1.0.21 — 0 ошибок, 0 предупре�
 Каждые 15 минут в журнале экземпляра (cTrader → cBots → экземпляр → Log) появляется строка `STATUS`:
 
 ```
-STATUS 10:15 UTC | since 10:00: squeeze armed on 6 bar(s), sweeps 1 | signals 4, trades 1 | skipped by: Tick velocity 2, Spread 1 | now: spread 0.1p <= limit 0.2p (12% of ATR 1.7p), tick burst 1.3x (need 2.00x), AI ready, in session | today 1 trade(s), +0.12 EUR
+STATUS 10:15 UTC | since 10:00: squeeze armed on 6 bar(s), sweeps 1 | signals 4, trades 1 | AI conf of signals 46%-57% (avg 51%, target 50%) | skipped by: Tick velocity 2, Spread 1 | now: spread 0.1p <= limit 0.2p (12% of ATR 1.7p), tick burst 1.3x (need 2.00x), AI ready, in session | today 1 trade(s), +0.12 EUR
 ```
 
 - `no setup formed` — рынок не дал ни сквиза, ни свипа (слишком широкий или слишком вялый).
 - `skipped by: Spread …` — спред больше 12 % ATR M1. Нормально для тихих часов (вечер, пятница, Азия);
   если так весь день — счёт со спредом-наценкой (у Pepperstone это Standard), нужен Razor.
 - `skipped by: Tick velocity …` — пробой без всплеска тиков (≥ N × среднего).
-- `skipped by: AI confidence …` — классификатор не уверен (ниже `Min Confidence`).
+- `skipped by: AI confidence …` — классификатор не уверен (ниже `Min Confidence`). Диапазон `AI conf of signals`
+  показывает, какие значения модель реально выдаёт — порог разумно держать внутри этого диапазона.
 - `OUT OF SESSION` — вне 06:00–20:00 UTC бот сделки не открывает (параметры сессии).
 
 ## Pepperstone (cTrader)
@@ -83,7 +84,7 @@ STATUS 10:15 UTC | since 10:00: squeeze armed on 6 bar(s), sweeps 1 | signals 4,
   - **Tick_Velocity** — тики за последнее окно длиной в один бар / средний тиковый объём бара (логарифм);
   - **EMA20_Distance** — (цена − EMA20) / ATR со знаком направления сделки;
   - **RSI_Slope** — изменение RSI(14) за `RSI Slope Bars` баров со знаком направления;
-  - **Spread_Ratio** — спред / ATR M1 (логарифм).
+  - **Spread_Ratio** — спред / ATR M1 (линейно: на Razor спред часто ровно 0.0).
 - **Метка.** «TP1 достигнут раньше SL/безубытка за `Label Horizon` баров M1» — это прогон собственных
   правил выхода бота по будущим барам. Если SL и TP1 попали в один бар, считается проигрыш.
 - **Обучение.** При старте — на истории (`Training Window` = 3000 баров → 6000 примеров лонг/шорт),
@@ -182,7 +183,7 @@ CLOSED #123 SQZ BUY by TIME EXIT: net +0.03 EUR (gross +0.04, 1 fill(s)) | day +
 | | Sweep Bar Must Close Back Inside | true | бар прокола должен закрыться обратно за уровнем |
 | | Sweep Max Bars To EMA Reclaim | 3 | за сколько баров цена должна вернуться за EMA |
 | 6. AI Classifier | Use AI Filter | true | включить классификатор |
-| | Min Confidence (0.00-1.00) | 0.55 | порог уверенности для входа |
+| | Min Confidence (0.00-1.00) | 0.50 | порог уверенности для входа (см. `AI conf of signals` в STATUS) |
 | | Training Window (bars) | 3000 | окно обучения (баров сигнального ТФ) |
 | | Min Samples Per Class | 100 | минимум побед и поражений до начала фильтрации |
 | | Label Horizon (ATR TF bars) | 5 | горизонт разметки, согласуйте с Time Exit Bars |
@@ -197,7 +198,7 @@ CLOSED #123 SQZ BUY by TIME EXIT: net +0.03 EUR (gross +0.04, 1 fill(s)) | day +
 
 ## Тесты
 
-[`../tests/QuantAI_Scalper_Tests`](../tests/QuantAI_Scalper_Tests) — 98 проверок логики, не зависящей от брокера
+[`../tests/QuantAI_Scalper_Tests`](../tests/QuantAI_Scalper_Tests) — 103 проверки логики, не зависящей от брокера
 (Naive Bayes, тиковый движок, медиана спреда, расчёт комиссии, симулятор исходов для разметки, детекторы сетапов, деление объёма на TP1):
 
 ```

@@ -90,6 +90,20 @@ namespace Harness
             Check(roll.Count == 1000, "window capped at capacity");
             Check(roll.Predict(new[] { 1.5, 0, 0, 0 }, false, null) < 0.2, "regime B replaced regime A");
 
+            // A constant feature (every training sample saw a 0.0 spread) must be ignored, not divided by ~0.
+            var flat = new GaussianNaiveBayes(4, 6000);
+            for (int i = 0; i < 6000; i++)
+            {
+                bool w = r.NextDouble() < 0.27;
+                flat.Add(new[] { Gauss(r) * 0.3 - 0.05, (w ? -0.03 : 0.01) + Gauss(r), (w ? -0.04 : 0.01) + Gauss(r) * 8, Math.Log(1e-3) }, w);
+            }
+            var cFlat = new double[4];
+            double atTrain = flat.Predict(new[] { 0.1, 0.5, 3.0, Math.Log(1e-3) }, false, null);
+            double offTrain = flat.Predict(new[] { 0.1, 0.5, 3.0, -2.08 }, false, cFlat);
+            Near(offTrain, atTrain, 1e-12, "constant feature ignored when the live value differs");
+            Check(offTrain > 0.2 && offTrain < 0.8, "no saturation to 0%/100% (" + offTrain + ")");
+            Near(cFlat[3], 0.0, 0, "constant feature contributes nothing");
+
             // Incremental statistics equal a model trained from scratch on the same window.
             var inc = new GaussianNaiveBayes(4, 500);
             var samples = new List<double[]>();
@@ -275,6 +289,8 @@ namespace Harness
             Near(sx[1], -0.5, 1e-12, "EMA distance mirrored for shorts");
             Near(sx[2], -6.0, 1e-12, "RSI slope mirrored for shorts");
             Check(lx[0] == sx[0] && lx[3] == sx[3], "non-directional features identical");
+            Near(lx[3], 0.1, 1e-12, "spread ratio is linear");
+            Near(AiFeatures.Build(1.0, 0, 0.0002, 0, 0.0, 1)[3], 0.0, 0, "a 0.0 spread (raw account) stays 0, not a log floor");
             double[] z = AiFeatures.Build(0.0, 0, 0.0002, 0.0, 0.1, 1);
             Check(!double.IsInfinity(z[0]) && !double.IsNaN(z[0]), "zero velocity stays finite");
         }
@@ -331,8 +347,8 @@ namespace Harness
                 + " RSI " + nb.ClassMean(true, 2).ToString("F2") + "/" + nb.ClassMean(false, 2).ToString("F2"));
             Check(nb.IsReady(100), "pipeline model ready");
             Check(baseRate > 0.05 && baseRate < 0.95, "labels are not degenerate");
-            double pWith = nb.Predict(new[] { Math.Log(2.5), 0.8, 15.0, Math.Log(0.08) }, false, null);
-            double pAgainst = nb.Predict(new[] { Math.Log(2.5), -0.8, -15.0, Math.Log(0.08) }, false, null);
+            double pWith = nb.Predict(new[] { Math.Log(2.5), 0.8, 15.0, 0.08 }, false, null);
+            double pAgainst = nb.Predict(new[] { Math.Log(2.5), -0.8, -15.0, 0.08 }, false, null);
             Console.WriteLine("  pipeline: momentum-aligned " + pWith.ToString("F3") + " vs counter-momentum " + pAgainst.ToString("F3"));
             Check(pWith > pAgainst, "model prefers trading with momentum on momentum data");
             Check(pWith >= 0 && pWith <= 1 && pAgainst >= 0 && pAgainst <= 1, "probabilities in range");

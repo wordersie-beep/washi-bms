@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  QuantAI_Scalper_M1_MicroDepot_Pro  v1.2.0
+//  QuantAI_Scalper_M1_MicroDepot_Pro  v1.2.1
 //  cTrader Automate cBot | EURUSD M1/M5 micro-impulse scalper for small (50 EUR) accounts
 //  Needs cTrader 5.0+ (Algo API 1.0.9+): Windows, Mac, Web and Mobile, local or cloud. C# 7.3 syntax only.
 //  Ready to run: a new instance opens on EURUSD m1 and every parameter below already holds its working value.
@@ -48,7 +48,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_M1_MicroDepot_Pro : Robot
     {
-        private const string BotVersion = "1.2.0";
+        private const string BotVersion = "1.2.1";
 
         #region Parameters
 
@@ -205,7 +205,7 @@ namespace cAlgo.Robots
         [Parameter("Use AI Filter", Group = "6. AI Classifier (Naive Bayes)", DefaultValue = true)]
         public bool UseAiFilter { get; set; }
 
-        [Parameter("Min Confidence (0.00-1.00)", Group = "6. AI Classifier (Naive Bayes)", DefaultValue = 0.55, MinValue = 0.0, MaxValue = 1.0, Step = 0.01)]
+        [Parameter("Min Confidence (0.00-1.00)", Group = "6. AI Classifier (Naive Bayes)", DefaultValue = 0.50, MinValue = 0.0, MaxValue = 1.0, Step = 0.01)]
         public double MinConfidence { get; set; }
 
         [Parameter("Training Window (bars)", Group = "6. AI Classifier (Naive Bayes)", DefaultValue = 3000, MinValue = 50)]
@@ -353,6 +353,10 @@ namespace cAlgo.Robots
         private int _statusSwp;
         private readonly HashSet<string> _statusKeys = new HashSet<string>();
         private readonly Dictionary<string, int> _statusReasons = new Dictionary<string, int>();
+        private int _statusConfCount;
+        private double _statusConfSum;
+        private double _statusConfMin;
+        private double _statusConfMax;
         private bool? _wasInSession;
 
         private int _statTrades;
@@ -1108,7 +1112,7 @@ namespace cAlgo.Robots
                 }
             }
 
-            RecordSignal(SignalKey(tag), codes.ToString());
+            RecordSignal(SignalKey(tag), codes.ToString(), conf);
             if (reasons.Count > 0)
             {
                 LogSkip(tag, level, codes.ToString(), reasons);
@@ -1977,8 +1981,22 @@ namespace cAlgo.Robots
         /// <summary>Counts one signal instance (setup, direction, bar) and each distinct reason that blocked it.</summary>
         private void RecordSignal(string key, string codes)
         {
+            RecordSignal(key, codes, double.NaN);
+        }
+
+        private void RecordSignal(string key, string codes, double confidence)
+        {
             if (_statusKeys.Add(key))
+            {
                 _statusSignals++;
+                if (!double.IsNaN(confidence))
+                {
+                    _statusConfMin = _statusConfCount == 0 ? confidence : Math.Min(_statusConfMin, confidence);
+                    _statusConfMax = _statusConfCount == 0 ? confidence : Math.Max(_statusConfMax, confidence);
+                    _statusConfSum += confidence;
+                    _statusConfCount++;
+                }
+            }
             foreach (string code in codes.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
             {
                 if (!_statusKeys.Add(key + "|" + code))
@@ -2039,6 +2057,8 @@ namespace cAlgo.Robots
             _statusSwp = 0;
             _statusKeys.Clear();
             _statusReasons.Clear();
+            _statusConfCount = 0;
+            _statusConfSum = 0.0;
         }
 
         private string StatusCounts()
@@ -2049,6 +2069,9 @@ namespace cAlgo.Robots
             else
                 sb.Append("squeeze armed on ").Append(_statusSqz).Append(" bar(s), sweeps ").Append(_statusSwp);
             sb.Append(" | signals ").Append(_statusSignals).Append(", trades ").Append(_statusTrades);
+            if (_statusConfCount > 0)
+                sb.Append(" | AI conf of signals ").Append(Pct(_statusConfMin)).Append('-').Append(Pct(_statusConfMax))
+                  .Append(" (avg ").Append(Pct(_statusConfSum / _statusConfCount)).Append(", target ").Append(Pct(MinConfidence)).Append(')');
             if (_statusReasons.Count > 0)
             {
                 var items = new List<KeyValuePair<string, int>>(_statusReasons);
@@ -2514,14 +2537,14 @@ namespace cAlgo.Robots
         public const int Dim = 4;
         public static readonly string[] Names = { "TV", "EMA", "RSI", "SPR" };
 
-        // Keeps log() finite for a tick-less window or a zero spread.
+        // Keeps log() finite for a tick-less window.
         private const double MinRatio = 1e-3;
 
         /// <param name="tickVelocity">ticks per bar-length window / average ticks per bar</param>
         /// <param name="priceMinusEma">price - EMA20</param>
         /// <param name="atr">signal timeframe ATR used to normalise the EMA distance</param>
         /// <param name="rsiDelta">RSI now - RSI k bars ago</param>
-        /// <param name="spreadToAtr">spread / ATR</param>
+        /// <param name="spreadToAtr">spread / ATR (kept linear: raw-spread accounts often quote exactly 0.0)</param>
         /// <param name="dir">+1 for a long, -1 for a short: directional features are mirrored so one model serves both sides</param>
         public static double[] Build(double tickVelocity, double priceMinusEma, double atr, double rsiDelta, double spreadToAtr, int dir)
         {
@@ -2529,7 +2552,7 @@ namespace cAlgo.Robots
             x[0] = Math.Log(Math.Max(tickVelocity, MinRatio));
             x[1] = dir * priceMinusEma / atr;
             x[2] = dir * rsiDelta;
-            x[3] = Math.Log(Math.Max(spreadToAtr, MinRatio));
+            x[3] = Math.Max(spreadToAtr, 0.0);
             return x;
         }
     }
@@ -2545,6 +2568,9 @@ namespace cAlgo.Robots
         // posterior, and every class variance gets a small floor relative to the feature's own variance.
         private const double WinsorSigma = 4.0;
         private const double VarianceFloorRatio = 1e-3;
+        // A feature whose variance is only rounding noise (e.g. the spread when every training sample saw
+        // 0.0) carries no information; scoring it would divide by ~0 and throw the posterior to 0 or 1.
+        private const double ConstantFeatureTolerance = 1e-10;
         private const double MaxLogOdds = 50.0;
 
         private readonly int _dim;
@@ -2640,6 +2666,12 @@ namespace cAlgo.Robots
             {
                 double gMean = (_sum[0][f] + _sum[1][f]) / n;
                 double gVar = Math.Max((_sq[0][f] + _sq[1][f]) / n - gMean * gMean, 0.0);
+                if (gVar <= ConstantFeatureTolerance * Math.Max(1.0, gMean * gMean))
+                {
+                    if (contributions != null && f < contributions.Length)
+                        contributions[f] = 0.0;
+                    continue;
+                }
                 double gSd = Math.Sqrt(gVar);
                 double xf = x[f];
                 if (gSd > 0)
