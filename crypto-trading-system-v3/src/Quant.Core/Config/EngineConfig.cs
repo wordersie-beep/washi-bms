@@ -334,6 +334,21 @@ public sealed class RegimeConfig
     /// <summary>Порог до набора выборки, пока о распределении говорить рано.</summary>
     public double UncalibratedConfidenceThreshold { get; set; } = 0.45;
 
+    /// <summary>
+    /// Порог, который применяется на самом деле, пока шкала не откалибрована.
+    ///
+    /// Никогда не ниже абсолютного пола — по построению, а не по проверке. Раньше это
+    /// отношение держала валидация, и она же убивала запуск: поднять пол уверенности до
+    /// 0.55, не тронув запасной порог 0.45, — совершенно естественное действие, после
+    /// которого бот отказывался стартовать с сообщением про поле, которого нет ни в одной
+    /// настройке. Пользователю нечем было это исправить.
+    ///
+    /// Отношение, которое код способен соблюсти сам, не должно быть поводом для отказа.
+    /// Подъём здесь безопасен в единственную сторону: он делает систему разборчивее.
+    /// </summary>
+    public double EffectiveUncalibratedThreshold =>
+        Math.Max(UncalibratedConfidenceThreshold, MinConfidenceToTrade);
+
     /// <summary>Чтений классификатора, после которых распределению можно доверять.</summary>
     public int ClaritySampleMinimum { get; set; } = 100;
 
@@ -346,7 +361,7 @@ public sealed class RegimeConfig
         if (TransitionRiskMultiplier <= 0 || TransitionRiskMultiplier > 1) problems.Add("TransitionRiskMultiplier must be in (0, 1].");
         if (MinConfidenceToTrade < 0 || MinConfidenceToTrade > 1) problems.Add("MinConfidenceToTrade must be in [0, 1].");
         if (RegimeClarityPercentile < 0 || RegimeClarityPercentile >= 1) problems.Add("RegimeClarityPercentile must be in [0, 1).");
-        if (UncalibratedConfidenceThreshold < MinConfidenceToTrade) problems.Add("UncalibratedConfidenceThreshold must not be below the absolute floor.");
+
         if (ClaritySampleMinimum < 20) problems.Add("ClaritySampleMinimum below 20 turns noise into a calibration.");
     }
 }

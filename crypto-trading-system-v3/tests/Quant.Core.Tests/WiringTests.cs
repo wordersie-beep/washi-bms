@@ -86,8 +86,28 @@ public class WiringTests
         // никогда не доходило до формулы, которая вместо него использовала зашитое число.
         string elsewhere = AllSource().Replace(config, string.Empty);
 
+        // Настройка может доходить до кода через ПРОИЗВОДНОЕ свойство того же класса.
+        //
+        // Так устроен EffectiveUncalibratedThreshold: сырое значение больше нигде не
+        // читается напрямую, потому что отношение «не ниже абсолютного пола» соблюдается
+        // по построению, а не проверкой. Считать это «настройка не подключена» неверно —
+        // подключена, через одно звено.
+        //
+        // Послабление узкое ровно настолько, чтобы не вернуть исходный дефект: звеном
+        // признаётся только производный член БЕЗ сеттера, и только если его собственное
+        // имя читается снаружи. Validate под это не подходит — он не свойство и снаружи
+        // по имени не читается, так что «значение только проверяется» по-прежнему падает.
+        var derived = Regex.Matches(config, @"public\s+[\w<>\[\]?.]+\s+(\w+)\s*=>\s*([^;]*);")
+            .Where(m => Regex.IsMatch(elsewhere, @"\b" + Regex.Escape(m.Groups[1].Value) + @"\b"))
+            .Select(m => m.Groups[2].Value)
+            .ToList();
+
+        Assert.NotEmpty(derived);
+        string throughDerived = string.Join(" ", derived);
+
         var unread = declared
-            .Where(name => !Regex.IsMatch(elsewhere, @"\b" + Regex.Escape(name) + @"\b"))
+            .Where(name => !Regex.IsMatch(elsewhere, @"\b" + Regex.Escape(name) + @"\b") &&
+                           !Regex.IsMatch(throughDerived, @"\b" + Regex.Escape(name) + @"\b"))
             .ToList();
 
         Assert.True(unread.Count == 0,

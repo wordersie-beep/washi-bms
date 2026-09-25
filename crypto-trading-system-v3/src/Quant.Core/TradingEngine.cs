@@ -447,8 +447,8 @@ public sealed class TradingEngine
             ? scale.ThresholdFor(
                 _config.Regime.RegimeClarityPercentile,
                 _config.Regime.MinConfidenceToTrade,
-                _config.Regime.UncalibratedConfidenceThreshold)
-            : _config.Regime.UncalibratedConfidenceThreshold;
+                _config.Regime.EffectiveUncalibratedThreshold)
+            : _config.Regime.EffectiveUncalibratedThreshold;
 
     /// <summary>Шкала уверенности классификатора по инструменту — для отчётов.</summary>
     public RegimeConfidenceScale ClarityScale(string symbolName) =>
