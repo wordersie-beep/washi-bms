@@ -34,9 +34,90 @@ namespace Harness
             SqueezeTests();
             SweepTests();
             FeatureTests();
+            MarketTests();
+            MarginTests();
             PipelineSmokeTest();
             Console.WriteLine("passed " + _pass + ", failed " + _fail);
             return _fail == 0 ? 0 : 1;
+        }
+
+        private static void MarketTests()
+        {
+            List<string> list = MarketMath.ParseSymbols("EURUSD, GBPUSD;usdjpy  EURUSD\tBTCUSD");
+            Check(list.Count == 4 && list[0] == "EURUSD" && list[1] == "GBPUSD" && list[2] == "usdjpy" && list[3] == "BTCUSD",
+                  "symbol list: separators, order kept, duplicate dropped (" + string.Join("|", list) + ")");
+            Check(MarketMath.ParseSymbols("eurusd,EURUSD").Count == 1, "duplicates ignore case");
+            Check(MarketMath.ParseSymbols("").Count == 0 && MarketMath.ParseSymbols(null).Count == 0 && MarketMath.ParseSymbols(" , ; ").Count == 0,
+                  "empty lists");
+
+            Check(MarketMath.SymbolKey("BTC/USD") == "BTCUSD", "BTC/USD -> BTCUSD");
+            Check(MarketMath.SymbolKey("btcusd.") == "BTCUSD", "btcusd. -> BTCUSD");
+            Check(MarketMath.SymbolKey("EUR-USD") == MarketMath.SymbolKey("EURUSD"), "EUR-USD matches EURUSD");
+            Check(MarketMath.SymbolKey("") == "", "empty key");
+
+            const double ratio = 0.5e-4;
+            Check(MarketMath.IsFxLike(0.0001, 1.17, ratio), "EURUSD pip is Forex-like");
+            Check(MarketMath.IsFxLike(0.01, 150.0, ratio), "USDJPY pip is Forex-like");
+            Check(MarketMath.IsFxLike(0.0001, 0.66, ratio), "AUDUSD pip is Forex-like");
+            Check(!MarketMath.IsFxLike(0.01, 110000.0, ratio), "BTCUSD 0.01 pip is not Forex-like");
+            Check(!MarketMath.IsFxLike(1.0, 110000.0, ratio), "BTCUSD 1.0 pip is not Forex-like");
+            Check(!MarketMath.IsFxLike(0.0001, 0.0, ratio), "no price -> not Forex-like");
+            Near(MarketMath.BotPip(0.0001, 1.17, true, ratio), 0.0001, 1e-15, "EURUSD bot pip = broker pip");
+            Near(MarketMath.BotPip(0.01, 110000.0, false, ratio), 5.5, 1e-9, "BTC bot pip = 0.5 bp of price ($5.5)");
+            Near(MarketMath.BotPip(1.0, 110000.0, false, ratio), 5.5, 1e-9, "BTC bot pip independent of broker pip size");
+            Near(MarketMath.BotPip(0.01, 4000.0, false, ratio), 0.2, 1e-12, "ETH bot pip = $0.20");
+            Near(MarketMath.BotPip(10.0, 4000.0, false, ratio), 10.0, 1e-12, "bot pip never below the broker pip");
+            Near(MarketMath.BotPip(0.01, 0.0, false, ratio), 0.01, 1e-15, "no price -> broker pip");
+        }
+
+        private static void MarginTests()
+        {
+            // EUR account, EURUSD at 1:30: margin = units / 30 EUR.
+            Func<double, double> eurusd = v => v / 30.0;
+            MarginFit f = MarketMath.FitMargin(400000, 1000, 1000, 49092, 49092, 0, 30, 90, true, eurusd, 20);
+            Check(f.Rule == MarginRule.Fits && f.Units == 400000, "49k EUR: 4 lots EURUSD (13.3k margin) fits 30% of free margin");
+
+            // Eight 4-lot signals in a row on a GBP-priced pair: the account never blocks more than 90% of equity.
+            Func<double, double> gbp = v => v * 1.15 / 30.0;
+            double equity = 49092, used = 0;
+            int opened = 0;
+            bool within = true;
+            MarginRule last = MarginRule.Fits;
+            for (int i = 0; i < 8; i++)
+            {
+                MarginFit g = MarketMath.FitMargin(400000, 1000, 1000, equity - used, equity, used, 30, 90, true, gbp, 20);
+                last = g.Rule;
+                if (g.Units <= 0)
+                    continue;
+                opened++;
+                used += gbp(g.Units);
+                within &= used <= equity * 0.90 + 1e-6 && g.Units <= 400000;
+            }
+            Check(within, "total margin stays <= 90% of equity (" + (used / equity * 100).ToString("F1") + "%)");
+            Check(opened >= 5 && opened <= 8, "several positions still open under the cap (" + opened + ")");
+            Check(last == MarginRule.TotalLimitReached || last == MarginRule.Insufficient || opened == 8, "later signals are refused, not over-sized");
+
+            // 50 EUR micro account: the per-trade share (15 EUR) is below one 0.01 lot (33 EUR) -> min volume within the total limit.
+            f = MarketMath.FitMargin(400000, 1000, 1000, 50, 50, 0, 30, 90, true, eurusd, 20);
+            Check(f.Rule == MarginRule.MinimumWithinTotal && f.Units == 1000, "50 EUR: 4 lots requested -> 0.01 lot");
+            f = MarketMath.FitMargin(400000, 1000, 1000, 50, 50, 0, 30, 90, false, eurusd, 20);
+            Check(f.Rule == MarginRule.Insufficient && f.Units == 0, "min-lot override off -> no trade");
+            f = MarketMath.FitMargin(400000, 1000, 1000, 50 - 1000 / 30.0, 50, 1000 / 30.0, 30, 90, true, eurusd, 20);
+            Check(f.Rule == MarginRule.Insufficient && Math.Abs(f.MinNeed - 1000 / 30.0) < 1e-9, "50 EUR: a second 0.01 lot does not fit");
+            f = MarketMath.FitMargin(400000, 1000, 1000, 100, 1000, 900, 30, 90, true, eurusd, 20);
+            Check(f.Rule == MarginRule.TotalLimitReached && f.Units == 0, "90% of equity already blocked -> refused");
+
+            // Crypto at 1:2: 4 BTC far exceed the share, the volume is cut to what 30% of free margin buys.
+            Func<double, double> btc = v => v * 110000 * 0.86 / 2.0;
+            f = MarketMath.FitMargin(4, 0.01, 0.01, 49092, 49092, 0, 30, 90, true, btc, 20);
+            Check(f.Rule == MarginRule.ReducedToShare && f.Units > 0.3 && f.Units < 0.32 && btc(f.Units) <= 49092 * 0.30 + 1e-6,
+                  "49k EUR: 4 BTC -> " + f.Units.ToString("F2") + " BTC within 30% of free margin");
+
+            // Margin that is not proportional to volume: the loop steps down until it really fits.
+            Func<double, double> fixedPart = v => 1000 + v / 30.0;
+            f = MarketMath.FitMargin(400000, 1000, 1000, 10000 / 0.3, 1e9, 0, 30, 100, true, fixedPart, 20);
+            Check(f.Rule == MarginRule.ReducedToShare && f.Units == 270000 && fixedPart(f.Units) <= 10000 + 1e-6,
+                  "non-linear margin -> stepped down to " + f.Units);
         }
 
         private static double Gauss(Random r)
