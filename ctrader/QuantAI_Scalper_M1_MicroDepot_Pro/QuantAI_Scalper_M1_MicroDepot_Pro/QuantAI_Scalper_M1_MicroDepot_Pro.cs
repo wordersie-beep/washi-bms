@@ -1,7 +1,8 @@
 // =====================================================================================================
-//  QuantAI_Scalper_M1_MicroDepot_Pro  v1.0.0
+//  QuantAI_Scalper_M1_MicroDepot_Pro  v1.1.0
 //  cTrader Automate cBot | EURUSD M1/M5 micro-impulse scalper for small (50 EUR) accounts
-//  Builds on cTrader 4.2+ and 5.x (.NET 6 or legacy .NET Framework target, C# 7.3 syntax only).
+//  Needs cTrader 5.0+ (Algo API 1.0.9+): Windows, Mac, Web and Mobile, local or cloud. C# 7.3 syntax only.
+//  Ready to run: a new instance opens on EURUSD m1 and every parameter below already holds its working value.
 // -----------------------------------------------------------------------------------------------------
 //  ENGINE
 //   1. Tick Velocity Engine   Counts real ticks in a sliding window (default 3 s) and compares that
@@ -44,10 +45,10 @@ namespace cAlgo.Robots
         TrailWholePosition
     }
 
-    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
+    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_M1_MicroDepot_Pro : Robot
     {
-        private const string BotVersion = "1.0.0";
+        private const string BotVersion = "1.1.0";
 
         #region Parameters
 
@@ -65,7 +66,7 @@ namespace cAlgo.Robots
         [Parameter("Use Min Lot If Risk Size Is Smaller", Group = "1. Risk & Money", DefaultValue = true)]
         public bool AllowMinLotOverride { get; set; }
 
-        [Parameter("Max Margin Use (% of free margin)", Group = "1. Risk & Money", DefaultValue = 80.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
+        [Parameter("Max Margin Use (% of free margin)", Group = "1. Risk & Money", DefaultValue = 95.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
         public double MaxMarginUsePercent { get; set; }
 
         [Parameter("Leverage For Margin Check (0 = auto)", Group = "1. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 1.0)]
@@ -250,7 +251,8 @@ namespace cAlgo.Robots
         private const int IndicatorWarmupFactor = 3;     // bars per indicator period before values are trusted
         private const int CalibrationWindowBars = 30;    // bars used to match OnTick counts with broker tick volume
         private const int CalibrationMinBars = 3;        // calibration is applied once this many full bars were seen
-        private const double SpreadSmoothing = 0.02;     // EMA factor of the tracked average spread
+        private const int SpreadWindowTicks = 500;       // in-session spreads kept for the rolling median
+        private const int SpreadCalibrationTicks = 300;  // in-session ticks before the AI is retrained on the live spread
         private const int MaxNoMoneyRetries = 2;         // halve the volume and retry after a "no money" reject
         private const double RetryDelaySeconds = 1.0;    // first pause before retrying a failed close/modify
         private const double MaxRetryDelaySeconds = 60.0; // the pause doubles per failure up to this
@@ -281,7 +283,9 @@ namespace cAlgo.Robots
         private int _calBarTicks;
         private bool _calBarFull;
         private double _baselineTicksPerBar;
-        private double _avgSpread;
+        private SpreadTracker _spreads;
+        private bool _spreadCalibrated;
+        private double _bootstrapSpread;
 
         private GaussianNaiveBayes _ai;
         private bool _aiWasReady;
@@ -380,7 +384,7 @@ namespace cAlgo.Robots
             _calib = new TickCalibrator(CalibrationWindowBars);
             _ai = new GaussianNaiveBayes(AiFeatures.Dim, AiTrainingBars * 2);
             _engineStart = Server.Time;
-            _avgSpread = Symbol.Spread > 0 ? Symbol.Spread : 0.0;
+            _spreads = new SpreadTracker(SpreadWindowTicks);
             _hBuf = new double[AiHorizonBars];
             _lBuf = new double[AiHorizonBars];
             _winH = new double[SqueezeBars];
@@ -421,7 +425,8 @@ namespace cAlgo.Robots
                 DateTime now = Server.Time;
                 _ticks.AddTick(now);
                 CountTickForCalibration();
-                TrackSpread();
+                TrackSpread(now);
+                CheckSpreadCalibration();
                 CheckNewDay(now);
                 ProcessClosedBars();
                 CheckDailyLoss();
@@ -522,13 +527,35 @@ namespace cAlgo.Robots
                     + " - the AI trains on what is available and keeps learning online");
         }
 
+        /// <summary>
+        /// Spread used to label training samples: the fixed UI value, otherwise the median of recent in-session
+        /// spreads (robust to rollover and news spikes), otherwise the spread of the moment.
+        /// </summary>
         private double TrainingSpread()
         {
             if (AiTrainSpreadPips > 0)
                 return AiTrainSpreadPips * Symbol.PipSize;
-            if (_avgSpread > 0)
-                return _avgSpread;
+            if (_spreads != null && _spreads.Count > 0)
+                return _spreads.Median();
             return Math.Max(Symbol.Spread, 0.0);
+        }
+
+        /// <summary>
+        /// The start-up bootstrap only knows the spread of the moment the cBot was launched, which is stale or
+        /// wide at weekends and rollover. Once enough in-session ticks were seen, the model is rebuilt from
+        /// history with the live median spread; until then AI-filtered entries wait.
+        /// </summary>
+        private void CheckSpreadCalibration()
+        {
+            if (_spreadCalibrated || AiTrainSpreadPips > 0 || _spreads.Count < SpreadCalibrationTicks)
+                return;
+            _spreadCalibrated = true;
+            double live = _spreads.Median();
+            Log("AI RETRAIN: live in-session spread median " + Pips(live) + " over " + _spreads.Count + " ticks (start-up bootstrap used "
+                + Pips(_bootstrapSpread) + ") - rebuilding the model from history");
+            _ai = new GaussianNaiveBayes(AiFeatures.Dim, AiTrainingBars * 2);
+            _pending.Clear();
+            TrainFromHistory();
         }
 
         private void TrainFromHistory()
@@ -536,6 +563,7 @@ namespace cAlgo.Robots
             int lastClosed = _sig.Count - 2;
             int first = Math.Max(WarmupBars(), lastClosed - AiTrainingBars + 1);
             double spread = TrainingSpread();
+            _bootstrapSpread = spread;
             int bars = 0;
             for (int c = first; c <= lastClosed; c++)
             {
@@ -976,7 +1004,12 @@ namespace cAlgo.Robots
             string aiInfo = "";
             if (UseAiFilter)
             {
-                if (!_ai.IsReady(AiMinSamplesPerClass))
+                if (AiTrainSpreadPips <= 0 && !_spreadCalibrated)
+                {
+                    AddReason(reasons, codes, "AISPR", "AI calibrating on the live spread (" + _spreads.Count + "/" + SpreadCalibrationTicks
+                              + " in-session ticks)");
+                }
+                else if (!_ai.IsReady(AiMinSamplesPerClass))
                 {
                     AddReason(reasons, codes, "AIWARM", "AI warming up (wins " + _ai.Wins + "/" + AiMinSamplesPerClass + ", losses "
                               + _ai.Losses + "/" + AiMinSamplesPerClass + ")");
@@ -1701,12 +1734,12 @@ namespace cAlgo.Robots
             return _baselineTicksPerBar > 0 ? CalibratedTicks(_sigSec) / _baselineTicksPerBar : 0.0;
         }
 
-        private void TrackSpread()
+        private void TrackSpread(DateTime now)
         {
             double s = Symbol.Spread;
-            if (s <= 0)
+            if (s < 0 || !InSession(now))
                 return;
-            _avgSpread = _avgSpread <= 0 ? s : _avgSpread + SpreadSmoothing * (s - _avgSpread);
+            _spreads.Add(s);
         }
 
         private double RiskAtr()
@@ -1823,12 +1856,16 @@ namespace cAlgo.Robots
                 var sb = new StringBuilder(512);
                 sb.Append("QuantAI Scalper v").Append(BotVersion).Append(" | ").Append(SymbolName).Append(" | signal ").Append(SignalTimeFrame.ShortName)
                   .Append(" | ATR ").Append(RiskTimeFrame.ShortName).Append(" | ").Append(now.ToString("HH:mm:ss", Inv)).Append(" UTC\n");
-                sb.Append("Spread ").Append(Pips(spread)).Append(" / ATR ").Append(Pips(atrR)).Append(" = ")
+                sb.Append("Spread ").Append(Pips(spread)).Append(" (median ").Append(_spreads.Count > 0 ? Pips(_spreads.Median()) : "-").Append(")")
+                  .Append(" / ATR ").Append(Pips(atrR)).Append(" = ")
                   .Append(atrR > 0 ? Pct(spread / atrR) : "n/a").Append(" (max ").Append(Pct(MaxSpreadToAtr)).Append(")\n");
                 sb.Append("Tick velocity ").Append(F(TickWindowSeconds, 1)).Append("s: ").Append(F(burst, 2)).Append("x (N ")
                   .Append(F(TickVelocityMultiplier, 2)).Append("x)").Append(burst >= TickVelocityMultiplier ? " INFLOW" : "")
                   .Append(" | bar ").Append(F(BarTickVelocity(), 2)).Append("x").Append(UseTickVelocity ? "" : " (filter OFF)").Append('\n');
-                sb.Append("AI: ").Append(_ai.IsReady(AiMinSamplesPerClass)
+                sb.Append("AI: ").Append(AiTrainSpreadPips <= 0 && !_spreadCalibrated
+                        ? "calibrating spread " + _spreads.Count + "/" + SpreadCalibrationTicks + ", "
+                        : "")
+                  .Append(_ai.IsReady(AiMinSamplesPerClass)
                         ? _ai.Count + " samples, base win " + Pct(_ai.WinRate)
                         : "warming " + _ai.Wins + "/" + _ai.Losses + " of " + AiMinSamplesPerClass)
                   .Append(" | target ").Append(Pct(MinConfidence)).Append(" | last ").Append(double.IsNaN(_lastConf) ? "-" : Pct(_lastConf))
@@ -1911,7 +1948,7 @@ namespace cAlgo.Robots
             Log("PARAMS AI: " + OnOff(UseAiFilter) + " | Min Confidence " + F(MinConfidence, 2) + " | window " + AiTrainingBars + " bars | min "
                 + AiMinSamplesPerClass + " per class | horizon " + AiHorizonBars + " " + RiskTimeFrame.ShortName + " bars | RSI(" + RsiPeriod + ") slope "
                 + RsiSlopeBars + " bars | prior " + (AiUseEmpiricalPrior ? "empirical" : "balanced") + " | train spread "
-                + (AiTrainSpreadPips > 0 ? F(AiTrainSpreadPips, 1) + "p" : "live"));
+                + (AiTrainSpreadPips > 0 ? F(AiTrainSpreadPips, 1) + "p (fixed)" : "live in-session median, retrain after " + SpreadCalibrationTicks + " ticks"));
             Log("SYMBOL: pip " + Symbol.PipSize.ToString("G", Inv) + ", digits " + Symbol.Digits + ", volume min " + F(Symbol.VolumeInUnitsMin, 0)
                 + "u step " + F(Symbol.VolumeInUnitsStep, 0) + "u, pip value " + F(Symbol.PipValue * Symbol.LotSize, 2) + " " + _ccy + "/lot, spread now "
                 + Pips(Symbol.Spread));
@@ -2360,6 +2397,46 @@ namespace cAlgo.Robots
                     lo = mid + 1;
             }
             return _times.Count - lo;
+        }
+    }
+
+    /// <summary>Rolling median of the most recent in-session spreads.</summary>
+    internal sealed class SpreadTracker
+    {
+        private readonly double[] _buffer;
+        private readonly double[] _scratch;
+        private int _next;
+        private int _count;
+
+        public SpreadTracker(int capacity)
+        {
+            _buffer = new double[Math.Max(1, capacity)];
+            _scratch = new double[_buffer.Length];
+        }
+
+        public int Count
+        {
+            get { return _count; }
+        }
+
+        public void Add(double spread)
+        {
+            if (double.IsNaN(spread) || double.IsInfinity(spread) || spread < 0)
+                return;
+            _buffer[_next] = spread;
+            _next = (_next + 1) % _buffer.Length;
+            if (_count < _buffer.Length)
+                _count++;
+        }
+
+        public double Median()
+        {
+            if (_count == 0)
+                return double.NaN;
+            Array.Copy(_buffer, _scratch, _count);
+            Array.Sort(_scratch, 0, _count);
+            int mid = _count / 2;
+            return _count % 2 == 1 ? _scratch[mid] : 0.5 * (_scratch[mid - 1] + _scratch[mid]);
         }
     }
 

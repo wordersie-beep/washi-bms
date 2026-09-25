@@ -28,6 +28,7 @@ namespace Harness
             OutcomeTests();
             TickEngineTests();
             CalibratorTests();
+            SpreadTests();
             VolumeTests();
             SqueezeTests();
             SweepTests();
@@ -167,6 +168,23 @@ namespace Harness
             for (int i = 0; i < 10; i++) c.AddBar(200, 100);
             Check(c.Bars == 4, "window evicts old bars");
             Near(c.Factor(3), 2.0, 1e-12, "factor follows recent bars");
+        }
+
+        private static void SpreadTests()
+        {
+            var t = new SpreadTracker(5);
+            Check(double.IsNaN(t.Median()), "empty tracker has no median");
+            t.Add(0.00002);
+            Near(t.Median(), 0.00002, 1e-15, "single value");
+            t.Add(0.00004);
+            Near(t.Median(), 0.00003, 1e-15, "even count averages the middle pair");
+            t.Add(0.00100);   // rollover spike
+            Near(t.Median(), 0.00004, 1e-15, "a spike does not move the median much");
+            t.Add(-1.0); t.Add(double.NaN);
+            Check(t.Count == 3, "negative and NaN spreads ignored");
+            for (int i = 0; i < 10; i++) t.Add(0.00001);
+            Check(t.Count == 5, "window capped at capacity");
+            Near(t.Median(), 0.00001, 1e-15, "old values leave the window");
         }
 
         private static void VolumeTests()

@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
-    Build outside cTrader:  dotnet build -c Release
-    The API is pinned to cTrader.Automate 1.0.0 (cTrader 4.2), the oldest .NET 6 SDK, so the code is proven
-    to use nothing newer than cTrader 4.x offers; the produced .algo is accepted by cTrader 4.2+ and 5.x.
+    Build outside cTrader:  dotnet build -c Release   ->  bin/Release/net6.0/QuantAI_Scalper_M1_MicroDepot_Pro.algo
+    The API is pinned to cTrader.Automate 1.0.9 (cTrader 5.0), the first release with Robot.DefaultSymbolName /
+    DefaultTimeFrame, so the .algo opens in every cTrader 5 app (Windows, Mac, Web, Mobile) and in the cloud.
     cTrader itself keeps its own project file when the source is pasted into its editor.
   -->
   <PropertyGroup>
@@ -12,6 +12,6 @@
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="cTrader.Automate" Version="1.0.0" />
+    <PackageReference Include="cTrader.Automate" Version="1.0.9" />
   </ItemGroup>
 </Project>

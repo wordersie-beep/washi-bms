@@ -6,3 +6,4 @@ __pycache__/
 bin/
 obj/
 *.algo
+!ctrader/QuantAI_Scalper_M1_MicroDepot_Pro/release/*.algo
