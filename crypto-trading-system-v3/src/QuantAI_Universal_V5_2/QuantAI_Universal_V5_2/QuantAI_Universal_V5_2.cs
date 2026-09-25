@@ -1,7 +1,10 @@
 // =====================================================================================================
-//  QuantAI_Universal_V5_1 (версия 5.1) — адаптивный AI-cBot для cTrader (API 4.x / cTrader.Automate)
+//  QuantAI_Universal_V5_2 (версия 5.1) — адаптивный AI-cBot для cTrader (API 4.x / cTrader.Automate)
 //
 //  ИСТОРИЯ ВЕРСИЙ
+//   5.2 — каждый экземпляр видит только свои позиции: к метке ордеров автоматически добавляется
+//         таймфрейм (QAIv5 m5, QAIv5 h1). Раньше два экземпляра на одном инструменте с разными
+//         таймфреймами считали позиции друг друга своими.
 //   5.1 — исправлен ключ памяти AI в LocalStorage (cTrader допускает только латиницу, цифры и пробелы;
 //         прежний ключ с символом '|' отвергался, и память не читалась и не сохранялась).
 //         Номер версии теперь в имени файла, в названии бота и в журнале.
@@ -113,7 +116,7 @@ namespace cAlgo.Robots
         public double TrendSlopeSign;    // знак наклона EMA20
         public double PTrend;            // вероятность трендового режима
         public double RegimeConfidence;  // |2·PTrend − 1|
-        public readonly StrategyVote[] Votes = new StrategyVote[QuantAI_Universal_V5_1.StrategyCount];
+        public readonly StrategyVote[] Votes = new StrategyVote[QuantAI_Universal_V5_2.StrategyCount];
         public int EnsembleDirection;
         public double EnsembleScore;     // 0..1
         public int AgreeingCount;
@@ -311,10 +314,10 @@ namespace cAlgo.Robots
     // =================================================================================================
 
     [Robot(AccessRights = AccessRights.None, TimeZone = TimeZones.UTC, AddIndicators = true)]
-    public class QuantAI_Universal_V5_1 : Robot
+    public class QuantAI_Universal_V5_2 : Robot
     {
         /// <summary>Версия бота — печатается в журнале при запуске. Меняется с каждой выпущенной версией.</summary>
-        public const string BotVersion = "5.1";
+        public const string BotVersion = "5.2";
 
         public const int StrategyCount = 5;
 
@@ -495,6 +498,13 @@ namespace cAlgo.Robots
         private double _effectiveTpAtr;
         private string _storageKey;
 
+        /// <summary>
+        /// Метка ордеров ЭТОГО экземпляра: метка из параметров + таймфрейм графика. Позиции ищутся по
+        /// метке и символу, поэтому без таймфрейма два экземпляра на одном инструменте (m5 и h1)
+        /// принимали бы позиции друг друга за свои.
+        /// </summary>
+        private string _label;
+
         // =============================================================================================
         //  ЖИЗНЕННЫЙ ЦИКЛ
         // =============================================================================================
@@ -508,6 +518,8 @@ namespace cAlgo.Robots
             _ema50 = Indicators.ExponentialMovingAverage(Bars.ClosePrices, 50);
             _ema200 = Indicators.ExponentialMovingAverage(Bars.ClosePrices, 200);
             _bb = Indicators.BollingerBands(Bars.ClosePrices, 20, 2.0, MovingAverageType.Simple);
+
+            _label = (string.IsNullOrWhiteSpace(OrderLabel) ? "QAIv5" : OrderLabel.Trim()) + " " + ShortTimeFrame();
 
             ValidateAndReportSettings();
 
@@ -531,7 +543,7 @@ namespace cAlgo.Robots
             Positions.Closed += OnPositionClosed;
             RebuildMetaForOpenPositions();
 
-            Print("QuantAI_Universal версия " + BotVersion + " запущена: " + SymbolName + " " + TimeFrame +
+            Print("QuantAI_Universal версия " + BotVersion + " запущена: " + SymbolName + " " + TimeFrame + ", метка ордеров «" + _label + "»" +
                   ", баров истории " + Bars.Count + ".");
             PrintStatus(Bars.Count - 2, null);
         }
@@ -627,6 +639,15 @@ namespace cAlgo.Robots
                   " ATR, тейк " + F(_effectiveTpAtr) + " ATR, дневной лимит " + F(DailyLossLimitPercent) + "%." +
                   (_sweepActive ? " Фильтр ложных пробоев включён." : "") +
                   (_sessionBlockEnabled ? " Блок " + SessionBlockStart + "–" + SessionBlockEnd + " UTC." : ""));
+        }
+
+        private string ShortTimeFrame()
+        {
+            string tf = TimeFrame.ToString();
+            if (tf.StartsWith("Minute", StringComparison.Ordinal)) return "m" + (tf.Length > 6 ? tf.Substring(6) : "1");
+            if (tf.StartsWith("Hour", StringComparison.Ordinal)) return "h" + (tf.Length > 4 ? tf.Substring(4) : "1");
+            if (tf.StartsWith("Daily", StringComparison.Ordinal)) return "d1";
+            return tf;
         }
 
         private static bool TryParseTime(string text, out TimeSpan value)
@@ -1207,7 +1228,7 @@ namespace cAlgo.Robots
                 return;
             }
 
-            if (Positions.FindAll(OrderLabel, SymbolName).Length >= MaxOpenPositions)
+            if (Positions.FindAll(_label, SymbolName).Length >= MaxOpenPositions)
             {
                 RegisterSkip(SkipReason.PositionOpen, "уже открыто позиций: " + MaxOpenPositions, a);
                 return;
@@ -1288,7 +1309,7 @@ namespace cAlgo.Robots
             double slPips = slDistance / Symbol.PipSize;
             double tpPips = tpDistance / Symbol.PipSize;
 
-            TradeResult result = ExecuteMarketOrder(type, SymbolName, volume, OrderLabel, slPips, tpPips);
+            TradeResult result = ExecuteMarketOrder(type, SymbolName, volume, _label, slPips, tpPips);
             if (!result.IsSuccessful || result.Position == null)
             {
                 RegisterSkip(SkipReason.OrderFailed, "брокер отклонил ордер: " + result.Error, a);
@@ -1385,7 +1406,7 @@ namespace cAlgo.Robots
         /// <summary>На каждом тике: при +1R — частичное закрытие и перенос стопа в безубыток + 0.1R.</summary>
         private void ManagePositionsOnTick()
         {
-            foreach (Position p in Positions.FindAll(OrderLabel, SymbolName))
+            foreach (Position p in Positions.FindAll(_label, SymbolName))
             {
                 if (!_meta.TryGetValue(p.Id, out TradeMeta m) || m.BreakevenDone) continue;
 
@@ -1443,7 +1464,7 @@ namespace cAlgo.Robots
             double atr = _atr.Result[closedIndex];
             if (double.IsNaN(atr) || atr <= 0) return;
 
-            foreach (Position p in Positions.FindAll(OrderLabel, SymbolName))
+            foreach (Position p in Positions.FindAll(_label, SymbolName))
             {
                 if (!_meta.TryGetValue(p.Id, out TradeMeta m) || !m.BreakevenDone) continue;
 
@@ -1465,7 +1486,7 @@ namespace cAlgo.Robots
         /// <summary>После перезапуска: восстанавливает сведения об уже открытых позициях бота.</summary>
         private void RebuildMetaForOpenPositions()
         {
-            foreach (Position p in Positions.FindAll(OrderLabel, SymbolName))
+            foreach (Position p in Positions.FindAll(_label, SymbolName))
             {
                 if (_meta.ContainsKey(p.Id) || p.StopLoss == null) continue;
 
@@ -1497,7 +1518,7 @@ namespace cAlgo.Robots
         private void OnPositionClosed(PositionClosedEventArgs args)
         {
             Position p = args.Position;
-            if (p.Label != OrderLabel || p.SymbolName != SymbolName) return;
+            if (p.Label != _label || p.SymbolName != SymbolName) return;
 
             _lastTradeCloseIndex = Bars.Count - 2;
 
