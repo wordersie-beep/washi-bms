@@ -502,7 +502,8 @@ namespace cAlgo.Robots
 
             ValidateAndReportSettings();
 
-            _storageKey = "QAIv5|" + SymbolName + "|" + TimeFrame;
+            // LocalStorage cTrader принимает в ключе только латиницу, цифры и пробелы (без пробелов по краям).
+            _storageKey = StorageKey("QAIv5 " + SymbolName + " " + TimeFrame);
             if (ResetAiMemory)
             {
                 Print("Память AI сброшена по параметру — модель начинает с нуля.");
@@ -1638,6 +1639,19 @@ namespace cAlgo.Robots
                 for (int s = 0; s < StrategyCount; s++) _realWeights[s] = 1.0;
                 Print("Не удалось прочитать память AI (" + ex.Message + ") — начинаю с нуля.");
             }
+        }
+
+        private static string StorageKey(string raw)
+        {
+            var sb = new StringBuilder(raw.Length);
+            foreach (char ch in raw)
+            {
+                bool latin = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+                sb.Append(latin ? ch : ' ');
+            }
+            string key = sb.ToString().Trim();
+            while (key.Contains("  ")) key = key.Replace("  ", " ");
+            return key.Length > 0 ? key : "QAIv5";
         }
 
         private static string R(double v) => v.ToString("R", CultureInfo.InvariantCulture);
