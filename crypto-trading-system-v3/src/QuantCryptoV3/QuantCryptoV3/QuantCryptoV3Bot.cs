@@ -8,6 +8,7 @@ using Quant.Core.Ev;
 using Quant.Core.Execution;
 using Quant.Core.Data;
 using Quant.Core.Primitives;
+using Quant.Core.Sizing;
 using Quant.Core.Stats;
 using Candle = Quant.Core.Primitives.Candle;
 using Quote = Quant.Core.Primitives.Quote;
@@ -34,7 +35,7 @@ public class QuantCryptoV3Bot : Robot
     // ================= ПАРАМЕТРЫ: РЕЖИМ =================
 
     [Parameter("Пресет настроек", Group = "Режим", DefaultValue = TradingPreset.CryptoM5,
-        Description = "Готовый набор настроек. CryptoM5 — крипта на пятиминутках, рекомендуется. CryptoM15 — то же спокойнее и дешевле по издержкам. Manual — ничего не трогать, работают значения полей ниже. Пресет ПЕРЕЗАПИСЫВАЕТ поля, которые к нему относятся.")]
+        Description = "Готовый набор настроек. CryptoM5 — BTCUSD и ETHUSD на пятиминутках. CryptoM15 — то же спокойнее и дешевле по издержкам. MultiAssetM5 — крипта, золото и индексы: больше независимых возможностей, значит чаще сделки при той же планке. Manual — ничего не трогать. Пресет ПЕРЕЗАПИСЫВАЕТ относящиеся к нему поля; если поле «Доп. символы» пустое, берётся корзина пресета.")]
     public TradingPreset Preset { get; set; }
 
     [Parameter("Режим работы", Group = "Режим", DefaultValue = OperatingMode.Shadow,
@@ -363,9 +364,11 @@ public class QuantCryptoV3Bot : Robot
     {
         _symbols.Add(SymbolName);
 
-        if (!string.IsNullOrWhiteSpace(AdditionalSymbols))
+        string requested = string.IsNullOrWhiteSpace(AdditionalSymbols) ? PresetBasket() : AdditionalSymbols;
+
+        if (!string.IsNullOrWhiteSpace(requested))
         {
-            string[] extra = AdditionalSymbols.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
+            string[] extra = requested.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries);
             for (int i = 0; i < extra.Length; i++)
             {
                 string name = extra[i].Trim();
@@ -731,57 +734,68 @@ public class QuantCryptoV3Bot : Robot
     {
         try
         {
-            SymbolDataSet data = _engine.Data(SymbolName);
-            if (data == null) return;
+            AccountSnapshot account = _broker.GetAccount();
+            int tradeable = 0;
+            int affordable = 0;
 
-            double spread = data.Spread.IsReady ? data.Spread.CostingSpread() : Symbol.Spread;
-            double price = Symbol.Bid > 0 ? Symbol.Bid : data.Signal.Last.Close;
-            if (spread <= 0 || price <= 0) return;
-
-            var lines = new List<TradeabilityReport.Line>();
-            foreach (Tf tf in _config.Data.Timeframes)
+            for (int i = 0; i < _symbols.Count; i++)
             {
-                TimeframeSeries series = data.Series(tf);
-                if (series == null || !series.Atr.IsReady) continue;
-                lines.Add(TradeabilityReport.Evaluate(tf, series.Atr.Value, spread, price, data.Spec, _config));
-            }
+                string name = _symbols[i];
+                SymbolDataSet data = _engine.Data(name);
+                Symbol symbol = Symbols.GetSymbol(name);
+                if (data == null || symbol == null) continue;
 
-            if (lines.Count == 0) return;
+                double spread = data.Spread.IsReady ? data.Spread.CostingSpread() : symbol.Spread;
+                double price = symbol.Bid > 0 ? symbol.Bid : data.Signal.Last.Close;
+                if (spread <= 0 || price <= 0) continue;
 
-            Print(TradeabilityReport.Render(SymbolName, lines, TradeabilityReport.AtrNeededFor(spread, _config)));
-
-            TradeabilityReport.Line current = default;
-            bool found = false;
-            for (int i = 0; i < lines.Count; i++)
-            {
-                if (lines[i].Timeframe == _config.Data.SignalTimeframe) { current = lines[i]; found = true; break; }
-            }
-
-            if (!found) return;
-
-            if (current.IsTradeable)
-            {
-                Print($"ВЫВОД: {SymbolName} на {current.Timeframe} экономически проходит. Издержки съедают " +
-                      $"{current.CostR:P0} риска, значит стратегия обязана давать матожидание выше " +
-                      $"{current.RequiredEdgeR:F2}R, иначе торговля будет убыточной. Это требование к рынку, а не к настройкам.");
-            }
-            else
-            {
-                string best = "ни один из доступных";
-                for (int i = 0; i < lines.Count; i++)
+                var lines = new List<TradeabilityReport.Line>();
+                foreach (Tf tf in _config.Data.Timeframes)
                 {
-                    if (lines[i].IsTradeable) { best = lines[i].Timeframe.ToString(); break; }
+                    TimeframeSeries series = data.Series(tf);
+                    if (series == null || !series.Atr.IsReady) continue;
+                    lines.Add(TradeabilityReport.Evaluate(tf, series.Atr.Value, spread, price, data.Spec, _config));
                 }
 
-                Print($"ВЫВОД: {SymbolName} на {current.Timeframe} НЕ ПРОЙДЁТ НИ ОДНОЙ СДЕЛКИ, и это не поломка. " +
-                      $"Спред {current.SpreadToAtr:P0} от ATR при пределе {_config.Risk.MaxSpreadToAtr:P0}; " +
-                      $"издержки круга — {current.CostR:P0} риска. Подходящий таймфрейм здесь: {best}. " +
-                      "Либо смените таймфрейм, либо возьмите инструмент, у которого волатильность больше относительно спреда.");
+                if (lines.Count == 0) continue;
+
+                // Подробная таблица — только для инструмента графика, иначе журнал утонет.
+                if (name == SymbolName)
+                {
+                    Print(TradeabilityReport.Render(name, lines, TradeabilityReport.AtrNeededFor(spread, _config)));
+                }
+
+                TradeabilityReport.Line current = lines.Find(l => l.Timeframe == _config.Data.SignalTimeframe);
+                if (current.Atr <= 0) continue;
+
+                AccountViability.Result money = AccountViability.Evaluate(
+                    name, data.Spec, current.Atr, account.Equity, _config);
+
+                if (current.IsTradeable) tradeable++;
+                if (money.Outcome != AccountViability.Verdict.AccountTooSmall) affordable++;
+
+                string economics = current.IsTradeable
+                    ? $"экономика сходится (издержки {current.CostR:P0} риска, нужно EV {current.RequiredEdgeR:F2}R)"
+                    : $"ЭКОНОМИКА НЕ СХОДИТСЯ: спред {current.SpreadToAtr:P0} от ATR при пределе {_config.Risk.MaxSpreadToAtr:P0}";
+
+                Print($"  {name,-8} {economics}");
+                Print("           " + AccountViability.Describe(money, account.Currency));
+            }
+
+            int decisionsPerDay = _symbols.Count * (24 * 60 / (int)_config.Data.SignalTimeframe);
+            Print($"ИТОГ: инструментов {_symbols.Count}, экономика сходится у {tradeable}, денег хватает у {affordable}. " +
+                  $"Точек решения в сутки: {decisionsPerDay}. Сколько из них станет сделками, покажет воронка решений: " +
+                  "сначала система соберёт теневые доказательства, и только потом начнёт рисковать деньгами.");
+
+            if (affordable == 0)
+            {
+                Print("!! НИ НА ОДНОМ ИНСТРУМЕНТЕ НЕ ХВАТАЕТ ДЕНЕГ НА МИНИМАЛЬНУЮ ПОЗИЦИЮ. Бот будет работать, " +
+                      "собирать доказательства и не совершит ни одной сделки. На демо-счёте баланс можно пополнить в настройках брокера.");
             }
         }
         catch (Exception ex)
         {
-            Print("Не удалось посчитать экономику инструмента: " + ex.Message);
+            Print("Не удалось посчитать экономику инструментов: " + ex.Message);
         }
     }
 
@@ -963,5 +977,25 @@ public class QuantCryptoV3Bot : Robot
         if (Preset == TradingPreset.Manual) return;
 
         Presets.CryptoSmallTimeframe(config, Preset == TradingPreset.CryptoM15 ? Tf.M15 : Tf.M5);
+    }
+
+    /// <summary>
+    /// Корзина инструментов пресета — если человек не указал свою.
+    ///
+    /// Имена символов зависят от брокера, поэтому живут здесь, в адаптере, а не в ядре.
+    /// Недоступный символ пропускается с сообщением: корзина не обязана совпасть целиком.
+    /// </summary>
+    private string PresetBasket()
+    {
+        switch (Preset)
+        {
+            case TradingPreset.CryptoM5:
+            case TradingPreset.CryptoM15:
+                return "ETHUSD";
+            case TradingPreset.MultiAssetM5:
+                return "ETHUSD,XAUUSD,NAS100,US500";
+            default:
+                return "";
+        }
     }
 }

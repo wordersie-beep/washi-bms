@@ -87,7 +87,7 @@ public sealed class ShadowTracker
     public bool Open(
         DateTime nowUtc, string symbolName, StrategySignal signal, ExitPlan plan,
         double entryPrice, MarketRegime regime, FeatureVector features,
-        double costInR, OperatingMode mode)
+        double costInR, OperatingMode mode, double? targetPrice = null)
     {
         if (signal == null || plan == null || !plan.IsValid) return false;
         if (signal.Direction == Side.None || entryPrice <= 0 || plan.StopDistance <= 0) return false;
@@ -114,7 +114,10 @@ public sealed class ShadowTracker
             EnsembleConfidence = signal.Confidence,
             EntryPrice = entryPrice,
             StopPrice = plan.StopPrice,
-            TargetPrice = plan.Target1Price,
+            // Цель по умолчанию — первая, как у стратегии, чей путь обратно здесь
+            // наблюдается. Сбор доказательств задаёт её явно: там виртуальная сделка обязана
+            // описывать ту же ставку, что и формула ожидания, а не лёгкую её часть.
+            TargetPrice = targetPrice ?? plan.Target1Price,
             StopDistance = plan.StopDistance,
             CostInR = Math.Max(0, costInR),
             AtrAtEntry = features?.Atr ?? 0,

@@ -74,6 +74,14 @@ public sealed class TradingEngine
     private readonly PerformanceStore _performance;
     private readonly StrategyWeightEngine _weights;
     private readonly ShadowTracker _shadow;
+
+    /// <summary>
+    /// Виртуальные сделки по кандидатам, отвергнутым за отсутствием ДОКАЗАТЕЛЬСТВ.
+    /// Отдельный экземпляр: у него другая цель и другой потребитель результатов, и
+    /// смешивать их с наблюдением за отключёнными стратегиями значило бы смешать два
+    /// разных вопроса в одной статистике.
+    /// </summary>
+    private readonly ShadowTracker _evidence;
     private readonly EnsembleVoter _voter;
     private readonly CalibrationTracker _calibration;
     private readonly BayesianProbabilityModel _probability;
@@ -126,6 +134,7 @@ public sealed class TradingEngine
         _performance = new PerformanceStore(config.Adaptation);
         _weights = new StrategyWeightEngine(config.Adaptation, config.Strategy, _performance);
         _shadow = new ShadowTracker(config.Adaptation);
+        _evidence = new ShadowTracker(config.Adaptation);
         _voter = new EnsembleVoter(config.Strategy, _signalCorrelation, _weights);
 
         foreach (IStrategy s in _strategies.All)
@@ -311,6 +320,10 @@ public sealed class TradingEngine
         // 3. Виртуальные позиции отключённых стратегий — их единственный путь обратно.
         _shadow.OnBarClosed(nowUtc, symbolName, bar, _performance.Record);
 
+        // 3а. Виртуальные сделки-доказательства: их исходы идут ТОЛЬКО в модель
+        // вероятности — не в риск-движок, не в веса, не в счётчик холодного старта.
+        _evidence.OnBarClosed(nowUtc, symbolName, bar, _probability.ObserveEvidence);
+
         // 4. Сопровождение открытых позиций — ДО рассмотрения новых.
         ManageOpenPositions(nowUtc, account, symbolName);
 
@@ -450,6 +463,48 @@ public sealed class TradingEngine
                 _config.Regime.EffectiveUncalibratedThreshold)
             : _config.Regime.EffectiveUncalibratedThreshold;
 
+    /// <summary>
+    /// Кандидат прошёл все структурные фильтры и отвергнут только за то, что у системы нет
+    /// ДОКАЗАТЕЛЬСТВ его преимущества. Такой кандидат ведётся виртуально — без денег, по
+    /// тому же плану, с теми же издержками, — и его исход становится доказательством.
+    ///
+    /// Без этого холодный старт был замкнут наглухо: вероятность без истории — константа,
+    /// ожидание — константа ниже порога, сделок нет, истории нет. Круг, который считался
+    /// разорванным, на деле держался на слое, где его никто не искал.
+    ///
+    /// Цель виртуальной сделки — ПОЛНОЕ отношение прибыли к риску плана, а не первая цель:
+    /// формула ожидания платит за выигрыш именно его, и доказательство обязано описывать
+    /// ту же ставку. Первая цель достижима легче, и её частота выдавала бы за преимущество
+    /// то, что им не является.
+    ///
+    /// Собирается всегда, а не только в холодном старте. Если система перестала торговать,
+    /// теневые сделки — единственный канал, по которому она узнает, что рынок изменился;
+    /// без него остановка была бы вечной. Пока система торгует, сюда попадает худшая,
+    /// отвергнутая половина кандидатов, и оценка смещается вниз — в безопасную сторону.
+    /// </summary>
+    private void GatherEvidence(DateTime nowUtc, string symbolName, TradeCandidate candidate,
+        NoTradeReason reason, double entryPrice)
+    {
+        if (reason != NoTradeReason.NegativeExpectedValue && reason != NoTradeReason.InsufficientEdge) return;
+        if (candidate.ExpectedValue == null) return;
+        if (candidate.Exit == null || !candidate.Exit.IsValid || candidate.Ensemble?.Leader == null) return;
+
+        double rr = candidate.Exit.RewardToRisk;
+        if (rr <= 0 || entryPrice <= 0) return;
+
+        double sign = candidate.Ensemble.Direction == Side.Long ? 1.0 : -1.0;
+        double target = entryPrice + (sign * rr * candidate.Exit.StopDistance);
+
+        _evidence.Open(nowUtc, symbolName, candidate.Ensemble.Leader, candidate.Exit, entryPrice,
+            candidate.Regime.Primary, candidate.Features, candidate.Cost.TotalR, _config.Mode, target);
+    }
+
+    /// <summary>Сколько виртуальных сделок-доказательств открыто сейчас.</summary>
+    public int OpenEvidencePositions => _evidence.OpenCount;
+
+    /// <summary>Сколько виртуальных сделок-доказательств уже закрыто и учтено.</summary>
+    public double EvidenceTradesClosed => _probability.TotalEvidenceTrades;
+
     /// <summary>Шкала уверенности классификатора по инструменту — для отчётов.</summary>
     public RegimeConfidenceScale ClarityScale(string symbolName) =>
         _clarity.TryGetValue(symbolName, out RegimeConfidenceScale scale) ? scale : null;
@@ -584,7 +639,12 @@ public sealed class TradingEngine
             regime.Confidence, MathUtil.Clamp01(features.AtrPercentile - 0.5) * 2);
 
         GateOutcome economics = _gate.CheckEconomics(candidate);
-        if (!economics.Passed) { RecordRejection(candidate, economics, account); return; }
+        if (!economics.Passed)
+        {
+            GatherEvidence(nowUtc, symbolName, candidate, economics.Reason, entryPrice);
+            RecordRejection(candidate, economics, account);
+            return;
+        }
 
         // Сайзинг и лимиты портфеля.
         PortfolioExposure exposure = _portfolio.Compute(_positions, account.Equity, _clusters);
@@ -598,7 +658,8 @@ public sealed class TradingEngine
             features.AtrPercentile,
             CorrelationPenaltyFor(symbolName, global),
             quality.Score, _executionQuality.Quality, budget,
-            isColdStart: candidate.ExpectedValue.IsColdStart);
+            isColdStart: candidate.ExpectedValue.IsColdStart,
+            trust: candidate.ExpectedValue.Trust);
 
         GateOutcome portfolio = _gate.CheckPortfolio(candidate, _portfolio, exposure, _clusters, CountPositionsIn(symbolName));
         if (!portfolio.Passed) { RecordRejection(candidate, portfolio, account); return; }
@@ -1187,6 +1248,10 @@ public sealed class TradingEngine
 
         long decisions = _journal.TotalAccepted + _journal.TotalRejected;
         sb.AppendFormat(" | решений {0} (принято {1})", decisions, _journal.TotalAccepted);
+
+        // Без этой строки собирающий доказательства бот неотличим от зависшего: сделок нет,
+        // а работа идёт. Число растёт — значит, система учится на реальном потоке.
+        sb.AppendFormat(" | теневых сделок {0:F0} (открыто {1})", _probability.TotalEvidenceTrades, _evidence.OpenCount);
 
         if (_journal.TryGetLeadingRejection(out NoTradeReason reason, out double share))
         {

@@ -112,6 +112,19 @@ public sealed class CalibrationTracker
     /// an untested model be trusted completely, which is exactly backwards: an unvalidated
     /// probability model is the one that most needs its influence limited.
     /// </summary>
+    /// <summary>Есть ли хотя бы одна корзина с достаточной выборкой, чтобы калибровку можно было судить.</summary>
+    public bool IsMeasured
+    {
+        get
+        {
+            for (int i = 0; i < _bins.Count; i++)
+            {
+                if (_bins[i].Count >= _config.MinSamplePerCalibrationBin) return true;
+            }
+            return false;
+        }
+    }
+
     public double Quality()
     {
         int usable = 0;
@@ -171,7 +184,17 @@ public sealed class CalibrationTracker
             corrected = p + (evidence * (bin.RealizedRate - p));
         }
 
-        // Step 2: bounded shrink toward the base rate.
+        // Step 2: bounded shrink toward the base rate — только если калибровка ИЗМЕРЕНА.
+        //
+        // Неизмеренная калибровка — это не плохая калибровка, а её отсутствие. Качество в
+        // этом случае сообщается как 0.5, и сдвиг на 20% к безубыточности вычитал из
+        // оценки то же незнание, которое байесовский априор уже вычел: 60 теневых сделок с
+        // 62% целей давали 0.494, после сдвига — 0.468, ниже порога. Одно и то же
+        // «мало данных» считалось дважды, и второй раз — так, что снять его можно только
+        // реальными сделками. Неизмеренная калибровка по-прежнему режет РАЗМЕР — через
+        // доверие к оценке, — но оценку больше не портит.
+        if (!IsMeasured) return MathUtil.Clamp01(corrected);
+
         double shrink = MaxBaseRateShrink * (1.0 - Quality());
         return MathUtil.Clamp01((corrected * (1 - shrink)) + (baseRate * shrink));
     }

@@ -138,11 +138,14 @@ public class FunnelAndColdStartTests
             green, 2.0, cost, "Breakout", MarketRegime.TrendUp, "BTCUSD", 0.7, 0.1);
 
         Assert.False(warm.IsColdStart);
-        Assert.Equal(warm.LowerBoundR, warm.DecisionEdgeR, 9);
-        Assert.True(warm.RequiredEdgeR > cold.RequiredEdgeR,
-            $"с историей планка обязана быть выше: {warm.RequiredEdgeR:F3}R против {cold.RequiredEdgeR:F3}R");
 
-        _out.WriteLine($"с историей:     требуется {warm.RequiredEdgeR:F3}R");
+        // Раньше здесь утверждалось, что с историей планка ВЫШЕ. Это и был обрыв: после
+        // двадцатой сделки требование подскакивало, а снизить его могли только сделки.
+        // Теперь планка одна и та же с историей и без, а история меняет доверие к оценке.
+        Assert.Equal(cold.RequiredEdgeR, warm.RequiredEdgeR, 9);
+        Assert.Equal(warm.ExpectedValueR, warm.DecisionEdgeR, 9);
+
+        _out.WriteLine($"с историей:     требуется {warm.RequiredEdgeR:F3}R, доверие {warm.Trust:P0} (без истории {cold.Trust:P0})");
     }
 
     [Fact]

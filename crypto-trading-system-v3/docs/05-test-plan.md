@@ -3,7 +3,7 @@
 ## Текущее состояние
 
 ```
-403 тестов, все проходят, время прогона ~8 секунд
+422 тестов, все проходят, время прогона ~8 секунд
 ```
 
 Запуск:
@@ -55,18 +55,21 @@ dotnet test
 | `TradeabilityTests.cs` | 10 |  |
 | `WarmUpTests.cs` | 10 | Прогрев не принимает решений и не портит состояние |
 | `AlertWatcherTests.cs` | 9 |  |
+| `EvidenceTests.cs` | 8 |  |
 | `CashFlowTests.cs` | 7 |  |
 | `FunnelAndColdStartTests.cs` | 6 |  |
 | `MonteCarloTests.cs` | 6 |  |
 | `RestartReconciliationTests.cs` | 6 |  |
+| `AccountViabilityTests.cs` | 5 |  |
 | `MonetaryTests.cs` | 5 |  |
 | `PersistentPerformanceTests.cs` | 5 |  |
+| `SizingPolicyFloorTests.cs` | 5 |  |
 | `BotDefaultsTests.cs` | 3 |  |
 | `EndToEndRunTests.cs` | 2 |  |
 | `MagicNumberTests.cs` | 2 |  |
-| **Всего** | **388** | |
+| **Всего** | **406** | |
 
-Методов 388; прогон выполняет больше — каждый `[Theory]` разворачивается в отдельный тест на каждый набор входных данных.
+Методов 406; прогон выполняет больше — каждый `[Theory]` разворачивается в отдельный тест на каждый набор входных данных.
 <!-- КОНЕЦ -->
 
 Счётчики по разделам здесь намеренно отсутствуют: они расходились с кодом при каждом

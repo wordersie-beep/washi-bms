@@ -47,8 +47,11 @@ public sealed class SizingResult
 /// reliable than enforcing it in review.
 ///
 /// The final size is then clamped by the hard per-trade cap, checked against free margin,
-/// and snapped DOWN onto the broker's volume grid — never up, so rounding can never breach
-/// a risk limit.
+/// and snapped DOWN onto the broker's volume grid. The one exception is the broker minimum:
+/// a size below it may be raised TO it, and only when the minimum itself fits inside every
+/// limit — risk per trade under the current posture, the hard cap and the remaining budget.
+/// Rounding therefore still can never breach a risk limit; it can only overrule the
+/// multipliers' wish to be smaller than the broker allows.
 /// </summary>
 public sealed class PositionSizer
 {
@@ -95,7 +98,8 @@ public sealed class PositionSizer
         double dataQualityScore,
         double executionQuality,
         double remainingRiskBudgetPercent,
-        bool isColdStart = false)
+        bool isColdStart = false,
+        double trust = 1.0)
     {
         if (spec == null) return SizingResult.Rejected(NoTradeReason.BrokerConstraint, "symbol specification unavailable");
         if (!account.IsUsable) return SizingResult.Rejected(NoTradeReason.DataQuality, "account snapshot unusable");
@@ -126,9 +130,13 @@ public sealed class PositionSizer
         double correlation = MathUtil.Clamp(1.0 - (0.5 * MathUtil.Clamp01(correlationPenalty)), 0.5, 1.0);
         double dataQuality = MathUtil.Clamp(dataQualityScore, 0.3, 1.0);
 
-        // Холодный старт: система торгует без истории, ради истории. Это цена разрыва
-        // замкнутого круга — и платить её должен РАЗМЕР, а не отказ от защиты.
-        double coldStart = isColdStart ? MathUtil.Clamp01(_config.ColdStartRiskMultiplier) : 1.0;
+        // Доверие к оценке преимущества: вся осторожность «мы ещё мало знаем» теперь здесь,
+        // а не в пороге решения. Пока реальных сделок меньше порога холодного старта,
+        // доверие дополнительно ограничено сверху: теневые доказательства не знают реального
+        // исполнения, и первые настоящие сделки обязаны быть малыми, сколько бы виртуальных
+        // побед ни накопилось.
+        double evidence = MathUtil.Clamp(trust, 0.0, 1.0);
+        if (isColdStart) evidence = Math.Min(evidence, MathUtil.Clamp01(_config.ColdStartRiskMultiplier));
         double execution = MathUtil.Clamp(executionQuality, 0.3, 1.0);
 
         factors["riskState"] = riskState;
@@ -140,10 +148,10 @@ public sealed class PositionSizer
         factors["correlation"] = correlation;
         factors["dataQuality"] = dataQuality;
         factors["execution"] = execution;
-        if (isColdStart) factors["coldStart"] = coldStart;
+        factors["trust"] = evidence;
 
         double riskPercent = _config.RiskPerTradePercent
-            * riskState * regime * confidence * edge * strategy * volatility * correlation * dataQuality * execution * coldStart;
+            * riskState * regime * confidence * edge * strategy * volatility * correlation * dataQuality * execution * evidence;
 
         // --- Hard caps -------------------------------------------------------------------
         // Applied last and unconditionally. Whatever the factors produced, this is the line
@@ -151,10 +159,33 @@ public sealed class PositionSizer
         riskPercent = Math.Min(riskPercent, _riskConfig.HardMaxRiskPerTradePercent);
         riskPercent = Math.Min(riskPercent, Math.Max(0, remainingRiskBudgetPercent));
 
-        if (riskPercent < _config.MinRiskPerTradePercent)
+        // Пол сравнивается с риском В ТЕХ ЖЕ ЕДИНИЦАХ, в каких его уменьшила политика.
+        //
+        // Множители делятся на два рода. Качество — режим, уверенность, преимущество,
+        // вес, волатильность, корреляция, данные, исполнение — говорит о КАНДИДАТЕ, и пол
+        // спрашивает ровно о нём: не сжался ли он по собственным достоинствам до
+        // бессмысленности. Политика — постура риска и холодный старт — говорит о
+        // СОСТОЯНИИ СИСТЕМЫ и уменьшает размер намеренно.
+        //
+        // Сравнение с неизменным полом смешивало одно с другим, и политика превращала
+        // «меньше» в «никогда». На счёте в миллион евро холодный старт отвергал каждого
+        // кандидата, даже сильного: 0.30% × качество × 0.35 не дотягивало до 0.05%. А
+        // холодный старт заканчивается только после двадцати сделок — которых поэтому не
+        // могло быть. Тот же замкнутый круг, что был разорван в оценке преимущества,
+        // просто на слой ниже. И Defensive вёл себя как Halt: лестница из четырёх
+        // ступеней на деле состояла из трёх.
+        //
+        // Масштабированный пол эквивалентен вопросу «прошёл бы кандидат пол без
+        // политики» — и остаётся осмысленным, когда размер дополнительно зажат потолком
+        // или остатком бюджета.
+        double policy = riskState * evidence;
+        double floor = _config.MinRiskPerTradePercent * policy;
+
+        if (riskPercent <= 0 || riskPercent < floor)
         {
             return SizingResult.Rejected(NoTradeReason.SizeBelowMinimum,
-                $"risk shrank to {riskPercent:F4}%, below the {_config.MinRiskPerTradePercent:F4}% floor");
+                $"risk shrank to {riskPercent:F4}%, below the {floor:F4}% floor " +
+                $"({_config.MinRiskPerTradePercent:F4}% × политика {policy:F2})");
         }
 
         // --- Units --------------------------------------------------------------------------
@@ -168,8 +199,34 @@ public sealed class PositionSizer
         double units = spec.NormalizeVolumeDown(rawUnits);
         if (units <= 0)
         {
-            return SizingResult.Rejected(NoTradeReason.SizeBelowMinimum,
-                $"{rawUnits:F6} units is below the broker minimum of {spec.VolumeInUnitsMin:F6}");
+            // Меньше минимального объёма брокер не продаёт. Округлить ВВЕРХ до минимума
+            // можно — но только если минимум укладывается во все ЛИМИТЫ: риск на сделку с
+            // учётом постуры, жёсткий потолок и остаток бюджета. Превышается лишь пожелание
+            // множителей быть ещё меньше, а не граница, которую задал человек.
+            //
+            // Без этого на небольшом счёте каждая первая сделка отвергалась: осторожный
+            // начальный размер выходил меньше минимального объёма, холодный старт не мог
+            // закончиться, потому что заканчивается он сделками. На BTCUSD при стопе 2.4 ATR
+            // так жили все счета от 880 до 2514 долларов — риск на сделку позволял
+            // минимальную позицию, а бот не торговал никогда.
+            double ceiling = Math.Min(_config.RiskPerTradePercent * riskState, _riskConfig.HardMaxRiskPerTradePercent);
+            ceiling = Math.Min(ceiling, Math.Max(0, remainingRiskBudgetPercent));
+
+            double minimumRiskPercent = account.Equity > 0
+                ? spec.MoneyFor(stopDistance, spec.VolumeInUnitsMin) / account.Equity * 100.0
+                : double.MaxValue;
+
+            if (spec.VolumeInUnitsMin > 0 && minimumRiskPercent <= ceiling)
+            {
+                units = spec.NormalizeVolumeDown(spec.VolumeInUnitsMin);
+                factors["roundedUpToBrokerMinimum"] = MathUtil.SafeDiv(minimumRiskPercent, riskPercent, 1.0);
+            }
+            else
+            {
+                return SizingResult.Rejected(NoTradeReason.SizeBelowMinimum,
+                    $"{rawUnits:F6} units is below the broker minimum of {spec.VolumeInUnitsMin:F6}; " +
+                    $"the minimum would risk {minimumRiskPercent:F3}% against a {ceiling:F3}% limit");
+            }
         }
 
         // --- Margin guard (spec sections 114-115) ----------------------------------------------

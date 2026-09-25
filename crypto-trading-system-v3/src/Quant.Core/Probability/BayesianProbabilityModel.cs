@@ -31,6 +31,14 @@ public sealed class BayesianProbabilityModel : ISignalProbabilityModel
     private readonly ProbabilityConfig _config;
     private readonly EvConfig _evConfig;
     private readonly PerformanceStore _performance;
+
+    /// <summary>
+    /// Теневые доказательства по стратегиям: дробные выигрыши и проигрыши виртуальных
+    /// сделок. Хранятся ОТДЕЛЬНО от реальной статистики и не попадают ни в риск-движок,
+    /// ни в счётчик холодного старта, ни в веса стратегий.
+    /// </summary>
+    private readonly Dictionary<string, (double Wins, double Losses)> _evidence =
+        new Dictionary<string, (double Wins, double Losses)>(StringComparer.Ordinal);
     private readonly CalibrationTracker _calibration;
 
     /// <summary>Counts keyed by bucket, for levels the performance store does not slice on.</summary>
@@ -82,6 +90,26 @@ public sealed class BayesianProbabilityModel : ISignalProbabilityModel
             // are read as twenty. The check costs nothing and removes the whole class of
             // double-counting error.
             double parentTotal = double.MaxValue;
+
+            // --- Level 0.5: теневые доказательства --------------------------------------
+            //
+            // Без этого уровня модель без истории возвращала ОДНО И ТО ЖЕ число при любом
+            // сигнале, любом рынке и любой уверенности: (безубыточность + априор) / 2. Для
+            // плана с R:R 1.88 это 0.368, ожидание после издержек −0.10R, требуемое +0.23R.
+            // Ни один кандидат не мог пройти никогда, а история берётся только из сделок.
+            //
+            // Доказательство берётся из виртуальных сделок по тем же кандидатам, на том же
+            // потоке, с теми же издержками. Вес ниже единицы: виртуальная сделка не знает
+            // реального исполнения. Популяция отдельна от реальных сделок, поэтому правило
+            // вложенности уровней её не касается — двойного счёта здесь нет.
+            if (_evidence.TryGetValue(EvidenceKey(q.StrategyName), out (double Wins, double Losses) shadow) &&
+                shadow.Wins + shadow.Losses > 0)
+            {
+                double weight = MathUtil.Clamp01(_config.ShadowEvidenceWeight);
+                posterior = BetaBinomial.FromCounts(posterior.Mean, _config.PriorStrength,
+                    shadow.Wins * weight, shadow.Losses * weight);
+                basis = "evidence";
+            }
 
             // --- Level 1: global ---------------------------------------------------------
             SegmentStats overall = _performance.Overall;
@@ -168,6 +196,75 @@ public sealed class BayesianProbabilityModel : ISignalProbabilityModel
 
     private static string BucketKey(TradeRecord t) =>
         t.StrategyName + "|" + t.Regime + "|" + PerformanceStore.ConfidenceBucketKey(t.EnsembleConfidence);
+
+    /// <summary>
+    /// Принимает исход ВИРТУАЛЬНОЙ сделки как доказательство.
+    ///
+    /// Исход переводится в эквивалентную долю выигрыша q — такую, что бинарная ставка
+    /// «+RR с вероятностью q, −L с вероятностью 1−q» имеет то же матожидание, что и
+    /// фактический результат:
+    ///
+    ///     q = (R + L) / (RR + L)
+    ///
+    /// Цель — q = 1, стоп — q = 0, выход по времени — ровно столько, сколько он стоил.
+    /// Так доказательство описывает ту же самую ставку, что и формула ожидания, которая
+    /// потом его прочтёт. Считать выход по времени с +0.3R «выигрышем» значило бы платить
+    /// за него в формуле как за +1.88R.
+    ///
+    /// R берётся ВАЛОВЫЙ, по ценам: издержки вычитает движок ожидания, и вычесть их здесь
+    /// значило бы вычесть дважды.
+    /// </summary>
+    public void ObserveEvidence(TradeRecord virtualTrade)
+    {
+        if (virtualTrade == null || !virtualTrade.IsVirtual) return;
+
+        double stop = Math.Abs(virtualTrade.EntryPrice - virtualTrade.InitialStopPrice);
+        double reward = Math.Abs(virtualTrade.InitialTargetPrice - virtualTrade.EntryPrice);
+        if (stop <= 0 || reward <= 0) return;
+
+        double rr = reward / stop;
+        double loss = Math.Max(1.0, _evConfig.AssumedLossR);
+
+        double q;
+        if (virtualTrade.ExitReason == ExitReason.StopLoss)
+        {
+            // Стоп — это проигрыш целиком, даже если виртуальная цена исполнения вышла
+            // чуть лучше допущения о проскальзывании.
+            q = 0;
+        }
+        else
+        {
+            double move = virtualTrade.Direction == Side.Long
+                ? virtualTrade.ExitPrice - virtualTrade.EntryPrice
+                : virtualTrade.EntryPrice - virtualTrade.ExitPrice;
+            q = MathUtil.Clamp01(((move / stop) + loss) / (rr + loss));
+        }
+
+        // Затухание: рынок, сменивший характер, должен переубеждать модель за сотни
+        // сделок, а не за годы.
+        double keep = 1.0 - (1.0 / Math.Max(1.0, _config.EvidenceMemoryTrades));
+
+        string key = EvidenceKey(virtualTrade.StrategyName);
+        _evidence.TryGetValue(key, out (double Wins, double Losses) counts);
+        _evidence[key] = ((counts.Wins * keep) + q, (counts.Losses * keep) + (1 - q));
+    }
+
+    /// <summary>Сколько виртуальных сделок накоплено как доказательство по стратегии.</summary>
+    public double EvidenceTrades(string strategyName) =>
+        _evidence.TryGetValue(EvidenceKey(strategyName), out (double Wins, double Losses) c) ? c.Wins + c.Losses : 0;
+
+    /// <summary>Всего виртуальных сделок-доказательств по всем стратегиям.</summary>
+    public double TotalEvidenceTrades
+    {
+        get
+        {
+            double total = 0;
+            foreach (KeyValuePair<string, (double Wins, double Losses)> kv in _evidence) total += kv.Value.Wins + kv.Value.Losses;
+            return total;
+        }
+    }
+
+    private static string EvidenceKey(string strategyName) => "evidence|" + (strategyName ?? "unknown");
 
     public void Observe(TradeRecord trade)
     {

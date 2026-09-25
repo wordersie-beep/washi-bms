@@ -91,22 +91,29 @@ public sealed class ExpectedValueEngine
         double evStandardError = probability.StandardError * (expectedWinR + expectedLossR);
         double lowerBound = ev - (_config.EdgeConfidenceZ * evStandardError);
 
-        // --- Холодный старт ------------------------------------------------------------------
+        // --- Решение и доверие ---------------------------------------------------------------
         //
-        // Пока истории нет, три штрафа в требуемом преимуществе наказывают за отсутствие
-        // данных — а данные берутся только из сделок. Требуемое доходило до 0.8R при базовом
-        // пороге 0.10R, и первая сделка была невозможна никогда.
+        // Решение принимается по байесовской ТОЧЕЧНОЙ оценке — она уже сжата к априорному
+        // «преимущества нет» ровно настолько, насколько мало доказательств. Незнание больше
+        // не поднимает порог, а уменьшает размер.
         //
-        // В холодном старте решение принимается по ТОЧЕЧНОЙ оценке, а не по нижней границе:
-        // ширина границы тоже измеряет незнание, а не риск сделки. Структурные требования —
-        // положительное ожидание после издержек, отношение прибыли к риску, стоимость —
-        // остаются в полной силе, и позиция открывается пробным объёмом.
+        // Раньше было иначе, и это давало три замкнутых круга подряд. Без истории порог
+        // требовал доказательств, которых без сделок не добыть. Холодный старт это снимал —
+        // до двадцатой сделки, после которой требование подскакивало на три четверти R, и
+        // система с настоящим преимуществом замолкала навсегда: снизить требование могли
+        // только новые сделки, а их не было. Прогон на устойчивом тренде: двадцать сделок в
+        // плюс за первые шесть тысяч баров и ни одной за следующие восемь.
+        //
+        // Порог, снимаемый только сделками, неизбежно запрещает сделки. Размер можно
+        // уменьшить, не запрещая: так профессиональные системы и вводят новую стратегию —
+        // малым объёмом, наращивая его вместе с доказательствами.
         bool coldStart = _config.ColdStartTrades > 0 && _performance.TotalTrades < _config.ColdStartTrades;
 
-        double requiredEdge = RequiredEdge(
-            costR, evStandardError, regimeConfidence, volatilityStress, probability, coldStart);
+        double evidencePenalty = EvidencePenalty(evStandardError, probability);
+        double trust = 1.0 / (1.0 + (evidencePenalty / Math.Max(1e-9, _config.TrustPenaltyScaleR)));
 
-        double decisionEdge = coldStart ? ev : lowerBound;
+        double requiredEdge = RequiredEdge(costR, regimeConfidence, volatilityStress);
+        double decisionEdge = ev;
 
         return new ExpectedValueResult
         {
@@ -114,6 +121,8 @@ public sealed class ExpectedValueEngine
             LowerBoundR = lowerBound,
             DecisionEdgeR = decisionEdge,
             IsColdStart = coldStart,
+            EvidencePenaltyR = evidencePenalty,
+            Trust = trust,
             RequiredEdgeR = requiredEdge,
             ExpectedWinR = expectedWinR,
             ExpectedLossR = expectedLossR,
@@ -177,53 +186,44 @@ public sealed class ExpectedValueEngine
     /// reliable, and the correct response to a less reliable estimate is to demand more from
     /// it rather than to act on it at the same threshold.
     /// </summary>
-    private double RequiredEdge(
-        double costR,
-        double evStandardError,
-        double regimeConfidence,
-        double volatilityStress,
-        ProbabilityEstimate probability,
-        bool coldStart)
+    /// <summary>
+    /// Требуемое преимущество: только то, что говорит о СДЕЛКЕ, а не о знании системы.
+    /// База, издержки, неясность режима, напряжённость волатильности.
+    /// </summary>
+    private double RequiredEdge(double costR, double regimeConfidence, double volatilityStress)
     {
         double edge = _config.BaseMinimumEdgeR;
 
         // Cost: a trade that is expensive to run has to clear more before it is worth running.
         edge += costR * Math.Max(0, _config.CostEdgeMultiplier - 1.0);
 
-        // Statistical uncertainty.
-        //
-        // В холодном старте не начисляется: ширина оценки без истории измеряет незнание, а
-        // не риск конкретной сделки, и наказывать за неё значит требовать доказательства,
-        // которое можно добыть только сделкой.
-        if (!coldStart) edge += evStandardError * _config.UncertaintyEdgeMultiplier;
-
         // Regime ambiguity.
-        edge += 0.15 * (1.0 - MathUtil.Clamp01(regimeConfidence));
+        edge += _config.RegimeAmbiguityEdgeR * (1.0 - MathUtil.Clamp01(regimeConfidence));
 
         // Volatility stress.
-        edge += 0.20 * MathUtil.Clamp01(volatilityStress);
-
-        // Thin evidence: a very small effective sample demands more than the standard error
-        // alone captures, because the standard error itself is estimated from that sample.
-        // Границы берутся из самой оценки, а не зашиты здесь: иначе одно и то же понятие
-        // «достаточной выборки» существовало бы в двух местах с разными числами.
-        //
-        // В холодном старте не начисляется по той же причине: выборка тонка именно потому,
-        // что сделок ещё не было.
-        if (!coldStart)
-        {
-            double sampleThinness = 1.0 - MathUtil.LinearScale(
-                probability.EffectiveSample, probability.MinSample, probability.FullTrustSample * 1.5);
-            edge += 0.15 * sampleThinness;
-        }
-
-        // Poor calibration: if the model's stated probabilities have not matched reality,
-        // every number feeding this calculation is suspect.
-        //
-        // В холодном старте калибровки нет не потому, что модель ошибалась, а потому что
-        // сверять было не с чем.
-        if (!coldStart) edge += 0.20 * (1.0 - probability.CalibrationQuality);
+        edge += _config.VolatilityStressEdgeR * MathUtil.Clamp01(volatilityStress);
 
         return MathUtil.Clamp(edge, _config.BaseMinimumEdgeR, 2.0);
+    }
+
+    /// <summary>
+    /// Надбавка незнания в R: ширина оценки, тонкость выборки, отсутствие калибровки.
+    ///
+    /// Те же три слагаемых, что раньше жили в требуемом преимуществе, с теми же весами. Они
+    /// не пропали — они перестали быть вето и стали мерой доверия, которая режет размер.
+    /// </summary>
+    private double EvidencePenalty(double evStandardError, ProbabilityEstimate probability)
+    {
+        double penalty = evStandardError * _config.UncertaintyEdgeMultiplier;
+
+        // Границы выборки берутся из самой оценки, а не зашиты здесь: иначе одно и то же
+        // понятие «достаточной выборки» существовало бы в двух местах с разными числами.
+        double sampleThinness = 1.0 - MathUtil.LinearScale(
+            probability.EffectiveSample, probability.MinSample, probability.FullTrustSample * 1.5);
+        penalty += _config.ThinSampleEdgeR * sampleThinness;
+
+        penalty += _config.CalibrationEdgeR * (1.0 - probability.CalibrationQuality);
+
+        return Math.Max(0, penalty);
     }
 }

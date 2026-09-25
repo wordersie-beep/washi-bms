@@ -214,7 +214,7 @@ public sealed class TradeGate
         {
             return GateOutcome.Reject(NoTradeReason.InsufficientEdge,
                 $"edge {ev.DecisionEdgeR:F3}R below the {ev.RequiredEdgeR:F3}R required" +
-                (ev.IsColdStart ? " (холодный старт: решение по точечной оценке, объём пробный)" : ""));
+                $" (доверие к оценке {ev.Trust:P0})");
         }
 
         return GateOutcome.Pass;

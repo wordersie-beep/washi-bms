@@ -460,9 +460,30 @@ public sealed class ProbabilityConfig
     /// </summary>
     public double MaxAcceptableCalibrationError { get; set; } = 0.10;
 
+    /// <summary>
+    /// Вес одной виртуальной сделки как доказательства, относительно реальной.
+    ///
+    /// Ниже единицы, потому что виртуальная сделка не знает реального исполнения: её вход
+    /// точно по цене сигнала, а издержки — модельные. Равный вес переоценивал бы тень;
+    /// нулевой возвращал бы систему в состояние, где без истории нет сделок, а без сделок
+    /// нет истории.
+    /// </summary>
+    public double ShadowEvidenceWeight { get; set; } = 0.5;
+
+    /// <summary>
+    /// Сколько последних виртуальных сделок помнит модель: старые доказательства затухают.
+    ///
+    /// Без затухания доказательство копилось бы бесконечно, и рынок, сменивший характер,
+    /// переубеждал бы модель месяцами. Затухание геометрическое: сумма весов сходится
+    /// к этому числу.
+    /// </summary>
+    public double EvidenceMemoryTrades { get; set; } = 200;
+
     internal void Validate(List<string> problems)
     {
         if (PriorStrength <= 0) problems.Add("PriorStrength must be positive.");
+        if (ShadowEvidenceWeight <= 0 || ShadowEvidenceWeight > 1) problems.Add("ShadowEvidenceWeight must be in (0, 1]: a virtual trade cannot outweigh a real one.");
+        if (EvidenceMemoryTrades < 20) problems.Add("EvidenceMemoryTrades below 20 turns the evidence into noise.");
         if (PriorWinRate <= 0 || PriorWinRate >= 1) problems.Add("PriorWinRate must be in (0, 1).");
         if (MinSampleForBucket < 1) problems.Add("MinSampleForBucket must be at least 1.");
         if (FullTrustSample <= MinSampleForBucket) problems.Add("FullTrustSample must exceed MinSampleForBucket.");
@@ -505,6 +526,28 @@ public sealed class EvConfig
     /// </summary>
     public int ColdStartTrades { get; set; } = 20;
 
+    /// <summary>
+    /// Надбавка незнания (в R), при которой доверие к оценке падает вдвое.
+    ///
+    /// Доверие = 1 / (1 + надбавка / шкала). Без истории надбавка около 0.6R, доверие около
+    /// 0.29 — то есть та самая доля, которую раньше руками задавал множитель холодного
+    /// старта. Здесь она не задаётся, а следует из самой неопределённости и плавно растёт
+    /// с каждой сделкой, без обрыва на двадцатой.
+    /// </summary>
+    public double TrustPenaltyScaleR { get; set; } = 0.25;
+
+    /// <summary>Надбавка незнания за тонкую выборку, в R, при нулевой выборке.</summary>
+    public double ThinSampleEdgeR { get; set; } = 0.15;
+
+    /// <summary>Надбавка незнания за некалиброванную модель, в R.</summary>
+    public double CalibrationEdgeR { get; set; } = 0.20;
+
+    /// <summary>Требование за неясность режима, в R, при нулевой уверенности классификатора.</summary>
+    public double RegimeAmbiguityEdgeR { get; set; } = 0.15;
+
+    /// <summary>Требование за напряжённую волатильность, в R, при максимальном напряжении.</summary>
+    public double VolatilityStressEdgeR { get; set; } = 0.20;
+
     /// <summary>Minimum reward-to-risk at the first target.</summary>
     public double MinRewardToRisk { get; set; } = 1.3;
 
@@ -532,6 +575,9 @@ public sealed class EvConfig
         if (MfeTargetQuantile <= 0 || MfeTargetQuantile >= 1) problems.Add("MfeTargetQuantile must be in (0, 1).");
         if (AssumedLossR < 1.0) problems.Add("AssumedLossR below 1.0 assumes stops fill better than requested.");
         if (ColdStartTrades < 0) problems.Add("ColdStartTrades cannot be negative.");
+        if (TrustPenaltyScaleR <= 0) problems.Add("TrustPenaltyScaleR must be positive.");
+        if (ThinSampleEdgeR < 0 || CalibrationEdgeR < 0 || RegimeAmbiguityEdgeR < 0 || VolatilityStressEdgeR < 0)
+            problems.Add("Edge surcharges cannot be negative.");
         if (EdgeConfidenceZ < 0) problems.Add("EdgeConfidenceZ cannot be negative.");
     }
 }

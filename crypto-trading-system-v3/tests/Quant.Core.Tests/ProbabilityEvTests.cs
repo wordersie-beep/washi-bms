@@ -513,8 +513,16 @@ public class ExpectedValueEngineTests
     }
 
     [Fact]
-    public void UncertaintyAloneCanTurnTheSameEdgeIntoARejection()
+    public void UncertaintyShrinksTheSizeNotTheVerdict()
     {
+        // Раньше этот тест утверждал обратное: одинаковая оценка с широкими границами
+        // обязана быть отвергнута. Именно это свойство и запирало систему — ширина
+        // границ сужается только сделками, а сделок при широких границах не было. На
+        // устойчивом тренде: двадцать прибыльных сделок и ни одной за следующие восемь
+        // тысяч баров.
+        //
+        // Осторожность не отменена, она переехала: неуверенная оценка торгуется малым
+        // объёмом, уверенная — полным.
         ExpectedValueEngine engine = Engine(out _);
 
         ExpectedValueResult certain = engine.Evaluate(
@@ -524,9 +532,15 @@ public class ExpectedValueEngineTests
             Prob(0.50, 0.18, n: 12), 2.0, Cost(0.05), "TrendFollowing", MarketRegime.TrendUp, "BTCUSD", 0.85, 0.05);
 
         Assert.Equal(certain.ExpectedValueR, uncertain.ExpectedValueR, 6);
-        Assert.True(certain.IsAcceptable, certain.ToString());
-        Assert.False(uncertain.IsAcceptable,
-            "An identical point estimate with wide error bars must not be traded.");
+
+        // Один и тот же вердикт: решает оценка преимущества после издержек, а не её ширина.
+        Assert.Equal(certain.IsAcceptable, uncertain.IsAcceptable);
+        Assert.Equal(certain.RequiredEdgeR, uncertain.RequiredEdgeR, 9);
+
+        // Но доверие к широкой оценке заметно ниже — и размер режется именно им.
+        Assert.True(uncertain.Trust < certain.Trust * 0.6,
+            $"доверие к широкой оценке {uncertain.Trust:P0} почти не отличается от узкой {certain.Trust:P0}");
+        Assert.True(uncertain.EvidencePenaltyR > certain.EvidencePenaltyR);
     }
 
     [Fact]
@@ -544,8 +558,11 @@ public class ExpectedValueEngineTests
     }
 
     [Fact]
-    public void PoorCalibrationRaisesTheBar()
+    public void PoorCalibrationLowersTrustWithoutMovingTheBar()
     {
+        // Модель, чьи вероятности не совпадали с реальностью, заслуживает меньшего
+        // размера. Запрещать ей торговать значило бы запретить и сверку: калибровка
+        // измеряется только на исходах сделок.
         ExpectedValueEngine engine = Engine(out _);
 
         ExpectedValueResult trusted = engine.Evaluate(
@@ -554,7 +571,8 @@ public class ExpectedValueEngineTests
         ExpectedValueResult suspect = engine.Evaluate(
             Prob(0.50, 0.03, cal: 0.1), 2.0, Cost(0.05), "TrendFollowing", MarketRegime.TrendUp, "BTCUSD", 0.9, 0);
 
-        Assert.True(suspect.RequiredEdgeR > trusted.RequiredEdgeR);
+        Assert.Equal(trusted.RequiredEdgeR, suspect.RequiredEdgeR, 9);
+        Assert.True(suspect.Trust < trusted.Trust);
     }
 
     [Fact]
