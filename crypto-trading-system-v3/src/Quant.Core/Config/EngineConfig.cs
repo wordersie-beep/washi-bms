@@ -26,6 +26,7 @@ public sealed class EngineConfig
     public ExitConfig Exit { get; set; } = new ExitConfig();
     public ExecutionConfig Execution { get; set; } = new ExecutionConfig();
     public AdaptationConfig Adaptation { get; set; } = new AdaptationConfig();
+    public JournalConfig Journal { get; set; } = new JournalConfig();
 
     public OperatingMode Mode { get; set; } = OperatingMode.Shadow;
 
@@ -72,6 +73,7 @@ public sealed class EngineConfig
         Exit.Validate(problems);
         Execution.Validate(problems);
         Adaptation.Validate(problems);
+        Journal.Validate(problems);
 
         if (Mode == OperatingMode.Live && !LiveTradingAcknowledged)
         {
@@ -1073,5 +1075,22 @@ public sealed class AdaptationConfig
         if (PersistedTradeHistory < 0) problems.Add("PersistedTradeHistory cannot be negative.");
         if (MaxConcurrentShadowPositions < 1) problems.Add("MaxConcurrentShadowPositions must be at least 1 or disabled strategies can never recover.");
         if (ShadowFallbackTimeStopBars < 1) problems.Add("ShadowFallbackTimeStopBars must be positive.");
+    }
+}
+
+public sealed class JournalConfig
+{
+    /// <summary>
+    /// Решений, после которых воронка попадает в дашборд.
+    ///
+    /// Было 200 — около семнадцати часов на пятиминутках. Вопрос «почему он не торгует»
+    /// возникает намного раньше, а фильтр, не пропускающий ничего, виден уже на полусотне:
+    /// доля прошедших ровно ноль не становится убедительнее от четырёхкратного ожидания.
+    /// </summary>
+    public int MinDecisionsForFunnel { get; set; } = 50;
+
+    internal void Validate(List<string> problems)
+    {
+        if (MinDecisionsForFunnel < 10) problems.Add("MinDecisionsForFunnel below 10 makes the pass rate noise.");
     }
 }

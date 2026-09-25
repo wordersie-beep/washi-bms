@@ -1269,7 +1269,11 @@ public sealed class TradingEngine
         // значили. Она отвечает на вопрос, который обычная сводка причин отказа не
         // различает: фильтр осторожен или сломан.
         IReadOnlyList<DecisionFunnel.Stage> funnel = Funnel();
-        if (_journal.TotalAccepted + _journal.TotalRejected >= 200 && funnel.Count > 0)
+        // Порог был 200 решений — это около семнадцати часов на пятиминутках. Вопрос
+        // «почему он не торгует» возникает гораздо раньше, а воронка на полусотне решений
+        // уже показывает фильтр, не пропускающий ничего: доля прошедших ровно ноль не
+        // становится убедительнее от четырёхкратного ожидания.
+        if (_journal.TotalAccepted + _journal.TotalRejected >= _config.Journal.MinDecisionsForFunnel && funnel.Count > 0)
         {
             dashboard += Environment.NewLine + DecisionFunnel.Render(funnel, _journal.TotalAccepted);
 

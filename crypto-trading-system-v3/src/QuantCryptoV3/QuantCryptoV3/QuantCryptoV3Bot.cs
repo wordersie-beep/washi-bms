@@ -6,6 +6,7 @@ using Quant.Core;
 using Quant.Core.Config;
 using Quant.Core.Ev;
 using Quant.Core.Execution;
+using Quant.Core.Data;
 using Quant.Core.Primitives;
 using Quant.Core.Stats;
 using Candle = Quant.Core.Primitives.Candle;
@@ -31,6 +32,10 @@ namespace Quant.Bot;
 public class QuantCryptoV3Bot : Robot
 {
     // ================= ПАРАМЕТРЫ: РЕЖИМ =================
+
+    [Parameter("Пресет настроек", Group = "Режим", DefaultValue = TradingPreset.CryptoM5,
+        Description = "Готовый набор настроек. CryptoM5 — крипта на пятиминутках, рекомендуется. CryptoM15 — то же спокойнее и дешевле по издержкам. Manual — ничего не трогать, работают значения полей ниже. Пресет ПЕРЕЗАПИСЫВАЕТ поля, которые к нему относятся.")]
+    public TradingPreset Preset { get; set; }
 
     [Parameter("Режим работы", Group = "Режим", DefaultValue = OperatingMode.Shadow,
         Description = "Shadow и Paper НЕ отправляют приказы брокеру — счёт не затрагивается. Demo и Live отправляют. Порядок освоения: Shadow, Paper, Demo, Live.")]
@@ -171,6 +176,10 @@ public class QuantCryptoV3Bot : Robot
 
     // ================= ПАРАМЕТРЫ: ИСПОЛНЕНИЕ =================
 
+    [Parameter("Макс. спред к ATR", Group = "Исполнение", DefaultValue = 0.15, MinValue = 0.03, MaxValue = 0.60, Step = 0.01,
+        Description = "ГЛАВНАЯ причина, по которой бот может не торговать вообще. Спред шире этой доли ATR — отказ. На минутном графике у розничного брокера спред обычно составляет 40–70% ATR, и тогда не пройдёт НИ ОДИН сигнал, сколько ни жди. Смотрите строку ЭКОНОМИКА ИНСТРУМЕНТА в журнале.")]
+    public double MaxSpreadToAtr { get; set; }
+
     [Parameter("Макс. проскальзывание, ATR", Group = "Исполнение", DefaultValue = 0.25, MinValue = 0.05, MaxValue = 2.0, Step = 0.05,
         Description = "Потолок проскальзывания в долях ATR. Берётся БОЛЬШЕЕ из этого и лимита в спредах.")]
     public double MaxSlippageInAtr { get; set; }
@@ -293,6 +302,8 @@ public class QuantCryptoV3Bot : Robot
                   $"Признак жизни — раз в {HeartbeatIntervalMinutes} мин, дашборд — раз в {DashboardIntervalMinutes} мин.");
             Print("Если бот не торгует — это штатное поведение: настройки по умолчанию отклоняют " +
                   "подавляющее большинство сигналов. Причины видны в признаке жизни и в дашборде.");
+
+            ReportTradeability();
 
             Print(_engine.RenderDashboard(Server.TimeInUtc));
         }
@@ -706,6 +717,74 @@ public class QuantCryptoV3Bot : Robot
     /// истории — две причины бездействия, которые невозможно отличить по пустому журналу,
     /// и обе снимаются одной строкой при старте.
     /// </summary>
+    /// <summary>
+    /// Считает на ЭТОМ счёте, у ЭТОГО брокера, может ли сделка окупить свои издержки.
+    ///
+    /// Отвечает на единственный вопрос, на который не отвечает журнал отказов: бот молчит
+    /// потому, что рынок не даёт сигналов, или потому, что на этом сочетании инструмента
+    /// и таймфрейма прибыльная сделка невозможна арифметически. Второе выглядит снаружи
+    /// точно так же, как первое, и отличить их можно только счётом.
+    ///
+    /// Ничего не запрещает и ничего не меняет: печатает числа.
+    /// </summary>
+    private void ReportTradeability()
+    {
+        try
+        {
+            SymbolDataSet data = _engine.Data(SymbolName);
+            if (data == null) return;
+
+            double spread = data.Spread.IsReady ? data.Spread.CostingSpread() : Symbol.Spread;
+            double price = Symbol.Bid > 0 ? Symbol.Bid : data.Signal.Last.Close;
+            if (spread <= 0 || price <= 0) return;
+
+            var lines = new List<TradeabilityReport.Line>();
+            foreach (Tf tf in _config.Data.Timeframes)
+            {
+                TimeframeSeries series = data.Series(tf);
+                if (series == null || !series.Atr.IsReady) continue;
+                lines.Add(TradeabilityReport.Evaluate(tf, series.Atr.Value, spread, price, data.Spec, _config));
+            }
+
+            if (lines.Count == 0) return;
+
+            Print(TradeabilityReport.Render(SymbolName, lines, TradeabilityReport.AtrNeededFor(spread, _config)));
+
+            TradeabilityReport.Line current = default;
+            bool found = false;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                if (lines[i].Timeframe == _config.Data.SignalTimeframe) { current = lines[i]; found = true; break; }
+            }
+
+            if (!found) return;
+
+            if (current.IsTradeable)
+            {
+                Print($"ВЫВОД: {SymbolName} на {current.Timeframe} экономически проходит. Издержки съедают " +
+                      $"{current.CostR:P0} риска, значит стратегия обязана давать матожидание выше " +
+                      $"{current.RequiredEdgeR:F2}R, иначе торговля будет убыточной. Это требование к рынку, а не к настройкам.");
+            }
+            else
+            {
+                string best = "ни один из доступных";
+                for (int i = 0; i < lines.Count; i++)
+                {
+                    if (lines[i].IsTradeable) { best = lines[i].Timeframe.ToString(); break; }
+                }
+
+                Print($"ВЫВОД: {SymbolName} на {current.Timeframe} НЕ ПРОЙДЁТ НИ ОДНОЙ СДЕЛКИ, и это не поломка. " +
+                      $"Спред {current.SpreadToAtr:P0} от ATR при пределе {_config.Risk.MaxSpreadToAtr:P0}; " +
+                      $"издержки круга — {current.CostR:P0} риска. Подходящий таймфрейм здесь: {best}. " +
+                      "Либо смените таймфрейм, либо возьмите инструмент, у которого волатильность больше относительно спреда.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Print("Не удалось посчитать экономику инструмента: " + ex.Message);
+        }
+    }
+
     private void ReportTradingHours()
     {
         for (int i = 0; i < _symbols.Count; i++)
@@ -861,10 +940,28 @@ public class QuantCryptoV3Bot : Robot
         config.Exit.BreakEvenTriggerR = BreakEvenTriggerR;
         config.Exit.TrendTrailAtr = TrendTrailAtr;
 
+        config.Risk.MaxSpreadToAtr = MaxSpreadToAtr;
         config.Execution.MaxSlippageInAtr = MaxSlippageInAtr;
         config.Execution.MaxSlippageSpreadMultiple = MaxSlippageSpreadMultiple;
         config.Execution.ReconciliationIntervalMinutes = ReconciliationIntervalMinutes;
 
+        ApplyPreset(config);
+
         return config;
+    }
+
+    /// <summary>
+    /// Накладывает пресет ПОСЛЕ отдельных полей.
+    ///
+    /// Порядок важен и выбран сознательно: пресет — это утверждение о согласованности
+    /// набора, а не значение по умолчанию. Набор, половину которого перебили вручную,
+    /// перестаёт быть тем набором, экономику которого я считала, и молча съезжает в
+    /// сочетание, которого никто не проверял. Кому нужны свои значения — Manual.
+    /// </summary>
+    private void ApplyPreset(EngineConfig config)
+    {
+        if (Preset == TradingPreset.Manual) return;
+
+        Presets.CryptoSmallTimeframe(config, Preset == TradingPreset.CryptoM15 ? Tf.M15 : Tf.M5);
     }
 }
