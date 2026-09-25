@@ -1,0 +1,163 @@
+# QuantAI_Scalper_M1_MicroDepot_Pro — cBot для cTrader (v1.0.0)
+
+Скальпер EURUSD на M1/M5 для микро-депозита (от 50 EUR). Ловит микро-импульсы по тиковому ускорению,
+входит на пробое сквиза у 20 EMA (Боб Вольман) или после ложного прокола 10-барного экстремума,
+фильтрует сигнал наивным байесовским классификатором и ведёт позицию: TP1 60 %, микро-безубыток,
+ATR-трейлинг остатка, выход по времени.
+
+Весь код — один файл: [`QuantAI_Scalper_M1_MicroDepot_Pro/QuantAI_Scalper_M1_MicroDepot_Pro.cs`](QuantAI_Scalper_M1_MicroDepot_Pro/QuantAI_Scalper_M1_MicroDepot_Pro.cs).
+Без внешних библиотек, `AccessRights.None` (подходит и для облачного запуска).
+
+## Установка
+
+1. cTrader → **Algo** → вкладка **cBots** → **New** → имя `QuantAI_Scalper_M1_MicroDepot_Pro`, язык C# → **Create**.
+2. Удалить шаблон, вставить весь код из `.cs` → **Build** (Ctrl+B) → «Build succeeded».
+   Либо двойной клик по `QuantAI_Scalper_M1_MicroDepot_Pro.algo` из архива релиза (cTrader Windows/Mac).
+3. Добавить экземпляр на график **EURUSD**, проверить параметры, **Start**.
+
+Бэктест — только с данными **Tick data from server (accurate)**. На «m1 bars» тиковый движок видит
+лишь синтетические тики, и результат ничего не говорит о реальной работе.
+
+Совместимость проверена сборкой против cTrader.Automate 1.0.0 (cTrader 4.2), 1.0.8 (последняя 4.x)
+и 1.0.21 (5.x), для .NET 6 и legacy .NET Framework; синтаксис C# 7.3 — 0 ошибок, 0 предупреждений.
+
+## Как принимается решение
+
+1. **Сетап** — на закрытии бара сигнального таймфрейма (`Signal TimeFrame`, M1 или M5):
+   - **SQZ (20 EMA Squeeze).** Последние `Squeeze Bars` баров помещаются в коробку не выше
+     `Squeeze Max Range` × ATR, EMA20 внутри коробки или не дальше `Squeeze Max EMA Gap` × ATR.
+     Вход — на том тике, который пробивает коробку ± `Breakout Buffer Pips`.
+   - **SWP (Liquidity Sweep).** Бар проколол High/Low предыдущих `Sweep Lookback Bars` (10) баров
+     минимум на `Sweep Min Pierce Pips` и закрылся обратно. Вход — когда цена возвращается за EMA20
+     (± буфер) в течение `Sweep Max Bars To EMA Reclaim` баров. Новый экстремум за хвостом отменяет сетап.
+2. **Фильтры на тике триггера.** Все не пройденные фильтры пишутся в журнал одной строкой `SKIP`:
+   - спред / ATR(14) M1 ≤ `Max Spread / ATR` (0.12);
+   - тиковое ускорение: плотность тиков за `Tick Window` (3 с) ≥ `N` × средней плотности за `Baseline Bars` (100) баров;
+   - AI Confidence ≥ `Min Confidence`;
+   - торговая сессия, дневной лимит убытка, пауза после серии убытков, кулдаун, запрет «догонять»
+     цену дальше `Max Chase Beyond Trigger` × ATR от уровня пробоя.
+3. **Объём.** Риск `Risk Percent` от баланса на дистанцию SL, пол `Min Lots` (0.01), потолок `Max Lots`,
+   ограничение по свободной марже (`Max Margin Use`).
+4. **Сопровождение.** SL = 0.8 × ATR(14) M1 — серверный, ставится вместе с ордером (если брокер вернул
+   позицию без стопа, бот ставит его сам, а если не получилось — сразу закрывает). TP1 = 1.0 × ATR
+   закрывает 60 %; при +0.4R стоп переносится на вход + 0.1 пипса; остаток ведёт трейлинг 0.5 × ATR;
+   если за 5 баров M1 TP1 не достигнут — закрытие по рынку.
+
+## AI-модуль (Gaussian Naive Bayes)
+
+- Вектор признаков `[Tick_Velocity, EMA20_Distance, RSI_Slope, Spread_Ratio]`:
+  - **Tick_Velocity** — тики за последнее окно длиной в один бар / средний тиковый объём бара (логарифм);
+  - **EMA20_Distance** — (цена − EMA20) / ATR со знаком направления сделки;
+  - **RSI_Slope** — изменение RSI(14) за `RSI Slope Bars` баров со знаком направления;
+  - **Spread_Ratio** — спред / ATR M1 (логарифм).
+- **Метка.** «TP1 достигнут раньше SL/безубытка за `Label Horizon` баров M1» — это прогон собственных
+  правил выхода бота по будущим барам. Если SL и TP1 попали в один бар, считается проигрыш.
+- **Обучение.** При старте — на истории (`Training Window` = 3000 баров → 6000 примеров лонг/шорт),
+  дальше онлайн на каждом закрытом баре, в скользящем окне той же длины.
+- **Confidence = P(win | x).** По умолчанию априорные вероятности равные, 50 % = «признаки нейтральны».
+  `Use Empirical Win-Rate Prior = true` включает калиброванную вероятность с базовой частотой побед.
+- Порог `Min Confidence` берётся только из UI.
+
+Почему Tick_Velocity для AI меряется окном длиной в бар, а не в 3 секунды: в истории брокера есть только
+тиковый объём баров. Трёхсекундный всплеск работает как отдельный жёсткий фильтр («институциональное
+вливание»), а в классификатор идёт величина, которая одинаково считается и на истории, и вживую.
+
+## Журнал (примеры)
+
+```
+BAR 10:31 NO SETUP | C 1.08532 EMA 1.08527 ATR 1.9p | Spread 0.2p = 11% ATR (max 12%) | TV bar 1.12x | SQZ no: box 4.2p > max 2.9p (1.50 ATR) | SWP no: 10-bar H 1.08560 / L 1.08490 not pierced | AI L 48% S 51%
+SKIP [SQZ BUY @1.08540]: Low Tick Velocity (1.20x < 2.00x in 3.0s) | AI Confidence 28% < Target 55% [TV -0.21 EMA +0.05 RSI -0.40 SPR -0.12]
+SKIP [SWP SELL @1.08511]: Spread too high (0.3p = 16% of ATR 1.9p > 12%)
+ENTRY SQZ BUY #123 0.01 lot (1000u) @1.08541 | SL 1.08526 (1.5p = 0.80 ATR) | TP1 1.08560 (1.9p) closes 100% (volume cannot be split) | conf 61% [...] | TV 2.45x | size: ...
+MICRO-BE #123 (+0.40R): SL -> 1.08542 (entry +0.1p)
+TIME EXIT #123: TP1 not reached within 5 m1 bars, closing at market (+0.4p, best +0.9p)
+CLOSED #123 SQZ BUY by TIME EXIT: net +0.03 EUR (gross +0.04, 1 fill(s)) | day +0.03 EUR | loss streak 0
+```
+
+В квадратных скобках после Confidence — вклад каждого признака в логарифм шансов (плюс — «похоже на победу»).
+На графике — панель состояния (HUD), коробка сквиза и отметки свипов/входов.
+
+## Важно для счёта 50 EUR
+
+- При плече 1:30 (ЕС) маржа 0.01 лота EURUSD ≈ 33 EUR, поэтому бот почти всегда откроет ровно 0.01 лота.
+  Это ограничение по марже, а не ошибка: в логе будет `margin cap`.
+- 0.01 лота нельзя разделить 60/40 (минимальный объём и есть 0.01), поэтому TP1 закрывает 100 % серверным
+  TP. Если выбрать `If Volume Cannot Be Split = TrailWholePosition`, весь объём вместо этого уходит в трейлинг.
+  Частичная фиксация 60 % включается сама, как только объём ≥ 0.02 лота.
+- На ECN-счетах комиссия ≈ 0.6–0.7 пипса за круг. Безубыток +0.1 пипса её не покрывает: закрытие по BE — это
+  маленький минус по деньгам. Чтобы выходить в ноль с учётом комиссии, увеличьте `Break-Even Offset Pips`.
+- Сначала бэктест на тиковых данных и демо-счёт. Никакой фильтр, в том числе AI, не гарантирует прибыль.
+
+## Параметры
+
+Все пороги, влияющие на вход и выход, задаются только здесь. В коде нет скрытых ограничений; при старте
+бот печатает в журнал все действующие значения (строки `PARAMS ...`).
+
+| Группа | Параметр | По умолчанию | Смысл |
+| --- | --- | --- | --- |
+| 1. Risk & Money | Risk Percent | 1.0 | % баланса, которым рискуем до SL |
+| | Min Lots (floor) | 0.01 | нижняя граница объёма |
+| | Max Lots (cap) | 1.0 | верхняя граница объёма |
+| | Use Min Lot If Risk Size Is Smaller | true | если по риску выходит меньше Min Lots — открыть Min Lots (фактический риск пишется в журнал) |
+| | Max Margin Use (% of free margin) | 80 | сколько свободной маржи может занять новая позиция |
+| | Leverage For Margin Check (0 = auto) | 0 | плечо для расчёта маржи; 0 — меньшее из плеча счёта и символа |
+| | Max Slippage Pips (0 = plain market) | 0.5 | допустимое проскальзывание (market range order) |
+| | Daily Max Loss % (0 = off) | 6 | после такого убытка за день новых входов нет до 00:00 UTC |
+| | Max Consecutive Losses (0 = off) | 4 | серия убытков, после которой пауза |
+| | Loss-Streak Pause (minutes) | 30 | длительность паузы |
+| | Max Trades Per Day (0 = off) | 0 | лимит сделок в день |
+| 2. Exits | SL ATR Multiplier | 0.8 | SL = k × ATR(14) M1 |
+| | TP1 ATR Multiplier | 1.0 | TP1 = k × ATR |
+| | TP1 Close Percent | 60 | какая доля закрывается на TP1 |
+| | If Volume Cannot Be Split | CloseAllAtTp1 | что делать на TP1, если объём не делится |
+| | Runner Hard TP ATR Mult (0 = none) | 0 | серверный TP для остатка |
+| | Trailing ATR Multiplier (0 = off) | 0.5 | дистанция трейлинга в ATR |
+| | Trailing Step Pips | 0.2 | минимальный шаг переноса стопа |
+| | Trail Only After TP1 | true | трейлинг только после TP1 |
+| | Break-Even Trigger R (0 = off) | 0.4 | при какой прибыли (в R) переносить в безубыток |
+| | Break-Even Offset Pips | 0.1 | безубыток = вход ± столько пипсов |
+| | Time Exit Bars (0 = off) | 5 | закрыть, если TP1 не достигнут за N баров |
+| | ATR & Time-Exit TimeFrame | m1 | таймфрейм ATR для SL/TP/спреда и выхода по времени |
+| | ATR Period | 14 | период ATR |
+| 3. Entry Filters | Max Spread / ATR | 0.12 | максимум спред / ATR |
+| | Use Session Filter | true | торговать только в сессию |
+| | Session Start / End Hour (UTC) | 6 / 20 | окно сессии (одинаковые значения = круглосуточно) |
+| | Cooldown After Close (sec) | 30 | пауза после закрытия сделки |
+| | Max Chase Beyond Trigger (x ATR) | 0.5 | не входить, если цена ушла от уровня дальше |
+| 4. Tick Velocity Engine | Use Tick Velocity Filter | true | включить фильтр тикового всплеска |
+| | Tick Window (sec) | 3 | короткое окно |
+| | Baseline Bars | 100 | база сравнения: средняя плотность тиков за N баров |
+| | Velocity Multiplier N | 2.0 | во сколько раз плотность должна превышать среднюю |
+| 5. Volman Setups | Signal TimeFrame (M1/M5) | m1 | таймфрейм сетапов и признаков AI |
+| | EMA Period | 20 | EMA для сквиза и возврата к среднему |
+| | Use 20 EMA Squeeze | true | сетап SQZ |
+| | Squeeze Bars | 6 | длина коробки |
+| | Squeeze Max Range (x ATR) | 1.5 | максимальная высота коробки |
+| | Squeeze Max EMA Gap (x ATR) | 0.3 | максимальное расстояние EMA от коробки |
+| | Breakout Buffer Pips | 0.2 | буфер пробоя и возврата за EMA |
+| | Use Liquidity Sweep | true | сетап SWP |
+| | Sweep Lookback Bars | 10 | экстремум скольких баров снимаем |
+| | Sweep Min Pierce Pips | 0.2 | минимальная глубина прокола |
+| | Sweep Bar Must Close Back Inside | true | бар прокола должен закрыться обратно за уровнем |
+| | Sweep Max Bars To EMA Reclaim | 3 | за сколько баров цена должна вернуться за EMA |
+| 6. AI Classifier | Use AI Filter | true | включить классификатор |
+| | Min Confidence (0.00-1.00) | 0.55 | порог уверенности для входа |
+| | Training Window (bars) | 3000 | окно обучения (баров сигнального ТФ) |
+| | Min Samples Per Class | 100 | минимум побед и поражений до начала фильтрации |
+| | Label Horizon (ATR TF bars) | 5 | горизонт разметки, согласуйте с Time Exit Bars |
+| | RSI Period / RSI Slope Bars | 14 / 3 | RSI для признака RSI_Slope |
+| | Use Empirical Win-Rate Prior | false | калиброванная вероятность вместо нейтральной шкалы |
+| | Training Spread Pips (0 = live) | 0 | спред для разметки истории (0 — текущий) |
+| 7. Log & Display | Position Label | QuantAI_M1 | метка позиций бота |
+| | Log Every Bar | true | строка состояния на каждом баре (для долгих бэктестов лучше выключить) |
+| | Log Skip Reasons | true | причины пропуска сигналов |
+| | Show Chart HUD | true | панель и разметка на графике |
+
+## Тесты
+
+[`../tests/QuantAI_Scalper_Tests`](../tests/QuantAI_Scalper_Tests) — 82 проверки логики, не зависящей от брокера
+(Naive Bayes, тиковый движок, симулятор исходов для разметки, детекторы сетапов, деление объёма на TP1):
+
+```
+cd ctrader/tests/QuantAI_Scalper_Tests && dotnet run -c Release
+```
