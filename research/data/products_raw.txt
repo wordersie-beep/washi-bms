@@ -1,0 +1,329 @@
+# Product candidate universe — 100 niches x 3 products = 300 candidates.
+#
+# ALL ATTRIBUTES BELOW ARE ANALYST JUDGEMENTS (ASSUMPTIONS), NOT MEASURED DATA.
+# They exist only to run the exclusion engine and a coarse filter score.
+# SCORE != PROFITABILITY. Anything that survives must be re-checked with real evidence.
+#
+# Columns:
+# niche | product | P | W | F | E | R | S | I | Z | C | V | Rp | B | D | MTO
+#  P   retail price band        1=<€15  2=€15-30  3=€30-60  4=>€60
+#  W   weight/volume            1=<0.5kg flat  2=0.5-2kg  3=heavy or bulky
+#  F   fragile                  0/1
+#  E   electrical/battery/laser 0/1 (CE/LVD/RED/EMC/WEEE/battery compliance)
+#  R   regulated category       0/1 (cosmetics, food-contact, toys/child, medical claims, PPE, biocides/CLP, supplements, adult)
+#  S   sizing/fit return risk   0/1
+#  I   IP risk                  0/1 (patented design, dominant trademark, licensed crests/clubs)
+#  Z   seasonality              0=evergreen 1=moderate 2=extreme single-peak
+#  C   competition/saturation   1 (low) .. 5 (saturated commodity)
+#  V   video/UGC demo potential 1..5
+#  Rp  repeat/consumable        0/1
+#  B   brandability/personalisation 1..5
+#  D   demand proxy (judgement) 1..5
+#  MTO made-to-order locally (print-on-demand / personalised, no stock) 0/1
+#
+Draught proofing|Under-door draught excluder|1|2|0|0|0|0|0|1|4|3|0|2|4|0
+Draught proofing|Self-adhesive window seal tape|1|1|0|0|0|0|0|1|5|2|0|1|4|0
+Draught proofing|Letterbox draught brush|1|1|0|0|0|0|0|1|3|1|0|1|2|0
+Radiator efficiency|Radiator reflector foil|1|2|0|0|0|0|0|1|3|2|0|1|3|0
+Radiator efficiency|Radiator shelf|2|3|0|0|0|0|0|1|3|1|0|2|2|0
+Radiator efficiency|Radiator booster fan|3|2|0|1|0|0|0|1|3|3|0|2|3|0
+Condensation & damp|Window condensation absorbing strips|1|1|0|0|0|0|0|1|3|3|1|1|3|0
+Condensation & damp|Calcium chloride moisture absorber|1|3|0|0|1|0|0|1|4|2|1|1|4|0
+Condensation & damp|Cordless window vacuum|3|2|0|1|0|0|1|1|4|4|0|2|3|0
+Indoor clothes drying|Heated clothes airer|4|3|0|1|0|0|0|1|4|3|0|2|4|0
+Indoor clothes drying|Over-radiator drying rack|1|2|0|0|0|0|0|1|4|2|0|1|3|0
+Indoor clothes drying|Ceiling pulley airer|3|3|0|0|0|0|0|0|2|3|0|3|2|0
+Thermal textiles|Thermal door curtain|2|3|0|0|0|0|0|1|3|2|0|2|2|0
+Thermal textiles|Wearable blanket hoodie|3|2|0|0|0|0|1|1|5|4|0|3|4|0
+Thermal textiles|Thermal blackout curtains|3|3|0|0|0|1|0|0|4|2|0|2|3|0
+Warmth accessories|Hot water bottle with knitted cover|2|2|0|0|1|0|0|1|4|2|0|3|3|0
+Warmth accessories|Microwavable wheat heat pack|2|2|0|0|1|0|0|1|4|2|0|3|3|0
+Warmth accessories|USB heated insoles|3|1|0|1|0|1|0|1|3|3|0|2|2|0
+Energy monitoring|Smart plug with energy meter|2|1|0|1|0|0|0|0|5|2|0|1|3|0
+Energy monitoring|Plug-in timer socket|1|1|0|1|0|0|0|0|5|1|0|1|2|0
+Energy monitoring|Standby killer power strip|2|2|0|1|0|0|0|0|4|2|0|1|2|0
+Kitchen organisation|Expandable drawer dividers|2|2|0|0|0|0|0|0|4|4|0|2|3|0
+Kitchen organisation|Magnetic spice rack|2|2|0|0|0|0|0|0|4|4|0|2|3|0
+Kitchen organisation|Under-shelf hanging baskets|1|2|0|0|0|0|0|0|4|3|0|1|3|0
+Food storage|Silicone reusable food bags|2|1|0|0|1|0|0|0|4|3|0|2|3|0
+Food storage|Vacuum sealer|3|2|0|1|1|0|0|0|4|4|1|2|3|0
+Food storage|Beeswax food wraps|2|1|0|0|1|0|0|0|4|3|1|3|2|0
+Coffee|Gooseneck pour-over kettle|3|2|0|0|1|0|0|0|4|3|0|3|3|0
+Coffee|Manual burr grinder|3|2|0|0|1|0|0|0|4|3|0|3|3|0
+Coffee|Glass cold brew pitcher|2|2|1|0|1|0|0|1|3|3|0|2|2|0
+Home baking|Sourdough banneton kit|2|2|0|0|1|0|0|0|3|4|0|3|3|0
+Home baking|Bread lame and scoring set|1|1|0|0|1|0|0|0|3|4|0|2|2|0
+Home baking|Proofing box|4|3|0|1|1|0|0|0|2|3|0|2|2|0
+Cleaning|Electric spin scrubber|3|2|0|1|0|0|0|0|5|5|0|1|4|0
+Cleaning|Microfibre cloth set|1|1|0|0|0|0|0|0|5|2|1|1|4|0
+Cleaning|Grout and detail brush set|1|1|0|0|0|0|0|0|4|4|0|1|3|0
+Laundry|Rechargeable lint shaver|2|1|0|1|0|0|0|0|5|4|0|1|3|0
+Laundry|Mesh laundry bag set|1|1|0|0|0|0|0|0|4|1|0|1|2|0
+Laundry|Wool dryer balls|1|1|0|0|0|0|0|0|4|2|1|2|2|0
+Bathroom|Filtered shower head|2|2|0|0|1|0|0|0|4|4|1|2|3|0
+Bathroom|Wall-mount toothbrush holder|1|1|0|0|0|0|0|0|4|2|0|1|2|0
+Bathroom|Anti-slip quick-dry bath mat|2|2|0|0|0|0|0|0|4|3|0|2|3|0
+Sleep|Contoured sleep mask|1|1|0|0|0|0|0|0|5|3|0|2|3|0
+Sleep|White noise machine|3|2|0|1|0|0|0|0|4|2|0|2|3|0
+Sleep|Weighted blanket|4|3|0|0|0|0|0|1|4|3|0|2|3|0
+Personalised wall art|Personalised ancestral townland map print|3|1|0|0|0|0|0|1|2|4|0|5|3|1
+Personalised wall art|Personalised Irish-language name print|2|1|0|0|0|0|0|0|3|3|0|5|2|1
+Personalised wall art|Custom city street-map print|3|1|0|0|0|0|0|0|5|3|0|4|3|1
+Irish heritage gifts|Surname origin and meaning print|3|1|0|0|0|0|0|1|4|3|0|5|3|1
+Irish heritage gifts|Surname "family crest" mug|2|2|1|0|1|0|1|1|4|2|0|3|3|1
+Irish heritage gifts|Engraved Ogham name plaque|3|2|0|0|0|0|0|1|3|4|0|5|2|1
+Candles & fragrance|Soy wax candle|2|2|1|0|1|0|0|1|5|3|1|4|4|0
+Candles & fragrance|Reed diffuser|2|2|1|0|1|0|0|0|4|2|1|3|3|0
+Candles & fragrance|Wax melts|1|1|0|0|1|0|0|0|4|3|1|3|3|0
+Indoor plants|Self-watering planter|2|2|0|0|0|0|0|0|4|3|0|2|3|0
+Indoor plants|LED grow light|3|2|0|1|0|0|0|0|4|3|0|2|3|0
+Indoor plants|Soil moisture meter|1|1|0|0|0|0|0|0|4|2|0|1|2|0
+Gardening|Seed starter propagator kit|2|3|0|0|0|0|0|2|3|3|0|2|3|0
+Gardening|Garden kneeler seat|3|3|0|0|0|0|0|1|3|2|0|1|2|0
+Gardening|Gardening gloves|1|1|0|0|0|1|0|1|5|1|0|1|3|0
+Small-space garden|Vertical wall planter|2|2|0|0|0|0|0|1|3|3|0|2|2|0
+Small-space garden|Windowsill herb kit|2|2|0|0|1|0|0|1|4|3|0|3|3|0
+Small-space garden|Rain gauge|1|1|1|0|0|0|0|0|3|1|0|1|1|0
+Outdoor & rain|Adult changing robe|4|3|0|0|0|1|1|1|4|4|0|3|4|0
+Outdoor & rain|Waterproof phone pouch|1|1|0|0|0|0|0|1|5|3|0|1|3|0
+Outdoor & rain|Packable rain poncho|1|1|0|0|0|1|0|1|5|2|0|1|3|0
+Sea swimming|Microfibre changing poncho towel|3|2|0|0|0|1|0|1|3|4|0|3|4|0
+Sea swimming|Neoprene swim gloves and socks|2|1|0|0|0|1|0|1|3|3|0|2|3|0
+Sea swimming|Roll-top dry bag|2|1|0|0|0|0|0|1|4|3|0|3|3|0
+Hiking|Collapsible trekking poles|3|2|0|0|0|0|0|0|4|3|0|2|3|0
+Hiking|Waterproof gaiters|2|1|0|0|0|1|0|1|3|2|0|2|2|0
+Hiking|Rechargeable headlamp|2|1|0|1|0|0|0|1|4|3|0|2|3|0
+Cycling commute|USB bike light set|2|1|0|1|0|0|0|1|5|3|0|1|3|0
+Cycling commute|Waterproof pannier bag|3|2|0|0|0|0|0|0|4|3|0|3|3|0
+Cycling commute|Hi-vis reflective vest|1|1|0|0|1|1|0|1|4|1|0|1|2|0
+Running|Running waist belt|1|1|0|0|0|0|0|0|4|3|0|2|3|0
+Running|Reflective armband|1|1|0|0|0|0|0|1|4|2|0|1|2|0
+Running|Hydration vest|3|2|0|0|0|1|0|0|4|3|0|2|2|0
+Home gym|Resistance band set|2|2|0|0|0|0|0|0|5|5|0|2|4|0
+Home gym|Ab roller wheel|1|2|0|0|0|0|0|0|5|4|0|1|3|0
+Home gym|Adjustable dumbbells|4|3|0|0|0|0|0|0|4|4|0|2|4|0
+Yoga & pilates|Yoga mat|2|3|0|0|0|0|0|0|5|3|0|2|4|0
+Yoga & pilates|Pilates ring|1|2|0|0|0|0|0|0|4|4|0|1|3|0
+Yoga & pilates|Cork yoga blocks|2|2|0|0|0|0|0|0|4|2|0|2|2|0
+Recovery|Percussion massage gun|4|2|0|1|1|0|1|0|5|5|0|2|4|0
+Recovery|Foam roller|2|3|0|0|0|0|0|0|4|3|0|1|3|0
+Recovery|Spiky massage ball set|1|1|0|0|0|0|0|0|4|3|0|1|2|0
+GAA & hurling|Hurley grips multipack|1|1|0|0|0|0|1|0|4|2|1|2|3|0
+GAA & hurling|Hurley and sliotar carry bag|2|2|0|0|0|0|0|0|3|2|0|3|2|0
+GAA & hurling|Hurling wall rebounder|4|3|0|0|0|0|0|0|2|4|0|2|2|0
+Golf|Personalised golf ball marker|2|1|0|0|0|0|0|0|4|2|0|5|2|1
+Golf|Alignment sticks|2|2|0|0|0|0|0|0|4|3|0|1|2|0
+Golf|Magnetic golf towel|2|1|0|0|0|0|0|0|4|2|0|3|2|0
+Angling|Sea fishing lure kit|2|1|0|0|0|0|0|1|4|3|1|2|3|0
+Angling|Tackle box organiser|2|2|0|0|0|0|0|0|4|2|0|2|2|0
+Angling|Electronic bite alarm|3|2|0|1|0|0|0|0|3|2|0|2|2|0
+Dog walking|Hands-free bungee leash|2|1|0|0|0|0|0|0|4|4|0|3|3|0
+Dog walking|Poo bag dispenser|1|1|0|0|0|0|0|0|5|2|1|2|3|0
+Dog walking|LED light-up collar|2|1|0|1|0|1|0|1|4|4|0|2|3|0
+Dog mud & rain|Dog drying coat|3|2|0|0|0|1|0|1|3|5|0|4|4|0
+Dog mud & rain|Portable paw washer cup|2|2|0|0|0|1|1|1|4|5|0|2|4|0
+Dog mud & rain|Dog car boot liner|3|3|0|0|0|1|0|0|4|3|0|2|3|0
+Dog enrichment|Lick mat|1|1|0|0|1|0|0|0|5|5|0|2|4|0
+Dog enrichment|Snuffle mat|2|2|0|0|0|0|0|0|4|5|0|3|3|0
+Dog enrichment|Puzzle feeder toy|2|2|0|0|0|0|1|0|4|5|0|2|3|0
+Dog grooming|Deshedding brush|2|1|0|0|0|0|1|0|5|5|0|1|4|0
+Dog grooming|Dog nail grinder|2|1|0|1|0|0|0|0|4|4|0|1|3|0
+Dog grooming|Grooming glove|1|1|0|0|0|1|0|0|5|4|0|1|3|0
+Dog travel|Collapsible silicone bowl|1|1|0|0|1|0|0|0|5|2|0|2|3|0
+Dog travel|Dog car seatbelt harness|2|1|0|0|1|1|0|0|4|3|0|2|3|0
+Dog travel|Back-seat hammock cover|3|3|0|0|0|1|0|0|4|3|0|2|3|0
+Cats|Cardboard cat scratcher|2|3|0|0|0|0|0|0|4|4|1|2|3|0
+Cats|Window-mounted cat perch|3|2|0|0|0|0|0|0|3|4|0|2|3|0
+Cats|Automatic laser cat toy|2|1|0|1|1|0|0|0|4|5|0|1|3|0
+Pet personalisation|Engraved pet ID tag|1|1|0|0|0|0|0|0|4|2|1|5|3|1
+Pet personalisation|Custom pet portrait print|3|1|0|0|0|0|0|0|5|4|0|5|4|1
+Pet personalisation|Tracker collar holder|1|1|0|0|0|0|1|0|4|2|0|2|3|0
+Equestrian|Hoof pick set|1|1|0|0|0|0|0|0|3|2|1|2|2|0
+Equestrian|Horse grooming kit bag|3|2|0|0|0|0|0|0|3|3|0|3|2|0
+Equestrian|Horse treat ball|2|2|0|0|0|0|0|0|3|3|0|2|2|0
+Baby|Muslin swaddle set|2|1|0|0|1|0|0|0|4|3|0|3|3|0
+Baby|Baby carrier|4|2|0|0|1|1|0|0|4|4|0|2|3|0
+Baby|Silicone teether|1|1|0|0|1|0|0|0|4|3|0|2|3|0
+Kids toys|STEM science kit|3|2|0|0|1|0|0|1|4|4|0|2|3|0
+Kids toys|Montessori busy board|3|2|0|0|1|0|0|1|4|4|0|3|3|0
+Kids toys|Kids art supply case|2|2|0|0|1|0|0|1|4|3|0|2|3|0
+Kids room|Personalised nursery name print|2|1|0|0|0|0|0|0|4|3|0|5|3|1
+Kids room|Kids night light|2|1|0|1|1|0|0|0|4|3|0|2|3|0
+Kids room|Personalised canvas height chart|3|1|0|0|0|0|0|0|3|3|0|5|2|1
+School|Personalised name labels|1|1|0|0|0|0|0|1|4|2|1|4|3|1
+School|Bento lunch box|2|2|0|0|1|0|0|1|4|3|0|2|3|0
+School|School backpack|3|2|0|0|0|0|0|2|4|2|0|2|3|0
+Stationery|Undated planner journal|2|2|0|0|0|0|0|1|4|3|0|4|3|1
+Stationery|Pastel highlighter set|1|1|0|0|0|0|0|0|5|3|1|1|3|0
+Stationery|Desk organiser|2|2|0|0|0|0|0|0|4|2|0|2|2|0
+Work from home|Aluminium laptop stand|2|2|0|0|0|0|0|0|5|3|0|1|4|0
+Work from home|Monitor riser with drawer|3|3|0|0|0|0|0|0|4|2|0|2|3|0
+Work from home|Cable management kit|1|1|0|0|0|0|0|0|4|4|0|1|3|0
+Ergonomics|Under-desk footrest|2|2|0|0|0|0|0|0|4|2|0|1|2|0
+Ergonomics|Memory foam lumbar cushion|2|2|0|0|1|0|0|0|4|3|0|2|3|0
+Ergonomics|Keyboard wrist rest|1|1|0|0|0|0|0|0|4|2|0|1|2|0
+Phone accessories|Phone case|1|1|0|0|0|1|1|0|5|3|0|3|5|0
+Phone accessories|Magnetic car phone mount|1|1|0|0|0|0|0|0|5|3|0|1|4|0
+Phone accessories|3-in-1 wireless charging stand|3|2|0|1|0|0|0|0|5|3|0|1|4|0
+Small tech|Cable organiser pouch|1|1|0|0|0|0|0|0|4|2|0|2|2|0
+Small tech|Webcam privacy cover|1|1|0|0|0|0|0|0|4|1|0|1|2|0
+Small tech|Screen cleaning kit|1|1|0|0|1|0|0|0|4|2|1|1|2|0
+Audio|True wireless earbuds|3|1|0|1|0|0|1|0|5|3|0|2|5|0
+Audio|Bluetooth speaker|3|2|1|1|0|0|0|0|5|3|0|2|4|0
+Audio|Headphone stand|2|2|0|0|0|0|0|0|4|2|0|2|2|0
+Smart home|Smart bulbs|2|1|1|1|0|0|0|0|5|3|0|1|3|0
+Smart home|Video doorbell|4|1|0|1|0|0|1|0|5|3|0|1|4|0
+Smart home|Smart radiator thermostat|4|1|0|1|0|0|1|1|4|2|0|1|3|0
+Car care|Cordless car vacuum|3|2|0|1|0|0|0|0|5|4|0|1|4|0
+Car care|Microfibre car wash kit|2|2|0|0|0|0|0|0|4|3|0|2|3|0
+Car care|Portable tyre inflator|3|2|0|1|0|0|0|1|4|4|0|1|4|0
+Car organisation|Collapsible boot organiser|2|3|0|0|0|0|0|0|4|3|0|2|3|0
+Car organisation|Seat gap filler|1|1|0|0|0|0|0|0|5|4|0|1|3|0
+Car organisation|Back-seat kids organiser|2|2|0|0|0|0|0|0|4|3|0|2|3|0
+Car winter|Windscreen frost cover|2|2|0|0|0|0|0|2|4|4|0|1|3|0
+Car winter|Ice scraper with mitt|1|1|0|0|0|0|0|2|4|2|0|1|3|0
+Car winter|De-icer spray|1|2|0|0|1|0|0|2|4|2|1|1|3|0
+Campervan|Rechargeable camping lantern|2|2|0|1|0|0|0|1|4|3|0|2|3|0
+Campervan|Portable camping shower|3|2|0|1|0|0|0|1|3|4|0|2|2|0
+Campervan|Custom-fit thermal window blinds|4|3|0|0|0|1|0|0|2|3|0|3|2|0
+Travel|Compression packing cubes|2|2|0|0|0|0|0|0|5|4|0|2|4|0
+Travel|Universal travel adapter|2|1|0|1|0|0|0|0|5|2|0|1|3|0
+Travel|Memory foam neck pillow|2|2|0|0|0|0|0|0|5|2|0|2|3|0
+Budget air travel|Ryanair-size under-seat bag 40x20x25|3|2|0|0|0|0|0|0|4|5|0|3|4|0
+Budget air travel|Digital luggage scale|1|1|0|1|0|0|0|0|5|2|0|1|3|0
+Budget air travel|Personalised leather luggage tag|2|1|0|0|0|0|0|0|4|2|0|5|2|1
+Rainwear|Windproof compact umbrella|2|1|0|0|0|0|0|0|5|3|0|2|4|0
+Rainwear|Wellington boots|3|3|0|0|0|1|0|1|4|2|0|2|3|0
+Rainwear|Waterproof jacket|4|2|0|0|0|1|0|1|5|3|0|3|4|0
+Apparel basics|Graphic t-shirt|2|1|0|0|0|1|0|0|5|3|0|4|4|1
+Apparel basics|Novelty socks|1|1|0|0|0|0|0|1|5|3|1|3|3|1
+Apparel basics|Embroidered beanie|2|1|0|0|0|0|0|1|4|3|0|4|3|1
+Jewellery|Personalised name necklace|3|1|0|0|1|0|0|0|5|4|0|5|4|1
+Jewellery|Claddagh ring|3|1|0|0|1|1|0|1|4|3|0|3|3|0
+Jewellery|Birthstone bracelet|2|1|0|0|1|1|0|0|5|3|0|4|3|0
+Watches|Minimalist watch|3|1|0|1|0|0|0|0|5|3|0|3|3|0
+Watches|Quick-release watch strap|2|1|0|0|0|1|1|0|5|2|0|2|3|0
+Watches|Watch winder|4|2|1|1|0|0|0|0|3|2|0|2|2|0
+Beauty tools|Gua sha stone|2|1|1|0|1|0|0|0|5|5|0|3|3|0
+Beauty tools|LED face mask|4|2|0|1|1|0|0|0|4|5|0|2|4|0
+Beauty tools|Heatless curling rod|1|1|0|0|0|0|0|0|5|5|0|2|4|0
+Skincare|Vitamin C serum|2|1|1|0|1|0|0|0|5|4|1|3|4|0
+Skincare|Mineral sunscreen|2|1|0|0|1|0|0|1|5|3|1|3|4|0
+Skincare|Sheet face masks|1|1|0|0|1|0|0|0|5|3|1|2|3|0
+Haircare|Silk scrunchies|1|1|0|0|0|0|0|0|5|3|1|3|3|0
+Haircare|Hot-air brush|3|2|0|1|0|0|1|0|5|5|0|2|4|0
+Haircare|Detangling brush|1|1|0|0|0|0|1|0|5|4|0|2|3|0
+Nails|Press-on nails|1|1|0|0|1|1|0|0|5|5|1|3|4|0
+Nails|UV/LED nail lamp|2|2|0|1|1|0|0|0|5|4|0|1|3|0
+Nails|Manicure tool kit|1|1|0|0|0|0|0|0|5|2|0|2|3|0
+Men's grooming|Beard oil kit|2|1|1|0|1|0|0|0|5|3|1|3|3|0
+Men's grooming|Beard trimmer|3|1|0|1|0|0|1|0|5|3|0|1|4|0
+Men's grooming|Shaving brush set|2|1|0|0|0|0|0|0|4|2|0|3|2|0
+Wellness|Posture corrector|2|1|0|0|1|1|0|0|5|5|0|1|4|0
+Wellness|Acupressure mat|2|2|0|0|1|0|0|0|4|4|0|2|3|0
+Wellness|Blue-light glasses|2|1|1|0|1|0|0|0|5|3|0|2|3|0
+Supplements|Collagen powder|2|2|0|0|1|0|0|0|5|4|1|3|4|0
+Supplements|Magnesium capsules|2|1|0|0|1|0|0|0|5|3|1|3|4|0
+Supplements|Vitamin gummies|2|1|0|0|1|0|0|0|5|4|1|3|4|0
+Sexual wellness|Couples massager|3|1|0|1|1|0|0|0|5|1|0|2|4|0
+Sexual wellness|Personal lubricant|1|1|0|0|1|0|0|0|5|1|1|2|4|0
+Sexual wellness|Intimacy game cards|2|1|0|0|1|0|0|0|4|1|0|3|3|0
+Older adults|Weekly pill organiser|1|1|0|0|1|0|0|0|5|2|0|1|3|0
+Older adults|Jar opener|1|1|0|0|0|0|0|0|4|3|0|1|2|0
+Older adults|Grabber reacher|2|2|0|0|0|0|0|0|4|3|0|1|3|0
+Mobility aids|Folding walking stick|2|2|0|0|1|1|0|0|4|2|0|2|3|0
+Mobility aids|Long-handled shoe horn|1|2|0|0|0|0|0|0|4|1|0|1|2|0
+Mobility aids|Bed assist rail|3|3|0|0|1|0|0|0|3|2|0|1|3|0
+Party & events|Balloon arch kit|2|2|0|0|1|0|0|1|5|4|0|2|4|0
+Party & events|Personalised party banner|2|1|0|0|0|0|0|1|4|3|0|5|3|1
+Party & events|Photo booth props|1|1|0|0|0|0|0|1|4|3|0|2|2|0
+Weddings|Personalised welcome sign|3|2|1|0|0|0|0|1|4|3|0|5|3|1
+Weddings|Wedding guest book alternative|3|2|0|0|0|0|0|1|4|3|0|5|3|1
+Weddings|Personalised favour tags|1|1|0|0|0|0|0|1|4|2|0|5|2|1
+Christmas|Personalised bauble|2|1|1|0|0|0|0|2|5|3|0|5|4|1
+Christmas|Refillable advent calendar box|3|3|0|0|0|0|0|2|4|3|0|3|3|0
+Christmas|Christmas jumper|2|2|0|0|0|1|0|2|5|3|0|3|4|1
+St Patrick's Day|Shamrock accessories|1|1|0|0|0|0|0|2|5|2|0|2|3|0
+St Patrick's Day|Novelty green hat|1|1|0|0|0|1|0|2|5|2|0|2|3|0
+St Patrick's Day|Irish tricolour flag|1|1|0|0|0|0|0|2|5|1|0|1|3|0
+Halloween|Adult costume|2|2|0|0|0|1|1|2|5|4|0|2|4|0
+Halloween|Outdoor decorations|2|3|0|0|0|0|0|2|5|3|0|2|3|0
+Halloween|Pumpkin carving kit|1|1|0|0|0|0|0|2|4|4|0|1|3|0
+Personalised gifts|Custom photo book|3|2|0|0|0|0|0|1|5|3|0|5|4|1
+Personalised gifts|Custom star-map print|3|1|0|0|0|0|0|1|5|3|0|4|4|1
+Personalised gifts|Custom photo jigsaw|2|2|0|0|0|0|0|1|4|3|0|5|3|1
+Crafts|Diamond painting kit|2|2|0|0|0|0|0|1|5|4|1|2|4|0
+Crafts|Beginner embroidery kit|2|1|0|0|0|0|0|1|4|4|0|3|3|0
+Crafts|Paint-by-numbers kit|2|2|0|0|0|0|0|1|5|4|0|2|4|0
+Aran knitting|Aran yarn and pattern kit|3|2|0|0|0|0|0|1|3|3|1|4|3|0
+Aran knitting|Aran stitch pattern booklet (own design)|2|1|0|0|0|0|0|0|2|2|0|4|2|1
+Aran knitting|Wooden knitting needle set|2|1|0|0|0|0|0|0|4|2|0|2|2|0
+Puzzles & games|Irish landscape jigsaw (own photography)|2|2|0|0|0|0|0|1|3|3|0|4|2|1
+Puzzles & games|Irish slang card game (own design)|2|1|0|0|0|0|0|1|3|4|0|4|3|1
+Puzzles & games|Trivia board game|3|3|0|0|1|0|1|1|4|3|0|3|3|0
+Music accessories|Guitar capo|1|1|0|0|0|0|0|0|5|2|0|1|3|0
+Music accessories|Personalised guitar strap|2|1|0|0|0|0|0|0|4|3|0|4|2|1
+Music accessories|Guitar humidifier|1|1|0|0|0|0|0|0|3|2|1|1|1|0
+Irish trad music|Tin whistle beginner kit|2|1|0|0|1|0|0|1|3|4|0|3|3|0
+Irish trad music|Bodhrán tipper|1|1|0|0|0|0|0|0|2|3|0|3|1|0
+Irish trad music|Tune book print|2|1|0|0|0|0|0|0|2|2|0|4|1|1
+Reading|Clip-on book light|1|1|0|1|0|0|0|0|5|3|0|1|3|0
+Reading|Padded book sleeve|2|1|0|0|0|0|0|0|4|3|0|4|3|0
+Reading|Personalised bookmark|1|1|0|0|0|0|0|0|4|2|0|5|2|1
+Irish language learning|Gaeilge vocabulary flashcards (own)|2|1|0|0|0|0|0|0|2|3|0|4|2|1
+Irish language learning|Gaeilge phrase wall print|2|1|0|0|0|0|0|0|3|3|0|4|2|1
+Irish language learning|Bilingual kids board book|2|2|0|0|1|0|0|0|2|3|0|4|2|0
+Photography|Phone tripod with remote|2|2|0|1|0|0|0|0|5|3|0|1|4|0
+Photography|Ring light|2|2|1|1|0|0|0|0|5|3|0|1|3|0
+Photography|Lens cleaning kit|1|1|0|0|1|0|0|0|4|1|1|1|2|0
+Maker & 3D printing|3D printer filament|2|2|0|0|0|0|0|0|4|2|1|1|3|0
+Maker & 3D printing|Precision screwdriver kit|2|1|0|0|0|0|1|0|5|3|0|1|3|0
+Maker & 3D printing|Parts organiser case|2|2|0|0|0|0|0|0|4|2|0|1|2|0
+DIY tools|Cross-line laser level|3|2|0|1|1|0|0|0|4|4|0|1|3|0
+DIY tools|Electronic stud finder|2|1|0|1|0|0|0|0|4|3|0|1|3|0
+DIY tools|Tool roll bag|2|2|0|0|0|0|0|0|4|2|0|3|2|0
+Bike repair|Bike multi-tool|2|1|0|0|0|0|0|0|4|2|0|2|3|0
+Bike repair|Mini bike pump|2|1|0|0|0|0|0|0|5|2|0|1|3|0
+Bike repair|Tubeless repair kit|1|1|0|0|0|0|0|0|4|3|1|1|2|0
+E-scooter|Scooter phone mount|1|1|0|0|0|0|0|0|4|2|0|1|2|0
+E-scooter|Folding scooter lock|2|2|0|0|0|0|0|0|4|3|0|1|3|0
+E-scooter|Scooter handlebar bag|2|1|0|0|0|0|0|0|4|2|0|2|2|0
+Home security|Door stop alarm|1|1|0|1|0|0|0|0|4|4|0|1|3|0
+Home security|Window contact alarms|1|1|0|1|0|0|0|0|4|2|0|1|2|0
+Home security|Fireproof document bag|2|1|0|0|1|0|0|0|4|3|0|1|3|0
+Zero waste|Reusable produce bags|1|1|0|0|1|0|0|0|4|2|0|2|2|0
+Zero waste|Bamboo travel cutlery set|1|1|0|0|1|0|0|0|4|2|0|2|2|0
+Zero waste|Refillable glass spray bottles|2|2|1|0|0|0|0|0|4|3|0|3|2|0
+Hydration|Insulated steel water bottle|2|2|0|0|1|0|1|0|5|3|0|4|4|0
+Hydration|Filter water jug|2|3|1|0|1|0|1|0|4|2|1|1|3|0
+Hydration|Fruit infuser bottle|1|1|0|0|1|0|0|0|5|3|0|2|3|0
+Meal prep|Stackable bento box|2|2|0|0|1|0|0|0|4|3|0|2|3|0
+Meal prep|Glass meal prep containers|2|3|1|0|1|0|0|0|4|3|0|1|3|0
+Meal prep|Insulated lunch bag|2|1|0|0|0|0|0|0|4|2|0|3|3|0
+Home bar|Cocktail shaker kit|3|2|0|0|1|0|0|1|4|4|0|3|3|0
+Home bar|Whiskey stones set|2|2|0|0|1|0|0|1|4|3|0|3|3|0
+Home bar|Engraved whiskey glass|2|2|1|0|1|0|0|1|4|3|0|5|3|1
+Irish whiskey fans|Whiskey tasting glass set|3|2|1|0|1|0|0|1|3|3|0|3|2|0
+Irish whiskey fans|Irish distilleries map print|2|1|0|0|0|0|1|1|3|2|0|4|2|1
+Irish whiskey fans|Barrel-stave coasters|2|2|0|0|1|0|0|1|3|3|0|3|2|0
+Tea|Loose-leaf tea infuser|1|1|0|0|1|0|0|0|4|2|0|2|2|0
+Tea|Personalised tea caddy|2|1|0|0|1|0|0|1|3|2|0|4|2|1
+Tea|Cast-iron teapot|3|3|1|0|1|0|0|0|4|2|0|2|2|0
+Genealogy|Family tree chart print (fill-in or bespoke)|3|1|0|0|0|0|0|1|3|3|0|5|3|1
+Genealogy|Ancestry research journal|2|1|0|0|0|0|0|0|3|2|0|4|2|1
+Genealogy|Archival document storage box|2|2|0|0|0|0|0|0|2|2|0|2|2|0
+Memorial|Memorial remembrance print|3|1|0|0|0|0|0|0|3|2|0|5|3|1
+Memorial|Memorial ornament|2|1|1|0|0|0|0|1|3|2|0|5|2|1
+Memorial|Pet memorial frame|3|2|1|0|0|0|0|0|3|2|0|5|3|1
+New communities in Ireland|Dual home-country / Irish-town map print|3|1|0|0|0|0|0|0|2|3|0|5|2|1
+New communities in Ireland|Bilingual name print|2|1|0|0|0|0|0|0|2|2|0|5|2|1
+New communities in Ireland|Irish-life phrasebook cards|2|1|0|0|0|0|0|0|2|3|0|4|1|1
+Tourist souvenirs|Illustrated Wild Atlantic Way map print|2|1|0|0|0|0|1|1|3|2|0|4|3|1
+Tourist souvenirs|Aran-style wool scarf|3|1|0|0|0|0|1|1|4|2|0|3|3|0
+Tourist souvenirs|Irish blessing tea towel|2|1|0|0|0|0|0|1|4|2|0|3|3|1
+Office gifts|Personalised desk name plate|2|2|0|0|0|0|0|0|4|2|0|5|2|1
+Office gifts|Custom company-logo notebook|2|2|0|0|0|0|0|0|3|2|0|4|2|1
+Office gifts|Retirement map print (hometown)|3|1|0|0|0|0|0|0|3|2|0|5|2|1
+Student housing|Rental-safe adhesive hooks|1|1|0|0|0|0|0|0|5|3|0|1|3|0
+Student housing|Door-mounted over-door hanger|1|2|0|0|0|0|0|0|4|2|0|1|2|0
+Student housing|Mini desk fan|1|1|0|1|0|0|0|0|5|2|0|1|2|0
