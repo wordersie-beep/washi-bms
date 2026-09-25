@@ -1,5 +1,11 @@
 // =====================================================================================================
-//  QuantAI_Universal_V5_Ultimate — адаптивный AI-cBot для cTrader (API 4.x / cTrader.Automate)
+//  QuantAI_Universal_V5_1 (версия 5.1) — адаптивный AI-cBot для cTrader (API 4.x / cTrader.Automate)
+//
+//  ИСТОРИЯ ВЕРСИЙ
+//   5.1 — исправлен ключ памяти AI в LocalStorage (cTrader допускает только латиницу, цифры и пробелы;
+//         прежний ключ с символом '|' отвергался, и память не читалась и не сохранялась).
+//         Номер версии теперь в имени файла, в названии бота и в журнале.
+//   5.0 — первая версия: ансамбль из 5 стратегий, Naive Bayes, RL-веса, фильтр режима.
 //
 //  Один файл. Работает на любом инструменте графика: BTCUSD, ETHUSD, XAUUSD, EURUSD и т. д.
 //  Все расстояния (стоп, цель, трейлинг, допустимый спред) выражены в ATR(14) — поэтому один и тот же
@@ -107,7 +113,7 @@ namespace cAlgo.Robots
         public double TrendSlopeSign;    // знак наклона EMA20
         public double PTrend;            // вероятность трендового режима
         public double RegimeConfidence;  // |2·PTrend − 1|
-        public readonly StrategyVote[] Votes = new StrategyVote[QuantAI_Universal_V5_Ultimate.StrategyCount];
+        public readonly StrategyVote[] Votes = new StrategyVote[QuantAI_Universal_V5_1.StrategyCount];
         public int EnsembleDirection;
         public double EnsembleScore;     // 0..1
         public int AgreeingCount;
@@ -305,8 +311,11 @@ namespace cAlgo.Robots
     // =================================================================================================
 
     [Robot(AccessRights = AccessRights.None, TimeZone = TimeZones.UTC, AddIndicators = true)]
-    public class QuantAI_Universal_V5_Ultimate : Robot
+    public class QuantAI_Universal_V5_1 : Robot
     {
+        /// <summary>Версия бота — печатается в журнале при запуске. Меняется с каждой выпущенной версией.</summary>
+        public const string BotVersion = "5.1";
+
         public const int StrategyCount = 5;
 
         private static readonly string[] StrategyNames =
@@ -522,7 +531,7 @@ namespace cAlgo.Robots
             Positions.Closed += OnPositionClosed;
             RebuildMetaForOpenPositions();
 
-            Print("QuantAI_Universal_V5_Ultimate запущен: " + SymbolName + " " + TimeFrame +
+            Print("QuantAI_Universal версия " + BotVersion + " запущена: " + SymbolName + " " + TimeFrame +
                   ", баров истории " + Bars.Count + ".");
             PrintStatus(Bars.Count - 2, null);
         }
@@ -530,7 +539,7 @@ namespace cAlgo.Robots
         protected override void OnStop()
         {
             SaveMemory();
-            Print("Остановлен. Память AI сохранена. " + BuildStatsLine());
+            Print("Версия " + BotVersion + " остановлена. Память AI сохранена. " + BuildStatsLine());
         }
 
         protected override void OnTick()
