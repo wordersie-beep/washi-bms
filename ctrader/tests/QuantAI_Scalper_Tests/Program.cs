@@ -29,6 +29,7 @@ namespace Harness
             TickEngineTests();
             CalibratorTests();
             SpreadTests();
+            CommissionTests();
             VolumeTests();
             SqueezeTests();
             SweepTests();
@@ -185,6 +186,28 @@ namespace Harness
             for (int i = 0; i < 10; i++) t.Add(0.00001);
             Check(t.Count == 5, "window capped at capacity");
             Near(t.Median(), 0.00001, 1e-15, "old values leave the window");
+        }
+
+        private static void CommissionTests()
+        {
+            const double eurusd = 1.08, usdToEur = 1.0 / 1.08, pipValueEur = 0.0001 * usdToEur;
+            double rt = CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerMillionUsd, 30, eurusd, 100000, usdToEur, true, false, false);
+            Near(rt, 2 * 30 * eurusd / 1e6 * usdToEur, 1e-15, "EURUSD, EUR account: 30 USD per million per side");
+            Near(rt / pipValueEur, 0.648, 0.001, "Pepperstone-like Razor cost ~0.65 pip round turn");
+            rt = CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerLot, 3, eurusd, 100000, usdToEur, true, false, false);
+            Near(rt / pipValueEur, 0.6, 1e-9, "3 USD per lot per side = 0.6 pip round turn on EURUSD");
+            rt = CommissionMath.RoundTurnPerUnit(CommissionBasis.QuotePerLot, 3, eurusd, 100000, usdToEur, true, false, false);
+            Near(rt / pipValueEur, 0.6, 1e-9, "quote currency per lot");
+            rt = CommissionMath.RoundTurnPerUnit(CommissionBasis.PercentOfVolume, 0.002, eurusd, 100000, usdToEur, true, false, false);
+            Near(rt, 2 * 0.002 / 100 * eurusd * usdToEur, 1e-15, "percentage of traded volume");
+            const double usdjpy = 150.0, jpyToEur = 1.0 / 162.0;
+            rt = CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerMillionUsd, 30, usdjpy, 100000, jpyToEur, false, true, false);
+            Near(rt, 2 * 30 / 1e6 * (usdjpy * jpyToEur), 1e-15, "USD base currency: notional is one USD per unit");
+            Check(CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerMillionUsd, 30, 0.85, 100000, 1.18, false, false, false) == 0,
+                "no USD leg and no USD account: unknown, 0");
+            rt = CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerMillionUsd, 30, 0.85, 100000, 1.27, false, false, true);
+            Near(rt, 2 * 30 / 1e6 * 0.85 * 1.27, 1e-15, "USD account: notional converted through the quote currency");
+            Check(CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerLot, 0, eurusd, 100000, usdToEur, true, false, false) == 0, "no commission (Standard account)");
         }
 
         private static void VolumeTests()

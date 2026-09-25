@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  QuantAI_Scalper_M1_MicroDepot_Pro  v1.1.0
+//  QuantAI_Scalper_M1_MicroDepot_Pro  v1.2.0
 //  cTrader Automate cBot | EURUSD M1/M5 micro-impulse scalper for small (50 EUR) accounts
 //  Needs cTrader 5.0+ (Algo API 1.0.9+): Windows, Mac, Web and Mobile, local or cloud. C# 7.3 syntax only.
 //  Ready to run: a new instance opens on EURUSD m1 and every parameter below already holds its working value.
@@ -48,7 +48,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_M1_MicroDepot_Pro : Robot
     {
-        private const string BotVersion = "1.1.0";
+        private const string BotVersion = "1.2.0";
 
         #region Parameters
 
@@ -243,6 +243,9 @@ namespace cAlgo.Robots
         [Parameter("Show Chart HUD", Group = "7. Log & Display", DefaultValue = true)]
         public bool ShowHud { get; set; }
 
+        [Parameter("Status Summary Every (min, 0 = off)", Group = "7. Log & Display", DefaultValue = 15, MinValue = 0)]
+        public int StatusEveryMinutes { get; set; }
+
         #endregion
 
         #region Technical constants
@@ -253,6 +256,8 @@ namespace cAlgo.Robots
         private const int CalibrationMinBars = 3;        // calibration is applied once this many full bars were seen
         private const int SpreadWindowTicks = 500;       // in-session spreads kept for the rolling median
         private const int SpreadCalibrationTicks = 300;  // in-session ticks before the AI is retrained on the live spread
+        private const int TypicalAtrBars = 60;           // ATR bars averaged when judging whether the spread fits the strategy
+        private const int MarginFitIterations = 20;      // volume steps tried when dynamic leverage makes margin non-linear
         private const int MaxNoMoneyRetries = 2;         // halve the volume and retry after a "no money" reject
         private const double RetryDelaySeconds = 1.0;    // first pause before retrying a failed close/modify
         private const double MaxRetryDelaySeconds = 60.0; // the pause doubles per failure up to this
@@ -284,8 +289,13 @@ namespace cAlgo.Robots
         private bool _calBarFull;
         private double _baselineTicksPerBar;
         private SpreadTracker _spreads;
+        private bool _spreadChecked;
         private bool _spreadCalibrated;
+        private bool _spreadWarning;
         private double _bootstrapSpread;
+        private double _commissionPerUnit;      // round-turn commission per unit, account currency
+        private string _commissionSource = "none";
+        private bool _isPepperstone;
 
         private GaussianNaiveBayes _ai;
         private bool _aiWasReady;
@@ -334,6 +344,16 @@ namespace cAlgo.Robots
         private bool _quiet;
         private bool _hudEnabled;
         private DateTime _lastErrorLog = DateTime.MinValue;
+
+        private DateTime _nextStatus = DateTime.MinValue;
+        private DateTime _statusSince;
+        private int _statusSignals;
+        private int _statusTrades;
+        private int _statusSqz;
+        private int _statusSwp;
+        private readonly HashSet<string> _statusKeys = new HashSet<string>();
+        private readonly Dictionary<string, int> _statusReasons = new Dictionary<string, int>();
+        private bool? _wasInSession;
 
         private int _statTrades;
         private int _statWins;
@@ -384,12 +404,17 @@ namespace cAlgo.Robots
             _calib = new TickCalibrator(CalibrationWindowBars);
             _ai = new GaussianNaiveBayes(AiFeatures.Dim, AiTrainingBars * 2);
             _engineStart = Server.Time;
+            _statusSince = Server.Time;
             _spreads = new SpreadTracker(SpreadWindowTicks);
             _hBuf = new double[AiHorizonBars];
             _lBuf = new double[AiHorizonBars];
             _winH = new double[SqueezeBars];
             _winL = new double[SqueezeBars];
             _hudEnabled = ShowHud && (RunningMode == RunningMode.RealTime || RunningMode == RunningMode.VisualBacktesting);
+
+            _isPepperstone = Account.BrokerName != null && Account.BrokerName.IndexOf("pepperstone", StringComparison.OrdinalIgnoreCase) >= 0;
+            _commissionPerUnit = CommissionEstimatePerUnit();
+            _commissionSource = _commissionPerUnit > 0 ? "symbol info" : "none reported";
 
             ResetDay(Server.Time);
             LogBanner();
@@ -415,6 +440,7 @@ namespace cAlgo.Robots
                 _lastRiskClosed = _risk.OpenTimes[_risk.Count - 2];
 
             Timer.Start(TimeSpan.FromSeconds(1));
+            CheckSessionTransition(Server.Time);
             UpdateHud();
         }
 
@@ -447,6 +473,8 @@ namespace cAlgo.Robots
                 CheckNewDay(Server.Time);
                 CheckDailyLoss();
                 ManagePositions();
+                CheckSessionTransition(Server.Time);
+                EmitStatusIfDue(Server.Time);
                 UpdateHud();
             }
             catch (Exception ex)
@@ -547,15 +575,60 @@ namespace cAlgo.Robots
         /// </summary>
         private void CheckSpreadCalibration()
         {
-            if (_spreadCalibrated || AiTrainSpreadPips > 0 || _spreads.Count < SpreadCalibrationTicks)
+            if (_spreadChecked || _spreads.Count < SpreadCalibrationTicks)
+                return;
+            _spreadChecked = true;
+            double live = _spreads.Median();
+            CheckSpreadFitsStrategy(live);
+            if (AiTrainSpreadPips > 0)
                 return;
             _spreadCalibrated = true;
-            double live = _spreads.Median();
             Log("AI RETRAIN: live in-session spread median " + Pips(live) + " over " + _spreads.Count + " ticks (start-up bootstrap used "
                 + Pips(_bootstrapSpread) + ") - rebuilding the model from history");
             _ai = new GaussianNaiveBayes(AiFeatures.Dim, AiTrainingBars * 2);
             _pending.Clear();
             TrainFromHistory();
+        }
+
+        /// <summary>
+        /// A typical in-session spread above Max Spread / ATR x typical ATR means nearly every signal will be
+        /// skipped. That is the signature of a mark-up (Standard) account, so it is reported once, loudly.
+        /// </summary>
+        private void CheckSpreadFitsStrategy(double typicalSpread)
+        {
+            double typicalAtr = MeanRiskAtr(TypicalAtrBars);
+            if (!(typicalAtr > 0) || !(typicalSpread >= 0))
+                return;
+            double limit = MaxSpreadToAtr * typicalAtr;
+            if (typicalSpread <= limit)
+            {
+                Log("SPREAD CHECK OK: typical in-session spread " + Pips(typicalSpread) + " <= " + Pct(MaxSpreadToAtr) + " of the typical ATR "
+                    + Pips(typicalAtr) + " (" + Pips(limit) + "); round-turn commission " + CommissionText());
+                return;
+            }
+            _spreadWarning = true;
+            Log("WARNING: typical in-session spread " + Pips(typicalSpread) + " is above " + Pct(MaxSpreadToAtr) + " of the typical ATR "
+                + Pips(typicalAtr) + " (" + Pips(limit) + "), so almost every signal will be skipped as 'Spread too high'. "
+                + (_isPepperstone
+                    ? "This looks like a Pepperstone Standard account (1 pip mark-up); the strategy is built for a Pepperstone Razor account (raw spread + commission)."
+                    : "The strategy is built for a raw-spread (ECN) account with commission."));
+        }
+
+        private double MeanRiskAtr(int bars)
+        {
+            int last = _risk.Count - 2;
+            double sum = 0.0;
+            int n = 0;
+            for (int i = last; i >= 0 && n < bars; i--)
+            {
+                double v = _atrRisk.Result[i];
+                if (Valid(v) && v > 0)
+                {
+                    sum += v;
+                    n++;
+                }
+            }
+            return n > 0 ? sum / n : 0.0;
         }
 
         private void TrainFromHistory()
@@ -770,6 +843,7 @@ namespace cAlgo.Robots
                 if (q.Ok)
                 {
                     _sqzArmed = true;
+                    _statusSqz++;
                     _sqzHigh = q.BoxHigh;
                     _sqzLow = q.BoxLow;
                     _sqzStart = _sig.OpenTimes[start];
@@ -839,6 +913,7 @@ namespace cAlgo.Robots
                 if (SweepDetector.IsBullSweep(priorLow, lo, cl, minPierce, SweepRequireCloseInside))
                 {
                     _bullSweep = true;
+                    _statusSwp++;
                     _bullExtreme = lo;
                     _bullBarsLeft = SweepMaxBarsToReclaim;
                     _bullTime = _sig.OpenTimes[c];
@@ -848,6 +923,7 @@ namespace cAlgo.Robots
                 if (SweepDetector.IsBearSweep(priorHigh, hi, cl, minPierce, SweepRequireCloseInside))
                 {
                     _bearSweep = true;
+                    _statusSwp++;
                     _bearExtreme = hi;
                     _bearBarsLeft = SweepMaxBarsToReclaim;
                     _bearTime = _sig.OpenTimes[c];
@@ -1032,6 +1108,7 @@ namespace cAlgo.Robots
                 }
             }
 
+            RecordSignal(SignalKey(tag), codes.ToString());
             if (reasons.Count > 0)
             {
                 LogSkip(tag, level, codes.ToString(), reasons);
@@ -1077,6 +1154,11 @@ namespace cAlgo.Robots
             return UseTickVelocity ? TickWindowSeconds : 0.0;
         }
 
+        private string SignalKey(string tag)
+        {
+            return tag + "|" + _sig.OpenTimes[_sig.Count - 1].Ticks.ToString(Inv);
+        }
+
         private static void AddReason(List<string> reasons, StringBuilder codes, string code, string text)
         {
             reasons.Add(text);
@@ -1103,7 +1185,15 @@ namespace cAlgo.Robots
             double tp1Pips = Math.Round(Tp1AtrMultiplier * atrR / pip, 1);
             if (slPips <= 0 || tp1Pips <= 0)
             {
+                RecordSignal(SignalKey(tag), "DIST");
                 LogSkip(tag, level, "DIST", new List<string> { "SL/TP distance rounds to zero (ATR " + Pips(atrR) + ")" });
+                return false;
+            }
+            double minStopPips = BrokerMinDistancePips(true);
+            if (minStopPips > 0 && slPips < minStopPips - 1e-9)
+            {
+                RecordSignal(SignalKey(tag), "MINSL");
+                LogSkip(tag, level, "MINSL", new List<string> { "SL " + F(slPips, 1) + "p is closer than the broker minimum stop distance " + F(minStopPips, 1) + "p" });
                 return false;
             }
 
@@ -1111,6 +1201,7 @@ namespace cAlgo.Robots
             double volume = ComputeVolume(type, slPips, out sizing);
             if (volume <= 0)
             {
+                RecordSignal(SignalKey(tag), "SIZE");
                 LogSkip(tag, level, "SIZE", new List<string> { sizing });
                 return false;
             }
@@ -1127,6 +1218,9 @@ namespace cAlgo.Robots
                     tpPips = tp1Pips;
                 else if (Tp2AtrMultiplier > 0)
                     tpPips = Math.Round(Tp2AtrMultiplier * atrR / pip, 1);
+                double minTpPips = BrokerMinDistancePips(false);
+                if (tpPips.HasValue && minTpPips > 0 && tpPips.Value < minTpPips - 1e-9)
+                    tpPips = null;   // too close for a server-side TP: the bot closes at the target itself
 
                 string comment = "QAI|" + setup + "|c=" + (double.IsNaN(conf) ? "na" : F(conf, 2)) + "|v=" + F(volume, 0)
                                  + "|s=" + F(slPips, 1) + "|t=" + F(tp1Pips, 1);
@@ -1142,6 +1236,7 @@ namespace cAlgo.Robots
 
             if (result == null || !result.IsSuccessful || result.Position == null)
             {
+                RecordSignal(SignalKey(tag), "ORDER");
                 Log("ORDER FAILED [" + tag + "]: " + (result != null && result.Error.HasValue ? result.Error.Value.ToString() : "no position returned")
                     + " | " + sizing);
                 return false;
@@ -1162,6 +1257,7 @@ namespace cAlgo.Robots
             st.Confidence = conf;
             _trades[p.Id] = st;
             _tradesToday++;
+            _statusTrades++;
             ConsumeSetup(setup, type);
 
             // Never keep a position without a stop: attach it if the fill came back without one, else flatten.
@@ -1180,12 +1276,21 @@ namespace cAlgo.Robots
                 Log("PROTECTION #" + p.Id + ": fill came back without a stop -> SL attached at " + P(slPrice));
             }
 
+            string commissionNote = "";
+            if (p.VolumeInUnits > 0 && Math.Abs(p.Commissions) > 0)
+            {
+                _commissionPerUnit = 2.0 * Math.Abs(p.Commissions) / p.VolumeInUnits;
+                _commissionSource = "last fill";
+                commissionNote = " | commission " + F(2.0 * Math.Abs(p.Commissions), 2) + " " + _ccy + " round turn (" + CommissionText() + ")";
+            }
+
             string tp1Text = plan.Splittable
                 ? Lots(plan.PartialVolume) + " (" + F(plan.PartialVolume / st.InitialVolume * 100.0, 0) + "%), runner " + Lots(plan.RemainingVolume)
                 : (closeAllAtTp1 ? "100% (volume cannot be split)" : "none closed - whole position trails (volume cannot be split)");
             Log("ENTRY " + tag + " #" + p.Id + " " + Lots(p.VolumeInUnits) + " @" + P(p.EntryPrice) + " | SL " + P(p.StopLoss) + " (" + F(slPips, 1)
                 + "p = " + F(SlAtrMultiplier, 2) + " ATR) | TP1 " + P(TargetPrice(p, st.Tp1Dist)) + " (" + F(tp1Pips, 1) + "p) closes " + tp1Text
-                + " | conf " + (double.IsNaN(conf) ? "n/a (AI off)" : Pct(conf) + " " + aiInfo) + " | TV " + F(burst, 2) + "x | " + sizing);
+                + " | conf " + (double.IsNaN(conf) ? "n/a (AI off)" : Pct(conf) + " " + aiInfo) + " | TV " + F(burst, 2) + "x | " + sizing
+                + commissionNote);
             DrawEntry(p);
             return true;
         }
@@ -1218,7 +1323,10 @@ namespace cAlgo.Robots
             _swpNote = SweepNote();
         }
 
-        /// <summary>Risk-based volume in units, bounded by the lot floor/cap and by free margin.</summary>
+        /// <summary>
+        /// Risk-based volume in units: the loss at the stop plus the round-turn commission equals Risk Percent
+        /// of the balance; then bounded by the lot floor/cap and by the margin the broker will block.
+        /// </summary>
         private double ComputeVolume(TradeType type, double slPips, out string note)
         {
             double balance = Account.Balance;
@@ -1232,10 +1340,12 @@ namespace cAlgo.Robots
             }
 
             double riskMoney = balance * RiskPercent / 100.0;
-            double raw = riskMoney / (slPips * pipValue);
-            var sb = new StringBuilder(160);
-            sb.Append("size: risk ").Append(F(riskMoney, 2)).Append(' ').Append(_ccy).Append(" / (").Append(F(slPips, 1)).Append("p x ")
-              .Append(F(pipValue * Symbol.LotSize, 2)).Append(' ').Append(_ccy).Append("/pip/lot) = ").Append(F(raw, 0)).Append('u');
+            double lossPerUnit = slPips * pipValue + _commissionPerUnit;
+            double raw = riskMoney / lossPerUnit;
+            var sb = new StringBuilder(200);
+            sb.Append("size: risk ").Append(F(riskMoney, 2)).Append(' ').Append(_ccy).Append(" / (SL ").Append(F(slPips, 1)).Append("p + commission ")
+              .Append(F(_commissionPerUnit / pipValue, 1)).Append("p, ").Append(F(pipValue * Symbol.LotSize, 2)).Append(' ').Append(_ccy)
+              .Append("/pip/lot) = ").Append(F(raw, 0)).Append('u');
 
             double units = VolumeMath.FloorToStep(raw, step);
             double cap = Math.Min(Symbol.VolumeInUnitsMax, Symbol.QuantityToVolumeInUnits(MaxLots));
@@ -1256,32 +1366,128 @@ namespace cAlgo.Robots
                 sb.Append(" -> Min Lots floor");
             }
 
-            double leverage = EffectiveLeverage();
-            if (leverage > 0)
+            double budget = Account.FreeMargin * MaxMarginUsePercent / 100.0;
+            string how;
+            double need = EstimateMargin(type, units, out how);
+            if (need > budget + VolumeEpsilon)
             {
-                double price = type == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
-                double marginPerUnit = price * (pipValue / Symbol.PipSize) / leverage;
-                double budget = Account.FreeMargin * MaxMarginUsePercent / 100.0;
-                if (marginPerUnit > 0 && units * marginPerUnit > budget + VolumeEpsilon)
+                double byMargin = VolumeMath.FloorToStep(budget / (need / units), step);
+                // Dynamic leverage can make margin grow faster than volume: step down until it fits.
+                for (int i = 0; i < MarginFitIterations && byMargin >= vMin - VolumeEpsilon; i++)
                 {
-                    double byMargin = VolumeMath.FloorToStep(budget / marginPerUnit, step);
-                    if (byMargin < vMin - VolumeEpsilon)
-                    {
-                        note = sb.Append(" -> Insufficient margin: ").Append(Lots(vMin)).Append(" needs ").Append(F(vMin * marginPerUnit, 2))
-                                 .Append(' ').Append(_ccy).Append(", budget ").Append(F(budget, 2)).Append(' ').Append(_ccy).Append(" (")
-                                 .Append(F(MaxMarginUsePercent, 0)).Append("% of free margin, leverage 1:").Append(F(leverage, 0)).Append(')').ToString();
-                        return 0.0;
-                    }
-                    units = byMargin;
-                    sb.Append(" -> margin cap (1:").Append(F(leverage, 0)).Append(')');
+                    if (EstimateMargin(type, byMargin, out how) <= budget + VolumeEpsilon)
+                        break;
+                    byMargin = VolumeMath.FloorToStep(byMargin - step, step);
                 }
+                if (byMargin < vMin - VolumeEpsilon)
+                {
+                    note = sb.Append(" -> Insufficient margin: ").Append(Lots(vMin)).Append(" needs ").Append(F(EstimateMargin(type, vMin, out how), 2))
+                             .Append(' ').Append(_ccy).Append(", budget ").Append(F(budget, 2)).Append(' ').Append(_ccy).Append(" (")
+                             .Append(F(MaxMarginUsePercent, 0)).Append("% of free margin, ").Append(how).Append(')').ToString();
+                    return 0.0;
+                }
+                units = byMargin;
+                sb.Append(" -> margin cap (").Append(how).Append(')');
             }
 
-            double effectiveRisk = units * slPips * pipValue;
-            sb.Append(" = ").Append(Lots(units)).Append(", risk ").Append(F(effectiveRisk, 2)).Append(' ').Append(_ccy)
-              .Append(" (").Append(F(effectiveRisk / balance * 100.0, 2)).Append("%)");
+            double effectiveRisk = units * lossPerUnit;
+            sb.Append(" = ").Append(Lots(units)).Append(", risk incl. commission ").Append(F(effectiveRisk, 2)).Append(' ').Append(_ccy)
+              .Append(" (").Append(F(effectiveRisk / balance * 100.0, 2)).Append("%), margin ").Append(F(EstimateMargin(type, units, out how), 2))
+              .Append(' ').Append(_ccy);
             note = sb.ToString();
             return units;
+        }
+
+        /// <summary>Margin the broker blocks for the volume: the platform's own figure unless a leverage is forced in the UI.</summary>
+        private double EstimateMargin(TradeType type, double units, out string how)
+        {
+            if (LeverageOverride <= 0)
+            {
+                try
+                {
+                    double m = Symbol.GetEstimatedMargin(type, units);
+                    if (Valid(m) && m > 0)
+                    {
+                        how = "broker margin";
+                        return m;
+                    }
+                }
+                catch (Exception)
+                {
+                    // fall back to leverage maths below
+                }
+            }
+            double leverage = EffectiveLeverage();
+            if (!(leverage > 0))
+            {
+                how = "no leverage info";
+                return 0.0;
+            }
+            double price = type == TradeType.Buy ? Symbol.Ask : Symbol.Bid;
+            how = "leverage 1:" + F(leverage, 0);
+            return units * price * (Symbol.PipValue / Symbol.PipSize) / leverage;
+        }
+
+        /// <summary>Broker minimum distance for a stop (true) or target (false) in pips; 0 when there is none.</summary>
+        private double BrokerMinDistancePips(bool stopLoss)
+        {
+            try
+            {
+                double d = stopLoss ? Symbol.MinStopLossDistance : Symbol.MinTakeProfitDistance;
+                if (!(d > 0))
+                    return 0.0;
+                if (Symbol.MinDistanceType == SymbolMinDistanceType.Pips)
+                    return d;
+                return Symbol.Bid * d / 100.0 / Symbol.PipSize;
+            }
+            catch (Exception)
+            {
+                return 0.0;
+            }
+        }
+
+        /// <summary>Round-turn commission per unit derived from the symbol's commission settings (0 if unknown).</summary>
+        private double CommissionEstimatePerUnit()
+        {
+            try
+            {
+                CommissionBasis basis;
+                switch (Symbol.CommissionType)
+                {
+                    case SymbolCommissionType.UsdPerMillionUsdVolume:
+                        basis = CommissionBasis.UsdPerMillionUsd;
+                        break;
+                    case SymbolCommissionType.UsdPerOneLot:
+                        basis = CommissionBasis.UsdPerLot;
+                        break;
+                    case SymbolCommissionType.QuoteCurrencyPerOneLot:
+                        basis = CommissionBasis.QuotePerLot;
+                        break;
+                    case SymbolCommissionType.PercentageOfTradingVolume:
+                        basis = CommissionBasis.PercentOfVolume;
+                        break;
+                    default:
+                        return 0.0;
+                }
+                double price = Symbol.Bid > 0 ? Symbol.Bid : Symbol.Ask;
+                bool quoteUsd = Symbol.QuoteAsset != null && Symbol.QuoteAsset.Name == "USD";
+                bool baseUsd = Symbol.BaseAsset != null && Symbol.BaseAsset.Name == "USD";
+                return CommissionMath.RoundTurnPerUnit(basis, Symbol.Commission, price, Symbol.LotSize, Symbol.PipValue / Symbol.PipSize,
+                                                       quoteUsd, baseUsd, _ccy == "USD");
+            }
+            catch (Exception)
+            {
+                return 0.0;
+            }
+        }
+
+        private string CommissionText()
+        {
+            double pipValue = Symbol.PipValue;
+            if (!(_commissionPerUnit > 0) || !(pipValue > 0))
+                return "0 (" + _commissionSource + ")";
+            return F(_commissionPerUnit / pipValue, 2) + "p = " + F(_commissionPerUnit * Symbol.QuantityToVolumeInUnits(0.01), 3) + " " + _ccy
+                   + " per 0.01 lot (" + _commissionSource + ")";
         }
 
         private double EffectiveLeverage()
@@ -1768,6 +1974,139 @@ namespace cAlgo.Robots
             _dailyHalt = false;
         }
 
+        /// <summary>Counts one signal instance (setup, direction, bar) and each distinct reason that blocked it.</summary>
+        private void RecordSignal(string key, string codes)
+        {
+            if (_statusKeys.Add(key))
+                _statusSignals++;
+            foreach (string code in codes.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (!_statusKeys.Add(key + "|" + code))
+                    continue;
+                int n;
+                _statusReasons.TryGetValue(code, out n);
+                _statusReasons[code] = n + 1;
+            }
+        }
+
+        private void CheckSessionTransition(DateTime now)
+        {
+            if (!UseSessionFilter)
+                return;
+            bool inSession = InSession(now);
+            if (_wasInSession.HasValue && _wasInSession.Value == inSession)
+                return;
+            bool first = !_wasInSession.HasValue;
+            _wasInSession = inSession;
+            if (inSession)
+                Log("SESSION OPEN: entries allowed until " + SessionEndHour.ToString("00", Inv) + ":00 UTC");
+            else
+                Log("SESSION CLOSED" + (first ? " (bot started outside the session)" : "") + ": no new entries until "
+                    + SessionStartHour.ToString("00", Inv) + ":00 UTC. Session hours are the 'Session Start/End Hour (UTC)' parameters.");
+        }
+
+        /// <summary>A plain-language summary every N minutes: what formed, what fired, what blocked it, and why right now.</summary>
+        private void EmitStatusIfDue(DateTime now)
+        {
+            if (StatusEveryMinutes <= 0)
+                return;
+            if (_nextStatus == DateTime.MinValue)
+            {
+                _nextStatus = NextStatusTime(now);
+                _statusSince = now;
+                return;
+            }
+            if (now < _nextStatus)
+                return;
+            _nextStatus = NextStatusTime(now);
+            if (Symbol.MarketHours.IsOpened() || _statusSignals > 0)
+                Log("STATUS " + now.ToString("HH:mm", Inv) + " UTC | since " + _statusSince.ToString("HH:mm", Inv) + ": " + StatusCounts() + " | now: " + StatusNow(now));
+            ResetStatusCounters(now);
+        }
+
+        private DateTime NextStatusTime(DateTime now)
+        {
+            long period = TimeSpan.FromMinutes(Math.Max(1, StatusEveryMinutes)).Ticks;
+            return new DateTime((now.Ticks / period + 1) * period, now.Kind);
+        }
+
+        private void ResetStatusCounters(DateTime now)
+        {
+            _statusSince = now;
+            _statusSignals = 0;
+            _statusTrades = 0;
+            _statusSqz = 0;
+            _statusSwp = 0;
+            _statusKeys.Clear();
+            _statusReasons.Clear();
+        }
+
+        private string StatusCounts()
+        {
+            var sb = new StringBuilder(160);
+            if (_statusSqz == 0 && _statusSwp == 0)
+                sb.Append("no setup formed");
+            else
+                sb.Append("squeeze armed on ").Append(_statusSqz).Append(" bar(s), sweeps ").Append(_statusSwp);
+            sb.Append(" | signals ").Append(_statusSignals).Append(", trades ").Append(_statusTrades);
+            if (_statusReasons.Count > 0)
+            {
+                var items = new List<KeyValuePair<string, int>>(_statusReasons);
+                items.Sort((a, b) => b.Value.CompareTo(a.Value));
+                sb.Append(" | skipped by:");
+                for (int i = 0; i < items.Count; i++)
+                    sb.Append(i == 0 ? " " : ", ").Append(ReasonName(items[i].Key)).Append(' ').Append(items[i].Value);
+            }
+            return sb.ToString();
+        }
+
+        private string StatusNow(DateTime now)
+        {
+            double atr = RiskAtr();
+            double spread = Symbol.Spread;
+            double limit = MaxSpreadToAtr * atr;
+            string ai;
+            if (!UseAiFilter)
+                ai = "AI filter off";
+            else if (AiTrainSpreadPips <= 0 && !_spreadCalibrated)
+                ai = "AI calibrating spread " + _spreads.Count + "/" + SpreadCalibrationTicks;
+            else if (!_ai.IsReady(AiMinSamplesPerClass))
+                ai = "AI warming up " + _ai.Wins + "/" + _ai.Losses;
+            else
+                ai = "AI ready";
+            return "spread " + Pips(spread) + (spread <= limit ? " <= " : " > ") + "limit " + Pips(limit) + " (" + Pct(MaxSpreadToAtr) + " of ATR " + Pips(atr) + ")"
+                   + ", tick burst " + F(BurstRatio(), 2) + "x (need " + F(TickVelocityMultiplier, 2) + "x" + (UseTickVelocity ? "" : ", filter off") + ")"
+                   + ", " + ai + ", " + (InSession(now) ? "in session" : "OUT OF SESSION") + " | today " + _tradesToday + " trade(s), "
+                   + Signed(Account.Equity - _dayStartBalance, 2) + " " + _ccy;
+        }
+
+        private static string ReasonName(string code)
+        {
+            switch (code)
+            {
+                case "SPREAD": return "Spread";
+                case "TV": return "Tick velocity";
+                case "AI": return "AI confidence";
+                case "AIWARM": return "AI warming up";
+                case "AISPR": return "AI spread calibration";
+                case "AINA": return "AI features n/a";
+                case "CHASE": return "Chase";
+                case "SESSION": return "Session";
+                case "CLOSED": return "Market closed";
+                case "POS": return "Position open";
+                case "COOL": return "Cooldown";
+                case "DAY": return "Daily loss limit";
+                case "STREAK": return "Loss-streak pause";
+                case "MAXTR": return "Max trades/day";
+                case "WARM": return "Warm-up";
+                case "SIZE": return "Size/margin";
+                case "DIST": return "SL distance";
+                case "MINSL": return "Broker min stop";
+                case "ORDER": return "Order rejected";
+                default: return code;
+            }
+        }
+
         private void CheckNewDay(DateTime now)
         {
             if (now.Date == _day)
@@ -1893,6 +2232,9 @@ namespace cAlgo.Robots
                     }
                     sb.Append('\n');
                 }
+                if (_spreadWarning)
+                    sb.Append("WARNING: spread too wide for this strategy").Append(_isPepperstone ? " - Standard account? Needs Razor" : "").Append('\n');
+                sb.Append("Since ").Append(_statusSince.ToString("HH:mm", Inv)).Append(": ").Append(StatusCounts()).Append('\n');
                 sb.Append("Last: ").Append(_lastSkip);
                 Color color = Application != null && Application.ColorTheme == ColorTheme.Light ? HudColorLight : HudColorDark;
                 Chart.DrawStaticText(ObjPrefix + "HUD", sb.ToString(), VerticalAlignment.Top, HorizontalAlignment.Left, color);
@@ -1949,6 +2291,9 @@ namespace cAlgo.Robots
                 + AiMinSamplesPerClass + " per class | horizon " + AiHorizonBars + " " + RiskTimeFrame.ShortName + " bars | RSI(" + RsiPeriod + ") slope "
                 + RsiSlopeBars + " bars | prior " + (AiUseEmpiricalPrior ? "empirical" : "balanced") + " | train spread "
                 + (AiTrainSpreadPips > 0 ? F(AiTrainSpreadPips, 1) + "p (fixed)" : "live in-session median, retrain after " + SpreadCalibrationTicks + " ticks"));
+            Log("BROKER: " + (string.IsNullOrEmpty(Account.BrokerName) ? "?" : Account.BrokerName) + " | " + (Account.IsLive ? "LIVE" : "DEMO")
+                + " | " + Account.AccountType + " | round-turn commission " + CommissionText() + " | status summary "
+                + (StatusEveryMinutes > 0 ? "every " + StatusEveryMinutes + " min" : "off"));
             Log("SYMBOL: pip " + Symbol.PipSize.ToString("G", Inv) + ", digits " + Symbol.Digits + ", volume min " + F(Symbol.VolumeInUnitsMin, 0)
                 + "u step " + F(Symbol.VolumeInUnitsStep, 0) + "u, pip value " + F(Symbol.PipValue * Symbol.LotSize, 2) + " " + _ccy + "/lot, spread now "
                 + Pips(Symbol.Spread));
@@ -2397,6 +2742,54 @@ namespace cAlgo.Robots
                     lo = mid + 1;
             }
             return _times.Count - lo;
+        }
+    }
+
+    /// <summary>How a symbol's base commission is quoted (mirrors cTrader's SymbolCommissionType).</summary>
+    internal enum CommissionBasis
+    {
+        UsdPerMillionUsd,
+        UsdPerLot,
+        QuotePerLot,
+        PercentOfVolume
+    }
+
+    /// <summary>Round-turn commission per unit of volume in account currency, from the symbol's commission settings.</summary>
+    internal static class CommissionMath
+    {
+        /// <param name="commission">base commission for one side of the trade</param>
+        /// <param name="price">current price (quote currency per unit of base)</param>
+        /// <param name="lotSize">units per lot</param>
+        /// <param name="quoteToAccount">value of one quote-currency unit in account currency (PipValue / PipSize)</param>
+        /// <returns>0 when the commission cannot be converted into the account currency</returns>
+        public static double RoundTurnPerUnit(CommissionBasis basis, double commission, double price, double lotSize,
+                                              double quoteToAccount, bool quoteIsUsd, bool baseIsUsd, bool accountIsUsd)
+        {
+            if (!(commission > 0) || !(price > 0) || !(lotSize > 0) || !(quoteToAccount > 0))
+                return 0.0;
+            double usdToAccount = quoteIsUsd ? quoteToAccount : baseIsUsd ? price * quoteToAccount : accountIsUsd ? 1.0 : double.NaN;
+            double usdPerUnit = quoteIsUsd ? price : baseIsUsd ? 1.0 : accountIsUsd ? price * quoteToAccount : double.NaN;
+            double perSide;
+            switch (basis)
+            {
+                case CommissionBasis.UsdPerMillionUsd:
+                    perSide = commission * usdPerUnit / 1e6 * usdToAccount;
+                    break;
+                case CommissionBasis.UsdPerLot:
+                    perSide = commission / lotSize * usdToAccount;
+                    break;
+                case CommissionBasis.QuotePerLot:
+                    perSide = commission / lotSize * quoteToAccount;
+                    break;
+                case CommissionBasis.PercentOfVolume:
+                    perSide = commission / 100.0 * price * quoteToAccount;
+                    break;
+                default:
+                    return 0.0;
+            }
+            if (double.IsNaN(perSide) || double.IsInfinity(perSide) || perSide < 0)
+                return 0.0;
+            return 2.0 * perSide;
         }
     }
 
