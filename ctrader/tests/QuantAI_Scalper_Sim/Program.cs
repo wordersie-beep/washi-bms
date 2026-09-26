@@ -283,8 +283,8 @@ namespace Sim
     {
         public int PositionId;
         public double Net, Gross, Vol;
-        public string Label, Sym;
-        public DateTime Time;
+        public string Label, Sym, Comment;
+        public DateTime Time, EntryTime;
         public TradeType Type;
         public HistoricalTrade Proxy;
     }
@@ -315,6 +315,8 @@ namespace Sim
         public int Orders;
         public int OrderErrors;
         public readonly Dictionary<string, int> Closes = new Dictionary<string, int>();
+        public readonly Dictionary<string, string> Storage = new Dictionary<string, string>();
+        public int StorageWrites;
         public QuantAI_Scalper_24x7_V3 Bot;
         public string ChartSymbol = "EURUSD";
         public int InitialVisibleBars = 250;
@@ -724,7 +726,8 @@ namespace Sim
             double gross = Gross(p) * frac;
             double net = gross - 2 * p.CommissionPerUnitSide * vol;
             Balance += net;
-            var rec = new HistRec { PositionId = p.Id, Net = net, Gross = gross, Vol = vol, Label = p.Label, Sym = s.Name, Time = Now, Type = p.Type };
+            var rec = new HistRec { PositionId = p.Id, Net = net, Gross = gross, Vol = vol, Label = p.Label, Sym = s.Name, Time = Now, Type = p.Type,
+                                    EntryTime = p.EntryTime, Comment = p.Comment };
             rec.Proxy = Mk.Create<HistoricalTrade>((m, a) =>
             {
                 switch (m.Name)
@@ -735,6 +738,8 @@ namespace Sim
                     case "get_Label": return rec.Label;
                     case "get_SymbolName": return rec.Sym;
                     case "get_ClosingTime": return rec.Time;
+                    case "get_EntryTime": return rec.EntryTime;
+                    case "get_Comment": return rec.Comment;
                     case "get_VolumeInUnits": return rec.Vol;
                     case "get_TradeType": return rec.Type;
                 }
@@ -893,6 +898,21 @@ namespace Sim
                 }
                 return Mk.NotHandled;
             });
+            var storage = Mk.Create<LocalStorage>((m, a) =>
+            {
+                string key = a.Length > 0 ? a[0] as string : null;
+                if (key != null && key.Any(ch => !(char.IsLetterOrDigit(ch) || ch == ' ')))
+                    throw new ArgumentException("LocalStorage key may contain only letters, digits and spaces: '" + key + "'");
+                switch (m.Name)
+                {
+                    case "GetString": return Storage.TryGetValue(key, out string v) ? v : null;
+                    case "SetString": Storage[key] = (string)a[1]; StorageWrites++; return null;
+                    case "Remove": Storage.Remove(key); return null;
+                    case "Flush": return null;
+                    case "Reload": return null;
+                }
+                return Mk.NotHandled;
+            });
             var timer = Mk.Create<cAlgo.API.Timer>((m, a) =>
             {
                 switch (m.Name)
@@ -922,6 +942,7 @@ namespace Sim
             Set(algo, "ChartProvider", chartProvider);
             Set(algo, "ApplicationController", appController);
             Set(algo, "LogService", log);
+            Set(algo, "LocalStorage", storage);
             Set(robot, "Account", account);
             Set(robot, "NewTrade", newTrade);
             Set(robot, "StopCBotService", stop);
@@ -936,6 +957,14 @@ namespace Sim
                     v = Convert.ChangeType(v, pi.PropertyType, CultureInfo.InvariantCulture);
                 pi.SetValue(bot, v);
             }
+        }
+
+        public double BotDouble(string member)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            FieldInfo fi = Bot.GetType().GetField(member, flags);
+            if (fi != null) return (double)fi.GetValue(Bot);
+            return (double)Bot.GetType().GetMethod(member, flags, null, Type.EmptyTypes, null).Invoke(Bot, null);
         }
 
         public void Call(string method)
@@ -1073,18 +1102,32 @@ namespace Sim
             }
             if (Bot.BotBudget > 0)
             {
-                double realized = Hist.Where(h => h.Label == "QuantAI_M1").Sum(h => h.Net);
-                double floating = mine.Sum(p => Net(p));
+                // Same rule as the bot: only positions opened since the budget started belong to the budget.
+                DateTime budgetStart = (DateTime)Bot.GetType().GetField("_budgetStart", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(Bot);
+                var budgetPositions = mine.Where(p => p.EntryTime >= budgetStart).ToList();
+                double realized = Hist.Where(h => h.Label == "QuantAI_M1" && h.EntryTime >= budgetStart).Sum(h => h.Net);
+                double floating = budgetPositions.Sum(p => Net(p));
                 double budgetEquity = Math.Max(0, Math.Min(Equity, Bot.BotBudget + realized + floating));
-                double used = mine.Sum(p => p.MarginPerUnit * p.Vol);
+                double used = budgetPositions.Sum(p => p.MarginPerUnit * p.Vol);
                 if (used > budgetEquity * Bot.MaxTotalMarginPercent / 100.0 * 1.05 + 0.01)
                     Violations.Add(Now.ToString("ddd HH:mm") + " margin " + used.ToString("F2") + " > " + Bot.MaxTotalMarginPercent + "% of budget equity " + budgetEquity.ToString("F2"));
             }
         }
     }
 
+    public sealed class ReportRow
+    {
+        public string Title;
+        public string Check;
+        public int Entries, Closed, Errors, Violations;
+        public string Balance;
+        public string Note = "";
+        public bool Ok;
+    }
+
     public static class Program
     {
+        private static readonly List<ReportRow> Rows = new List<ReportRow>();
         private static List<Spec> Specs()
         {
             return new List<Spec>
@@ -1104,7 +1147,7 @@ namespace Sim
         }
 
         private static World Scenario(string title, int seed, DateTime start, TimeSpan duration, Action<QuantAI_Scalper_24x7_V3> configure, double balance, string logFile,
-                                      Action<List<Spec>> tweak = null, Func<World, bool> onSecond = null)
+                                      Action<List<Spec>> tweak = null, Func<World, bool> onSecond = null, Action<World> beforeStart = null)
         {
             Console.WriteLine();
             Console.WriteLine("################ " + title);
@@ -1117,12 +1160,58 @@ namespace Sim
             var bot = new QuantAI_Scalper_24x7_V3();
             w.Wire(bot);
             configure?.Invoke(bot);
+            beforeStart?.Invoke(w);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             w.Run(start, duration, onSecond);
             sw.Stop();
             System.IO.File.WriteAllLines(logFile, w.Log);
             Report(w, sw.Elapsed);
+            Rows.Add(new ReportRow
+            {
+                Title = title,
+                Entries = w.Log.Count(l => l.Contains(" ENTRY ")),
+                Closed = w.Log.Count(l => l.Contains(" CLOSED #")),
+                Errors = w.Log.Count(l => l.Contains("ERROR in") || l.Contains("FATAL")),
+                Violations = w.Violations.Count,
+                Balance = w.StartBalance.ToString("F2", CultureInfo.InvariantCulture) + " → " + w.Balance.ToString("F2", CultureInfo.InvariantCulture)
+            });
             return w;
+        }
+
+        private static void WriteReport(string path)
+        {
+            string H(string x) => System.Net.WebUtility.HtmlEncode(x);
+            var sb = new StringBuilder();
+            Rows.Sort((x, y) => string.CompareOrdinal(x.Title, y.Title));
+            int ok = Rows.Count(r => r.Ok);
+            sb.Append("<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+            sb.Append("<title>Проверка QuantAI Scalper</title><style>");
+            sb.Append(":root{--bg:#0f1115;--card:#171a21;--line:#262b35;--text:#e8eaf0;--muted:#9aa3b2;--ok:#3ecf8e;--bad:#ff6b6b}");
+            sb.Append("*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;padding:16px}");
+            sb.Append("h1{font-size:20px;margin:0 0 4px}p.sub{color:var(--muted);margin:0 0 14px}");
+            sb.Append(".sum{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}.pill{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}");
+            sb.Append(".pill b{display:block;font-size:20px}.row{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}");
+            sb.Append(".t{display:flex;justify-content:space-between;gap:8px;font-weight:600}.ok{color:var(--ok)}.bad{color:var(--bad)}.c{color:var(--muted);margin-top:4px}");
+            sb.Append(".m{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:13px;color:var(--muted)}.m span b{color:var(--text)}</style></head><body>");
+            sb.Append("<h1>QuantAI_Scalper_24x7_V3 — проверка перед выдачей</h1>");
+            sb.Append("<p class=\"sub\">Настоящий код бота на подменённой платформе cTrader, синтетический рынок. Проверяется механика, не прибыльность.</p>");
+            sb.Append("<div class=\"sum\"><div class=\"pill\"><b class=\"" + (ok == Rows.Count ? "ok" : "bad") + "\">" + ok + " / " + Rows.Count + "</b>сценариев без ошибок</div>");
+            sb.Append("<div class=\"pill\"><b>" + Rows.Sum(r => r.Entries) + "</b>сделок открыто</div>");
+            sb.Append("<div class=\"pill\"><b>" + Rows.Sum(r => r.Violations) + "</b>нарушений правил риска</div>");
+            sb.Append("<div class=\"pill\"><b>" + (Mk.Unknown.Count == 0 ? "0" : Mk.Unknown.Count.ToString()) + "</b>неизвестных вызовов API</div></div>");
+            foreach (ReportRow r in Rows)
+            {
+                sb.Append("<div class=\"row\"><div class=\"t\"><span>" + H(r.Title.Split(':')[0]) + ". " + H(r.Check) + "</span><span class=\""
+                          + (r.Ok ? "ok\">✓" : "bad\">✗") + "</span></div>");
+                sb.Append("<div class=\"m\"><span>входов <b>" + r.Entries + "</b></span><span>закрыто <b>" + r.Closed + "</b></span><span>ошибок <b>" + r.Errors
+                          + "</b></span><span>нарушений <b>" + r.Violations + "</b></span><span>счёт <b>" + H(r.Balance) + "</b></span></div>");
+                if (r.Note.Length > 0)
+                    sb.Append("<div class=\"c\">" + H(r.Note) + "</div>");
+                sb.Append("</div>");
+            }
+            sb.Append("<p class=\"sub\">Правила, проверяемые каждую секунду: стоп у каждой позиции, не больше одной позиции на символ и 8 всего, "
+                      + "залог бюджета ≤ 90 %, ни одной позиции в длинный перерыв рынка.</p></body></html>");
+            System.IO.File.WriteAllText(path, sb.ToString());
         }
 
         private static void Report(World w, TimeSpan took)
@@ -1192,10 +1281,86 @@ namespace Sim
                      specs => specs.First(x => x.Name == "ETHUSD").TrueLeverage = 1);
             Console.WriteLine("ETH order rejects " + g.Log.Count(l => l.Contains("ETHUSD ORDER FAILED")) + " | ETH entries " + g.Log.Count(l => l.Contains("ETHUSD ENTRY")));
 
+            // 9. Restart keeps the budget and the day: equity and the day's start must be the same before and after.
+            double equityBefore = 0, dayBefore = 0, equityAfter = 0, dayAfter = 0;
+            bool restartedI = false;
+            World i9 = Scenario("I: restart keeps the budget and the day's start", 19, new DateTime(2026, 9, 28, 6, 0, 0, DateTimeKind.Utc), TimeSpan.FromHours(8),
+                     b => { }, 49092.50, Path.Combine(dir, "logI.txt"), null,
+                     w =>
+                     {
+                         if (!restartedI && w.Now.Hour >= 11 && !w.Open.Any() && Math.Abs(w.BotDouble("_runResult")) > 1e-9)
+                         {
+                             restartedI = true;
+                             equityBefore = w.BotDouble("BotEquity");
+                             dayBefore = w.BotDouble("_dayStartEquity");
+                             w.Restart(null);
+                             equityAfter = w.BotDouble("BotEquity");
+                             dayAfter = w.BotDouble("_dayStartEquity");
+                         }
+                         return true;
+                     });
+            Console.WriteLine("restarted " + restartedI + " | budget equity " + equityBefore.ToString("F4") + " -> " + equityAfter.ToString("F4")
+                              + " | day start " + dayBefore.ToString("F4") + " -> " + dayAfter.ToString("F4") + " | storage writes " + i9.StorageWrites);
+            if (!restartedI || Math.Abs(equityBefore - equityAfter) > 1e-6 || Math.Abs(dayBefore - dayAfter) > 1e-6)
+                i9.Violations.Add("budget or day start changed across the restart");
+
+            // 10. A BTC position of an earlier version on a 50 EUR budget: managed, but no new BTC trades.
+            World j = Scenario("J: old BTC position on a 50 EUR budget is managed", 20, new DateTime(2026, 9, 26, 8, 0, 0, DateTimeKind.Utc), TimeSpan.FromHours(6),
+                     b => { }, 49092.50, Path.Combine(dir, "logJ.txt"), null, null,
+                     w =>
+                     {
+                         w.Now = new DateTime(2026, 9, 26, 7, 55, 0, DateTimeKind.Utc);
+                         var sl = new RelativeStopLossProtection(40000.0);   // $400 in 0.01 pips
+                         w.Execute(TradeType.Buy, "BTCUSD", 0.30, "QuantAI_M1", sl, null, "QAI|SWP|c=0.60|v=0.3|s=40000.0|t=50000.0");
+                     });
+            bool managed = j.Log.Any(l => l.Contains("BTCUSD: manage-only")) && j.Log.Any(l => l.Contains("BTCUSD RECOVERED"));
+            bool newBtc = j.Log.Any(l => l.Contains("BTCUSD ENTRY"));
+            bool closedByBot = j.Log.Any(l => l.Contains("BTCUSD CLOSED #"));
+            Console.WriteLine("BTC manage-only " + managed + " | closed " + closedByBot + " | new BTC entries " + newBtc);
+            if (!managed || newBtc || !closedByBot) j.Violations.Add("old BTC position not handled as manage-only");
+
+            string[] checks =
+            {
+                "Выходные, бюджет 50 EUR: только крипта, выбор таймфрейма, суточный и субботний перерывы",
+                "Открытие недели: форекс ждёт часов 06–20 UTC, потом 0.01 лота",
+                "Настоящий счёт 20 EUR: форекс отключён по бюджету, торгует крипта",
+                "Пятница, весь счёт, 4 лота: форекс закрывается до выходных",
+                "Перезапуск с открытой позицией: новый экземпляр её подхватывает",
+                "Дневной лимит убытка: после него ни одного входа",
+                "Брокер требует залог 1:1 вместо 1:2: один отказ, без повторов",
+                "Минимальный стоп брокера больше стопа бота: вход пропускается",
+                "Перезапуск сохраняет бюджет и начало дня",
+                "Старая позиция BTC на бюджете 50 EUR: ведётся вне бюджета, новых входов нет"
+            };
+            string[] notes =
+            {
+                "", "", "", "",
+                "восстановлено позиций: " + e.Log.Count(l => l.Contains("RECOVERED #")),
+                "срабатываний лимита: " + f.Log.Count(l => l.Contains("HALT:")) + ", входов после: " + entriesAfterHalt,
+                "отказов брокера по ETH: " + g.Log.Count(l => l.Contains("ETHUSD ORDER FAILED")) + ", входов ETH после: " + g.Log.Count(l => l.Contains("ETHUSD ENTRY")),
+                "пропусков по стопу брокера: " + h.Log.Count(l => l.Contains("closer than the broker minimum stop")),
+                "бюджет " + equityBefore.ToString("F2", CultureInfo.InvariantCulture) + " → " + equityAfter.ToString("F2", CultureInfo.InvariantCulture)
+                    + ", начало дня " + dayBefore.ToString("F2", CultureInfo.InvariantCulture) + " → " + dayAfter.ToString("F2", CultureInfo.InvariantCulture),
+                "позиция закрыта ботом: " + (closedByBot ? "да" : "нет") + ", новых входов BTC: " + (newBtc ? "есть" : "нет")
+            };
+            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j };
+            // Scenario order in Rows follows the calls: A B C D E F H G I J.
+            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J" };
+            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J" };
+            for (int k = 0; k < Rows.Count && k < order.Length; k++)
+            {
+                int idx = Array.IndexOf(letters, order[k]);
+                Rows[k].Check = checks[idx];
+                Rows[k].Note = notes[idx];
+                Rows[k].Ok = Rows[k].Errors == 0 && worlds[k].Violations.Count == 0;
+                Rows[k].Violations = worlds[k].Violations.Count;
+            }
+            WriteReport(Path.Combine(dir, "report.html"));
+
             Console.WriteLine();
             Console.WriteLine("Unknown API members used by the bot (not mocked):");
             foreach (var kv in Mk.Unknown.OrderByDescending(k => k.Value)) Console.WriteLine("  " + kv.Key + " x" + kv.Value);
-            bool ok = new[] { a, bw, c, d, e, f, g, h }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
+            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
             Console.WriteLine(ok ? "SIMULATION OK" : "SIMULATION FOUND PROBLEMS");
             return ok ? 0 : 1;
         }

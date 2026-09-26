@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.0.0
+//  QuantAI_Scalper_24x7_V3  v3.1.0
 //  cTrader Automate cBot | multi-market micro-impulse scalper for small budgets, trading around the clock
 //    - crypto 24/7 (weekends included), Forex whenever its market is open
 //    - ONE instance trades every symbol of two lists (a demo account allows one cloud instance)
@@ -54,7 +54,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.0.0";
+        private const string BotVersion = "3.1.0";
 
         #region Parameters
 
@@ -122,7 +122,7 @@ namespace cAlgo.Robots
         [Parameter("Max Slippage Pips (0 = market)", Group = "1. Risk & Money", DefaultValue = 0.5, MinValue = 0.0, Step = 0.1)]
         public double MaxSlippagePips { get; set; }
 
-        [Parameter("Daily Max Loss % of budget (0 = off)", Group = "1. Risk & Money", DefaultValue = 6.0, MinValue = 0.0, Step = 0.5)]
+        [Parameter("Daily Max Loss % of budget (0 = off)", Group = "1. Risk & Money", DefaultValue = 10.0, MinValue = 0.0, Step = 0.5)]
         public double DailyMaxLossPercent { get; set; }
 
         [Parameter("Max Consecutive Losses Per Symbol (0 = off)", Group = "1. Risk & Money", DefaultValue = 4, MinValue = 0)]
@@ -316,6 +316,7 @@ namespace cAlgo.Robots
         private const double FxPipRatio = 0.5e-4;             // broker pip / price at or above this = a Forex-style pip
         private const double NonFxPipRatio = 0.5e-4;          // otherwise one "pip" of the parameters = 0.5 basis point of price
         private const string ObjPrefix = "QAI_";
+        private const string BudgetStartKey = "QAI24x7 budget start";   // local storage keys allow letters, digits and spaces only
 
         #endregion
 
@@ -333,7 +334,10 @@ namespace cAlgo.Robots
         private double _dayStartEquity;
         private int _tradesToday;
         private bool _dailyHalt;
-        private double _runResult;   // net result of this run's closed trades (moves the budget)
+        private double _runResult;   // net result of the trades closed since the budget started (moves the budget)
+        private DateTime _budgetStart;
+        private string _budgetNote = "";
+        private int _budgetFills;
 
         private string _ccy = "";
         private bool _quiet;
@@ -379,7 +383,9 @@ namespace cAlgo.Robots
             _isPepperstone = Account.BrokerName != null && Account.BrokerName.IndexOf("pepperstone", StringComparison.OrdinalIgnoreCase) >= 0;
             _hudEnabled = ShowHud && (RunningMode == RunningMode.RealTime || RunningMode == RunningMode.VisualBacktesting);
             _statusSince = Server.Time;
+            RestoreBudget(Server.Time);
             ResetDay(Server.Time);
+            RestoreToday(Server.Time);
             LogBanner();
 
             List<string> crypto = MarketMath.ParseSymbols(CryptoSymbols);
@@ -512,7 +518,7 @@ namespace cAlgo.Robots
         }
 
         /// <summary>Resolves a symbol, checks the budget can carry its minimum volume, then picks its timeframe and trains its AI.</summary>
-        private void AddMarket(string item, bool isCrypto)
+        private void AddMarket(string item, bool isCrypto, bool manageOnly = false)
         {
             string name = item;
             try
@@ -537,6 +543,7 @@ namespace cAlgo.Robots
                 m.Name = name;
                 m.Symbol = sym;
                 m.IsCrypto = isCrypto;
+                m.ManageOnly = manageOnly;
                 m.IsChart = string.Equals(name, SymbolName, StringComparison.OrdinalIgnoreCase);
                 m.MaxSpreadToAtr = isCrypto ? CryptoMaxSpreadToAtr : MaxSpreadToAtr;
                 m.Candidates = TimeFrameList(isCrypto ? CryptoTimeFrames : FxTimeFrames);
@@ -554,7 +561,9 @@ namespace cAlgo.Robots
                 string how;
                 m.MinVolumeMargin = EstimateMargin(m, TradeType.Buy, minVolume, out how);
                 double allowed = BotEquity() * MaxTotalMarginPercent / 100.0;
-                if (m.MinVolumeMargin > allowed + VolumeEpsilon)
+                if (manageOnly)
+                    Log("MARKET " + name + ": manage-only - it carries a position of an earlier run; no new entries on it");
+                else if (m.MinVolumeMargin > allowed + VolumeEpsilon)
                 {
                     double needed = m.MinVolumeMargin * 100.0 / MaxTotalMarginPercent;
                     _budgetSkipped.Add(name + " " + F(needed, 0));
@@ -1176,7 +1185,7 @@ namespace cAlgo.Robots
 
         private void EvaluateEntries(Market m)
         {
-            if (!m.SqzArmed && !m.BullSweep && !m.BearSweep)
+            if (m.ManageOnly || (!m.SqzArmed && !m.BullSweep && !m.BearSweep))
                 return;
             int f = m.Sig.Count - 1;
             if (f < 1)
@@ -1580,10 +1589,19 @@ namespace cAlgo.Robots
             double sum = 0.0;
             foreach (Position p in Positions.FindAll(BotLabel))
             {
-                if (Valid(p.NetProfit))
+                if (InBudget(p.EntryTime) && Valid(p.NetProfit))
                     sum += p.NetProfit;
             }
             return sum;
+        }
+
+        /// <summary>
+        /// Positions opened before the budget started (an earlier version, a changed Bot Budget) are managed as usual but their
+        /// results and margin stay outside the budget - otherwise a 4-lot position of an old run would decide a 50 EUR budget.
+        /// </summary>
+        private bool InBudget(DateTime entryTime)
+        {
+            return !(BotBudget > 0) || entryTime >= _budgetStart;
         }
 
         /// <summary>Margin blocked by the bot: the whole account's when there is no budget, else its own positions'.</summary>
@@ -1594,6 +1612,8 @@ namespace cAlgo.Robots
             double used = 0.0;
             foreach (Position p in Positions.FindAll(BotLabel))
             {
+                if (!InBudget(p.EntryTime))
+                    continue;
                 double margin = p.Margin;
                 TradeState st;
                 if (!(margin > 0) && _trades.TryGetValue(p.Id, out st))
@@ -2187,7 +2207,8 @@ namespace cAlgo.Robots
             st.MarginLogged = true;   // no entry estimate to compare the broker's figure with
             _trades[p.Id] = st;
             LogM(m, "RECOVERED #" + p.Id + " " + (isLong ? "BUY" : "SELL") + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice) + " SL " + P(m, p.StopLoss)
-                 + " | R " + D(m, st.RiskDist) + ", TP1 " + D(m, st.Tp1Dist) + (st.Tp1Done ? ", TP1 already taken" : "") + (st.BeDone ? ", stop at/after BE" : ""));
+                 + " | R " + D(m, st.RiskDist) + ", TP1 " + D(m, st.Tp1Dist) + (st.Tp1Done ? ", TP1 already taken" : "") + (st.BeDone ? ", stop at/after BE" : "")
+                 + (InBudget(p.EntryTime) ? "" : " | opened before the budget started: managed, but outside the budget"));
             return st;
         }
 
@@ -2196,11 +2217,17 @@ namespace cAlgo.Robots
             foreach (Position p in Positions.FindAll(BotLabel))
             {
                 Market m;
-                if (_bySymbol.TryGetValue(p.SymbolName, out m))
+                if (!_bySymbol.TryGetValue(p.SymbolName, out m))
+                {
+                    // A position of an earlier run on a symbol this run does not trade (not listed, or too big for the budget):
+                    // it is still managed - break-even, trailing, time exit, flat before breaks - but no new trade opens there.
+                    AddMarket(p.SymbolName, LooksLikeCrypto(p.SymbolName), true);
+                    _bySymbol.TryGetValue(p.SymbolName, out m);
+                }
+                if (m != null)
                     GetOrRecoverState(m, p);
                 else
-                    Log("RECOVER: position #" + p.Id + " on " + p.SymbolName + " is on no active market of this run - it keeps its server-side stop "
-                        + "but is not managed; close it by hand if needed");
+                    Log("RECOVER: position #" + p.Id + " on " + p.SymbolName + " cannot be managed (symbol unavailable) - it keeps its server-side stop");
             }
         }
 
@@ -2242,7 +2269,8 @@ namespace cAlgo.Robots
 
                 _statTrades++;
                 _statNet += net;
-                _runResult += net;
+                if (InBudget(p.EntryTime))
+                    _runResult += net;
                 bool breakEvenStop = st != null && st.BeDone && !st.Tp1Done && args.Reason == PositionCloseReason.StopLoss;
                 if (breakEvenStop)
                 {
@@ -2453,6 +2481,116 @@ namespace cAlgo.Robots
             }
         }
 
+        /// <summary>
+        /// The budget moves with the bot's result since the budget started, so it has to survive restarts (cloud
+        /// maintenance, reconnects, a new version): the start time and the budget value are kept in the instance's local
+        /// storage and the result is read back from the trade history. A changed Bot Budget starts a new budget.
+        /// </summary>
+        private void RestoreBudget(DateTime now)
+        {
+            _budgetStart = now;
+            _runResult = 0.0;
+            _budgetFills = 0;
+            if (!(BotBudget > 0))
+            {
+                _budgetNote = "whole account";
+                return;
+            }
+            _budgetNote = "new budget from now";
+            try
+            {
+                string saved = LocalStorage.GetString(BudgetStartKey, LocalStorageScope.Instance);
+                string[] parts = string.IsNullOrEmpty(saved) ? new string[0] : saved.Split(' ');
+                long ticks;
+                double budget;
+                bool valid = parts.Length == 2 && long.TryParse(parts[0], NumberStyles.Integer, Inv, out ticks)
+                             && double.TryParse(parts[1], NumberStyles.Float, Inv, out budget) && ticks > 0 && ticks <= now.Ticks
+                             && Math.Abs(budget - BotBudget) < 1e-9;
+                if (valid)
+                {
+                    _budgetStart = new DateTime(long.Parse(parts[0], NumberStyles.Integer, Inv), DateTimeKind.Utc);
+                    _budgetNote = "budget continues since " + _budgetStart.ToString("yyyy-MM-dd HH:mm", Inv) + " UTC";
+                }
+                else
+                {
+                    if (parts.Length == 2)
+                        _budgetNote = "Bot Budget changed - new budget from now";
+                    LocalStorage.SetString(BudgetStartKey, now.Ticks.ToString(Inv) + " " + BotBudget.ToString("R", Inv), LocalStorageScope.Instance);
+                    LocalStorage.Flush(LocalStorageScope.Instance);
+                }
+            }
+            catch (Exception ex)
+            {
+                _budgetNote = "local storage unavailable (" + ex.GetType().Name + ") - the budget counts from this start";
+            }
+            try
+            {
+                foreach (HistoricalTrade h in History.FindAll(BotLabel))
+                {
+                    if (h.EntryTime < _budgetStart)
+                        continue;
+                    _runResult += h.NetProfit;
+                    _budgetFills++;
+                }
+            }
+            catch (Exception ex)
+            {
+                _budgetNote += "; history unavailable (" + ex.GetType().Name + ")";
+            }
+        }
+
+        /// <summary>After a restart during the day, the day's start is rebuilt from today's closed trades so the daily loss limit holds.</summary>
+        private void RestoreToday(DateTime now)
+        {
+            double closedToday = 0.0;
+            var positionsToday = new HashSet<int>();
+            try
+            {
+                foreach (HistoricalTrade h in History.FindAll(BotLabel))
+                {
+                    if (h.ClosingTime.Date != now.Date || !InBudget(h.EntryTime))
+                        continue;
+                    closedToday += h.NetProfit;
+                    if (h.EntryTime.Date == now.Date)
+                        positionsToday.Add(h.PositionId);
+                }
+            }
+            catch (Exception)
+            {
+                return;
+            }
+            foreach (Position p in Positions.FindAll(BotLabel))
+            {
+                if (p.EntryTime.Date == now.Date && InBudget(p.EntryTime))
+                    positionsToday.Add(p.Id);
+            }
+            _dayStartEquity = BotEquity() - closedToday - BotFloatingResult();
+            _tradesToday = positionsToday.Count;
+        }
+
+        /// <summary>A symbol found only through an open position: crypto when a crypto list names it or its pip is not Forex-sized.</summary>
+        private bool LooksLikeCrypto(string symbolName)
+        {
+            string key = MarketMath.SymbolKey(symbolName);
+            foreach (string item in MarketMath.ParseSymbols(CryptoSymbols))
+            {
+                foreach (string alt in MarketMath.Alternatives(item))
+                {
+                    if (MarketMath.SymbolKey(alt) == key)
+                        return true;
+                }
+            }
+            try
+            {
+                Symbol sym = Symbols.GetSymbol(symbolName);
+                return sym != null && !MarketMath.IsFxLike(sym.PipSize, sym.Bid, FxPipRatio);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         private void ResetDay(DateTime now)
         {
             _day = now.Date;
@@ -2627,6 +2765,7 @@ namespace cAlgo.Robots
             Log("STATUS " + now.ToString("HH:mm", Inv) + " UTC since " + _statusSince.ToString("HH:mm", Inv) + " | budget equity " + F(equity, 2) + " " + _ccy
                 + ", margin " + F(BotUsedMargin(), 2) + "/" + F(equity * MaxTotalMarginPercent / 100.0, 2) + " | positions " + Positions.FindAll(BotLabel).Length
                 + "/" + MaxOpenPositions + " | today " + _tradesToday + " trade(s), " + Signed(equity - _dayStartEquity, 2) + " " + _ccy
+                + (_statTrades > 0 ? " | run " + _statTrades + " trades " + _statWins + "W/" + _statLosses + "L/" + _statScratch + "S " + Signed(_statNet, 2) : "")
                 + (_dailyHalt ? " | HALTED (daily loss)" : "") + (_skipLinesSuppressed > 0 ? " | " + _skipLinesSuppressed + " SKIP lines not printed (limit "
                 + MaxSkipLinesPerHour + "/h)" : ""));
             foreach (Market m in active)
@@ -2644,6 +2783,8 @@ namespace cAlgo.Robots
 
         private string QuietNote(Market m, DateTime now)
         {
+            if (m.ManageOnly)
+                return " manage-only";
             double atr = RiskAtr(m);
             if (atr > 0 && m.Symbol.Spread > m.MaxSpreadToAtr * atr)
                 return " spread " + F(m.Symbol.Spread / atr, 2) + ">" + F(m.MaxSpreadToAtr, 2);
@@ -2849,7 +2990,8 @@ namespace cAlgo.Robots
             Log("=== QuantAI_Scalper_24x7_V3 v" + BotVersion + " | broker " + (string.IsNullOrEmpty(Account.BrokerName) ? "?" : Account.BrokerName)
                 + " " + (Account.IsLive ? "LIVE" : "DEMO") + " " + Account.AccountType + " | balance " + F(Account.Balance, 2) + " " + _ccy
                 + " | leverage 1:" + F(Account.PreciseLeverage, 0) + " | mode " + RunningMode + " ===");
-            Log("PARAMS budget: " + (BotBudget > 0 ? F(BotBudget, 2) + " " + _ccy + " -> budget equity " + F(equity, 2) : "whole account (" + F(equity, 2) + ")")
+            Log("PARAMS budget: " + (BotBudget > 0 ? F(BotBudget, 2) + " " + _ccy + " -> budget equity " + F(equity, 2) + " (" + _budgetNote
+                + (_budgetFills > 0 ? ", closed result " + Signed(_runResult, 2) + " over " + _budgetFills + " fill(s)" : "") + ")" : "whole account (" + F(equity, 2) + ")")
                 + " | margin per trade " + F(MarginPerTradePercent, 0) + "% of free, all positions <= " + F(MaxTotalMarginPercent, 0) + "% ("
                 + F(equity * MaxTotalMarginPercent / 100.0, 2) + " " + _ccy + ") | margin leverage forex " + (LeverageOverride > 0 ? "1:" + F(LeverageOverride, 0) : "broker")
                 + ", crypto " + (CryptoLeverageOverride > 0 ? "1:" + F(CryptoLeverageOverride, 0) : "broker"));
@@ -3091,6 +3233,7 @@ namespace cAlgo.Robots
         public Symbol Symbol;
         public bool IsCrypto;
         public bool IsChart;
+        public bool ManageOnly;
         public bool FxLike;
         public double BotPip;
         public double MaxSpreadToAtr;
