@@ -88,6 +88,149 @@ namespace Sim
         public bool BrokerMarginNaN;
         public double TrueLeverage;      // 0 = Leverage; the margin the broker really blocks
         public double MinStopPips;
+        public ReplayData Replay;        // real bars replayed tick by tick instead of the random walk (null = random)
+    }
+
+    /// <summary>
+    /// Real bars of one symbol for the real-data backtest. The market is open inside runs of bars (holes up to 3 bars are
+    /// quiet hours, longer gaps are closures such as weekends). Each bar is replayed as ticks that pass exactly through its
+    /// open, both extremes and its close, so the bars the bot builds equal the real ones.
+    /// </summary>
+    public sealed class ReplayData
+    {
+        public int TfSec = 3600;
+        public readonly List<DateTime> T = new List<DateTime>();
+        public readonly List<double> O = new List<double>(), H = new List<double>(), L = new List<double>(), C = new List<double>(), V = new List<double>();
+        public bool Bursty;                  // ticks crowd into the bar's big legs (fast moves come with many ticks)
+        public double TicksPerBar = 120;     // at the median volume
+        private readonly List<DateTime> _runStart = new List<DateTime>(), _runEnd = new List<DateTime>();
+        private double _medianVolume = 1;
+
+        /// <summary>Dukascopy-style CSV: "dd.MM.yyyy HH:mm:ss.fff,Open,High,Low,Close,Volume", UTC.</summary>
+        public static ReplayData LoadCsv(string path)
+        {
+            var d = new ReplayData();
+            foreach (string line in System.IO.File.ReadLines(path).Skip(1))
+            {
+                string[] f = line.Split(',');
+                if (f.Length < 6) continue;
+                DateTime t = DateTime.ParseExact(f[0], "dd.MM.yyyy HH:mm:ss.fff", CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+                double o = double.Parse(f[1], CultureInfo.InvariantCulture), h = double.Parse(f[2], CultureInfo.InvariantCulture);
+                double l = double.Parse(f[3], CultureInfo.InvariantCulture), c = double.Parse(f[4], CultureInfo.InvariantCulture);
+                double v = double.Parse(f[5], CultureInfo.InvariantCulture);
+                if (!(h >= l) || !(h > 0)) continue;
+                d.T.Add(DateTime.SpecifyKind(t, DateTimeKind.Utc)); d.O.Add(o); d.H.Add(h); d.L.Add(l); d.C.Add(c); d.V.Add(v);
+            }
+            d.Prepare();
+            return d;
+        }
+
+        public void Prepare()
+        {
+            _runStart.Clear(); _runEnd.Clear();
+            for (int i = 0; i < T.Count; i++)
+            {
+                DateTime end = T[i].AddSeconds(TfSec);
+                if (_runEnd.Count > 0 && (T[i] - _runEnd[_runEnd.Count - 1]).TotalSeconds <= 3 * TfSec)
+                    _runEnd[_runEnd.Count - 1] = end;
+                else { _runStart.Add(T[i]); _runEnd.Add(end); }
+            }
+            var vols = V.Where(x => x > 0).OrderBy(x => x).ToList();
+            _medianVolume = vols.Count > 0 ? vols[vols.Count / 2] : 1;
+        }
+
+        private int RunAt(DateTime t)
+        {
+            int lo = 0, hi = _runStart.Count - 1, found = -1;
+            while (lo <= hi) { int mid = (lo + hi) / 2; if (_runStart[mid] <= t) { found = mid; lo = mid + 1; } else hi = mid - 1; }
+            return found >= 0 && t < _runEnd[found] ? found : -1;
+        }
+
+        public bool IsOpen(DateTime t) { return RunAt(t) >= 0; }
+        public TimeSpan TillClose(DateTime t) { int r = RunAt(t); return r < 0 ? TimeSpan.Zero : _runEnd[r] - t; }
+
+        public TimeSpan TillOpen(DateTime t)
+        {
+            if (IsOpen(t)) return TimeSpan.Zero;
+            foreach (DateTime st in _runStart) if (st > t) return st - t;
+            return TimeSpan.FromDays(8);
+        }
+
+        /// <summary>Index of the bar that contains t, or -1.</summary>
+        public int IndexAt(DateTime t)
+        {
+            int lo = 0, hi = T.Count - 1, found = -1;
+            while (lo <= hi) { int mid = (lo + hi) / 2; if (T[mid] <= t) { found = mid; lo = mid + 1; } else hi = mid - 1; }
+            return found >= 0 && t < T[found].AddSeconds(TfSec) ? found : -1;
+        }
+
+        /// <summary>Ticks (time, price) of bar i: open -> nearer extreme -> farther extreme -> close, a noisy bridge per leg.</summary>
+        /// <summary>Ticks of bar i: TicksPerBar at the median volume, in proportion to the bar's volume, 20..600.</summary>
+        public int TickCount(int i)
+        {
+            int n = (int)Math.Round(TicksPerBar * Math.Max(0.1, V[i] / _medianVolume));
+            return Math.Max(20, Math.Min(600, n));
+        }
+
+        public List<(DateTime Time, double Price)> TicksOf(int i, Random rng, int digits)
+        {
+            double o = O[i], h = H[i], l = L[i], c = C[i];
+            int n = TickCount(i);
+            double first = Math.Abs(o - h) <= Math.Abs(o - l) ? h : l;
+            double second = first == h ? l : h;
+            double[] pts = { o, first, second, c };
+            double[] len = new double[3];
+            double total = 0;
+            for (int k = 0; k < 3; k++) { len[k] = Math.Abs(pts[k + 1] - pts[k]) + (h - l) * 0.02 + 1e-9; total += len[k]; }
+            var prices = new List<double> { o };
+            var legOfTick = new List<int> { 0 };
+            for (int k = 0; k < 3; k++)
+            {
+                int m = Math.Max(1, (int)Math.Round((n - 1) * len[k] / total));
+                double a = pts[k], b = pts[k + 1];
+                double noise = (h - l) * 0.04;
+                for (int j = 1; j <= m; j++)
+                {
+                    double frac = (double)j / m;
+                    double p = a + (b - a) * frac + (j < m ? noise * Math.Sqrt(frac * (1 - frac)) * (rng.NextDouble() * 2 - 1) : 0.0);
+                    prices.Add(Math.Round(Math.Min(h, Math.Max(l, p)), digits));
+                    legOfTick.Add(k);
+                }
+            }
+            // Times: uniform, or bursty - each leg lasts in proportion to the square root of its length, so a big leg packs
+            // more ticks into each second (fast moves come with activity).
+            var times = new double[prices.Count];
+            if (!Bursty)
+            {
+                var u = Enumerable.Range(0, prices.Count - 1).Select(_ => rng.NextDouble()).OrderBy(x => x).ToList();
+                times[0] = 0.0005;
+                for (int j = 1; j < prices.Count; j++) times[j] = 0.001 + 0.998 * u[j - 1];
+            }
+            else
+            {
+                double[] dur = new double[3];
+                double sum = 0;
+                for (int k = 0; k < 3; k++) { dur[k] = Math.Sqrt(len[k]); sum += dur[k]; }
+                double[] startOf = new double[3];
+                double acc = 0;
+                for (int k = 0; k < 3; k++) { startOf[k] = acc; acc += dur[k] / sum; }
+                var counts = new int[3];
+                foreach (int k in legOfTick) counts[k]++;
+                var seen = new int[3];
+                times[0] = 0.0005;
+                for (int j = 1; j < prices.Count; j++)
+                {
+                    int k = legOfTick[j];
+                    seen[k]++;
+                    times[j] = 0.001 + 0.998 * (startOf[k] + dur[k] / sum * seen[k] / (counts[k] + 1.0));
+                }
+                Array.Sort(times);
+            }
+            var result = new List<(DateTime, double)>(prices.Count);
+            for (int j = 0; j < prices.Count; j++)
+                result.Add((T[i].AddSeconds(times[j] * TfSec), prices[j]));
+            return result;
+        }
     }
 
     public sealed class BarStore
@@ -254,6 +397,9 @@ namespace Sim
         public readonly List<Action<SymbolTickEventArgs>> TickHandlers = new List<Action<SymbolTickEventArgs>>();
         public int BurstLeft;
         public int BurstDir;
+        public int ReplayBar = -2;
+        public List<(DateTime Time, double Price)> ReplayTicks;
+        public int ReplayNext;
         public bool WasOpen;
         public DateTime OpenedAt = DateTime.MinValue;
         public DateTime ClosedSince = DateTime.MinValue;   // MinValue: closed since before the run
@@ -330,6 +476,7 @@ namespace Sim
         public Action<QuantAI_Scalper_24x7_V3> Configure;   // the scenario's settings, applied again to a restarted instance
         public bool Activity;            // weekly activity cycle: busy weekday afternoons, quiet nights, very quiet weekends
         public double Delivery = 1.0;    // share of the broker's ticks that reach the bot (a busy cloud may skip some)
+        public int InvariantEverySeconds = 1;   // long real-data runs check the invariants less often
 
         /// <summary>Tick-rate multiplier at a time; volatility follows its square root (fewer ticks, smaller moves).</summary>
         public double ActivityAt(DateTime t)
@@ -366,6 +513,7 @@ namespace Sim
         // ---------------------------------------------------------------- schedule
         public static bool IsOpen(Spec s, DateTime t)
         {
+            if (s.Replay != null) return s.Replay.IsOpen(t);
             TimeSpan tod = t.TimeOfDay;
             if (s.Crypto)
             {
@@ -383,6 +531,7 @@ namespace Sim
 
         public static TimeSpan TillClose(Spec s, DateTime now)
         {
+            if (s.Replay != null) return s.Replay.TillClose(now);
             if (!IsOpen(s, now)) return TimeSpan.Zero;
             DateTime m0 = Floor(now, 60);
             for (int k = 1; k <= 8 * 1440; k++)
@@ -395,6 +544,7 @@ namespace Sim
 
         public static TimeSpan TillOpen(Spec s, DateTime now)
         {
+            if (s.Replay != null) return s.Replay.TillOpen(now);
             if (IsOpen(s, now)) return TimeSpan.Zero;
             DateTime m0 = Floor(now, 60);
             for (int k = 1; k <= 8 * 1440; k++)
@@ -524,8 +674,17 @@ namespace Sim
                 default: throw new InvalidOperationException("tf " + key);
             }
             b = new BarStore { S = st.S, TfSec = sec, TfName = key };
-            // History backward from the current price; closed periods have no bars.
+            // History backward from the current price; closed periods have no bars. A replayed timeframe gets the real bars.
             var list = new List<double[]>();
+            ReplayData rd = st.S.Replay;
+            if (rd != null && rd.TfSec == sec)
+            {
+                for (int i = 0; i < rd.T.Count && rd.T[i].AddSeconds(sec) <= Now; i++)
+                    list.Add(new double[] { rd.T[i].Ticks, rd.O[i], rd.H[i], rd.L[i], rd.C[i], rd.TickCount(i) });
+                if (list.Count > TotalHistoryBars) list.RemoveRange(0, list.Count - TotalHistoryBars);
+            }
+            else
+            {
             DateTime t = Floor(Now, sec);
             bool forming = IsOpen(st.S, Now);
             double close = st.Mid;
@@ -555,6 +714,7 @@ namespace Sim
                 cursor = cursor.AddSeconds(-sec);
             }
             list.Reverse();
+            }
             int visible = Math.Min(InitialVisibleBars, list.Count);
             b.Hidden.AddRange(list.Take(list.Count - visible));
             foreach (var bar in list.Skip(list.Count - visible))
@@ -1032,6 +1192,13 @@ namespace Sim
             if (st.BurstLeft > 0)
                 step += st.BurstDir * s.SigmaMinute * Math.Sqrt(dt / 60.0) * 0.6;
             st.Mid = Math.Max(st.Mid + step, s.Pip * 10);
+            ApplyTick(st);
+        }
+
+        /// <summary>A new price for st.Mid: spread, bars, server-side stops and targets, then the bot's handler.</summary>
+        private void ApplyTick(SymState st)
+        {
+            Spec s = st.S;
             double spreadFactor = 1.0 + 0.3 * Math.Abs(Gauss());
             if ((Now - st.OpenedAt).TotalMinutes < 10) spreadFactor *= 3;
             TimeSpan tod = Now.TimeOfDay;
@@ -1103,6 +1270,27 @@ namespace Sim
                     }
                     st.WasOpen = open;
                     if (!open) continue;
+                    if (st.S.Replay != null)
+                    {
+                        ReplayData rd = st.S.Replay;
+                        int bi = rd.IndexAt(t);
+                        if (bi != st.ReplayBar)
+                        {
+                            st.ReplayBar = bi;
+                            st.ReplayTicks = bi >= 0 ? rd.TicksOf(bi, Rng, st.S.Digits) : null;
+                            st.ReplayNext = 0;
+                        }
+                        if (st.ReplayTicks == null) continue;
+                        DateTime next = t.AddSeconds(1);
+                        while (st.ReplayNext < st.ReplayTicks.Count && st.ReplayTicks[st.ReplayNext].Time < next)
+                        {
+                            var tk = st.ReplayTicks[st.ReplayNext++];
+                            Now = tk.Time < t ? t : tk.Time;
+                            st.Mid = tk.Price;
+                            ApplyTick(st);
+                        }
+                        continue;
+                    }
                     if (st.BurstLeft > 0) st.BurstLeft--;
                     else if (Rng.NextDouble() < 1.0 / 400) { st.BurstLeft = 20 + Rng.Next(40); st.BurstDir = Rng.Next(2) == 0 ? -1 : 1; }
                     double lambda = st.S.TickRate * ActivityAt(t) * (st.BurstLeft > 0 ? 4.0 : 1.0);
@@ -1116,7 +1304,8 @@ namespace Sim
                 Now = t.AddSeconds(1);
                 foreach (var h in TimerHandlers.ToList())
                     h();
-                CheckInvariants();
+                if (InvariantEverySeconds <= 1 || (long)(t - start).TotalSeconds % InvariantEverySeconds == 0)
+                    CheckInvariants();
                 if (onSecond != null && !onSecond(this)) break;
             }
             Call("OnStop");
@@ -1405,8 +1594,143 @@ namespace Sim
             Console.WriteLine("max log lines in one hour: " + perHour);
         }
 
+        /// <summary>
+        /// The real-data backtest: the bot trades real EURUSD hourly bars (the AI learns on the first ~3100 hours, the
+        /// rest is trading it has never seen) with Pepperstone Razor costs: raw spread and 3 USD per lot per side.
+        /// Arguments: replay &lt;csv&gt; [dir].
+        /// </summary>
+        private static int RunReplay(string[] args)
+        {
+            string csv = args.Length > 1 ? args[1] : "FOREX_EURUSD_1H_ASK.csv";
+            string dir = args.Length > 2 ? args[2] : "replay-logs";
+            Directory.CreateDirectory(dir);
+            ReplayData data = ReplayData.LoadCsv(csv);
+            const int startIndex = 3120;
+            DateTime start = data.T[startIndex];
+            DateTime end = data.T[data.T.Count - 1].AddSeconds(data.TfSec);
+            Console.WriteLine("REAL DATA " + Path.GetFileName(csv) + ": " + data.T.Count + " bars " + data.T[0].ToString("yyyy-MM-dd") + " .. "
+                              + data.T[data.T.Count - 1].ToString("yyyy-MM-dd") + " | trading from " + start.ToString("yyyy-MM-dd HH:mm") + " (" + (data.T.Count - startIndex) + " bars)");
+            foreach (bool ticks in new[] { false, true })
+            {
+                data.Bursty = ticks;
+                var w = new World(31);
+                Spec eur = Specs().First(x => x.Name == "EURUSD");
+                eur.Replay = data;
+                eur.Price = data.O[startIndex];
+                eur.CommissionPerMillion = 26;          // 3 USD per 100k EUR per side at EURUSD ~1.15
+                w.AddSymbol(eur);
+                w.Balance = w.StartBalance = 49092.50;
+                w.InvariantEverySeconds = 60;
+                var bot = new QuantAI_Scalper_24x7_V3();
+                w.Wire(bot);
+                w.Configure = b =>
+                {
+                    b.FxSymbols = "EURUSD";
+                    b.CryptoSymbols = "";
+                    b.FxTimeFrames = "h1";
+                    b.UseTickVelocity = ticks;
+                    b.ShowHud = false;
+                };
+                w.Configure(bot);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                w.Run(start, end - start);
+                sw.Stop();
+                string tag = ticks ? "tick-filter-on" : "tick-filter-off";
+                System.IO.File.WriteAllLines(Path.Combine(dir, "replay-" + tag + ".txt"), w.Log);
+                var nets = w.Log.Where(x => x.Contains(" CLOSED #")).Select(x =>
+                {
+                    var mn = System.Text.RegularExpressions.Regex.Match(x, @"net ([+-][0-9.]+) EUR");
+                    return mn.Success ? double.Parse(mn.Groups[1].Value, CultureInfo.InvariantCulture) : 0.0;
+                }).ToList();
+                double win = nets.Where(x => x > 0.01).Sum(), loss = -nets.Where(x => x < -0.01).Sum();
+                double weeks = (end - start).TotalDays / 7.0;
+                string results = w.Log.LastOrDefault(x => x.Contains("| RESULTS ")) ?? "no RESULTS line";
+                Console.WriteLine("REPLAY " + tag + " | " + sw.Elapsed.TotalSeconds.ToString("F0") + " s | trades " + nets.Count + " (" + (nets.Count / weeks).ToString("F1")
+                                  + " per week) | net " + nets.Sum().ToString("+0.00;-0.00") + " EUR on a 200 EUR budget | profit factor "
+                                  + (loss > 0 ? (win / loss).ToString("F2") : "n/a") + " | violations " + w.Violations.Count + " | errors "
+                                  + w.Log.Count(x => x.Contains("ERROR in") || x.Contains("FATAL")));
+                Console.WriteLine("  " + results.Substring(Math.Max(0, results.IndexOf("RESULTS"))));
+                foreach (var v in w.Violations.Distinct().Take(5)) Console.WriteLine("  X " + v);
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// Exit and filter variants on the real-data backtest, each judged on the two halves of the trading period separately:
+        /// an improvement that holds in only one half is noise. The tick filter stays off (the ticks inside real hourly bars
+        /// are modelled, not real). Arguments: replay-sweep &lt;csv&gt; [dir].
+        /// </summary>
+        private static int RunReplaySweep(string[] args)
+        {
+            string csv = args.Length > 1 ? args[1] : "FOREX_EURUSD_1H_ASK.csv";
+            string dir = args.Length > 2 ? args[2] : "replay-logs";
+            Directory.CreateDirectory(dir);
+            ReplayData data = ReplayData.LoadCsv(csv);
+            const int startIndex = 3120;
+            DateTime start = data.T[startIndex];
+            DateTime end = data.T[data.T.Count - 1].AddSeconds(data.TfSec);
+            DateTime half = start + TimeSpan.FromTicks((end - start).Ticks / 2);
+            // A trend filter (trade only with EMA 100/200 on h1) was tried here on 2017-07-31..12-29 and lost in both halves
+            // (PF 0.82-0.88 against 1.11 without it), so it is not part of the bot; see PROJECT_STATE.
+            var variants = new List<(string Name, Action<QuantAI_Scalper_24x7_V3> Set)>
+            {
+                ("baseline (BE 0.4R, TP 1.0, SL 0.8, 5 bars, AI 0.50)", b => { }),
+                ("break-even off", b => { b.BeTriggerR = 0; }),
+                ("break-even at 0.8R", b => { b.BeTriggerR = 0.8; }),
+                ("TP1 1.5 ATR", b => { b.Tp1AtrMultiplier = 1.5; }),
+                ("TP1 2.0 ATR", b => { b.Tp1AtrMultiplier = 2.0; }),
+                ("SL 1.2 ATR", b => { b.SlAtrMultiplier = 1.2; }),
+                ("time exit 10 bars", b => { b.TimeExitBars = 10; b.AiHorizonBars = 10; }),
+                ("AI confidence 0.60", b => { b.MinConfidence = 0.60; }),
+                ("squeeze only", b => { b.UseSweep = false; }),
+                ("sweep only", b => { b.UseSqueeze = false; }),
+                ("TP1 1.5 + break-even off", b => { b.Tp1AtrMultiplier = 1.5; b.BeTriggerR = 0; }),
+                ("TP1 2.0 + BE off + 10 bars", b => { b.Tp1AtrMultiplier = 2.0; b.BeTriggerR = 0; b.TimeExitBars = 10; b.AiHorizonBars = 10; }),
+            };
+            Console.WriteLine("SWEEP on " + Path.GetFileName(csv) + " | trading " + start.ToString("yyyy-MM-dd") + " .. " + end.ToString("yyyy-MM-dd")
+                              + " | halves split at " + half.ToString("yyyy-MM-dd"));
+            foreach (var v in variants)
+            {
+                data.Bursty = false;
+                var w = new World(31);
+                Spec eur = Specs().First(x => x.Name == "EURUSD");
+                eur.Replay = data;
+                eur.Price = data.O[startIndex];
+                eur.CommissionPerMillion = 26;
+                w.AddSymbol(eur);
+                w.Balance = w.StartBalance = 49092.50;
+                w.InvariantEverySeconds = 60;
+                var bot = new QuantAI_Scalper_24x7_V3();
+                w.Wire(bot);
+                w.Configure = b =>
+                {
+                    b.FxSymbols = "EURUSD"; b.CryptoSymbols = ""; b.FxTimeFrames = "h1"; b.UseTickVelocity = false; b.ShowHud = false; b.LogSkipReasons = false;
+                    v.Set(b);
+                };
+                w.Configure(bot);
+                w.Run(start, end - start);
+                // One entry per position: its net over all fills, dated by its last fill.
+                var byHalf = w.Hist.Where(x => x.Label == "QuantAI_M1").GroupBy(x => x.PositionId)
+                              .Select(g => (t: g.Max(x => x.Time), net: g.Sum(x => x.Net))).OrderBy(x => x.t).ToList();
+                var closed = byHalf.Select(x => x.net).ToList();
+                string Part(IEnumerable<double> nets)
+                {
+                    var l = nets.ToList();
+                    double gw = l.Where(x => x > 0.01).Sum(), gl = -l.Where(x => x < -0.01).Sum();
+                    return l.Count + " tr, " + l.Sum().ToString("+0.0;-0.0") + " EUR, PF " + (gl > 0 ? (gw / gl).ToString("F2") : "n/a");
+                }
+                Console.WriteLine("SWEEP " + v.Name.PadRight(52) + " | all " + Part(closed) + " | 1st half " + Part(byHalf.Where(x => x.t < half).Select(x => x.net))
+                                  + " | 2nd half " + Part(byHalf.Where(x => x.t >= half).Select(x => x.net)) + " | violations " + w.Violations.Count);
+            }
+            return 0;
+        }
+
         public static int Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "replay")
+                return RunReplay(args);
+            if (args.Length > 0 && args[0] == "replay-sweep")
+                return RunReplaySweep(args);
             string dir = args.Length > 0 ? args[0] : "sim-logs";
             Directory.CreateDirectory(dir);
             var mk = new Func<Action<QuantAI_Scalper_24x7_V3>, Action<QuantAI_Scalper_24x7_V3>>(f => f);

@@ -214,9 +214,17 @@ quiet (no setup): USDJPY m15, AUDUSD m15, XRPUSD h1, SOLUSD h1 cost 0.26>0.25
   Рынок в имитации синтетический: она проверяет механику, а не прибыльность. Прогон пишет отчёт
   `sim-logs/report.html` и журналы каждого сценария.
 
+- **Прогон по реальным котировкам.** Тот же имитатор проигрывает реальные часовые бары EURUSD за 2017 год (Dukascopy,
+  из пакета `gym-anytrading`). Внутри каждого бара генерируются тики, проходящие через его открытие, максимум, минимум
+  и закрытие. Издержки как у Pepperstone Razor. AI учится на первых ~3100 часах, дальше бот торгует полгода, которых
+  не видел. Режим `replay-sweep` сравнивает варианты настроек по двум половинам периода отдельно.
+
 ```
 cd ctrader/tests/QuantAI_Scalper_Tests && dotnet run -c Release
 cd ctrader/tests/QuantAI_Scalper_Sim && dotnet run -c Release
+pip download --no-deps gym-anytrading   # внутри: gym_anytrading/datasets/data/FOREX_EURUSD_1H_ASK.csv
+cd ctrader/tests/QuantAI_Scalper_Sim && dotnet run -c Release -- replay <путь к CSV> [папка]
+cd ctrader/tests/QuantAI_Scalper_Sim && dotnet run -c Release -- replay-sweep <путь к CSV> [папка]
 ```
 
 ## Pepperstone (cTrader)
