@@ -1,9 +1,9 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.3.2
+//  QuantAI_Scalper_24x7_V3  v3.4.0
 //  cTrader Automate cBot | multi-market micro-impulse scalper for small budgets, trading around the clock
 //    - crypto 24/7 (weekends included), Forex whenever its market is open
 //    - ONE instance trades every symbol of two lists (a demo account allows one cloud instance)
-//    - sized for a 20-50 EUR budget: minimum volumes, margin checked by the largest of three estimates,
+//    - sized for a 20-200 EUR budget (200 by default): minimum volumes, margin checked by the largest of three estimates,
 //      markets the budget cannot carry are left out at start with the budget they would need
 //  Needs cTrader 5.0+ (Algo API 1.0.9+): Windows, Mac, Web and Mobile, local or cloud. C# 7.3 syntax only.
 //  Ready to run: every parameter below already holds its working value.
@@ -56,13 +56,13 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.3.2";
+        private const string BotVersion = "3.4.0";
 
         #region Parameters
 
         // ---- 0. Budget and markets ---------------------------------------------------------------------
 
-        [Parameter("Bot Budget (account ccy, 0 = whole account)", Group = "0. Budget & Markets", DefaultValue = 50.0, MinValue = 0.0, Step = 10.0)]
+        [Parameter("Bot Budget (account ccy, 0 = whole account)", Group = "0. Budget & Markets", DefaultValue = 200.0, MinValue = 0.0, Step = 10.0)]
         public double BotBudget { get; set; }
 
         [Parameter("Forex Symbols (A|B = alternatives)", Group = "0. Budget & Markets", DefaultValue = "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,USDCHF")]
@@ -304,6 +304,8 @@ namespace cAlgo.Robots
         private const int MinBaselineBars = 2;                // ...but never fewer bars than this
         private const double StaleBarGapMinutes = 15.0;       // a bar that closes this long after its end spanned a market break
         private const double CommissionRecheckShare = 0.25;   // a fill commission this far from the estimate re-checks timeframe and AI
+        private const double ScratchBand = 0.01;              // a closed trade within this much of zero (account ccy) is a scratch in RESULTS
+        private const int VerdictMinTrades = 100;             // RESULTS judge the strategy only after this many closed trades
         private const int SpreadWindowTicks = 500;            // spreads kept for the rolling median
         private const int SpreadCalibrationTicks = 300;       // ticks before the timeframe and the AI are fitted to the live spread
         private const double SpreadSettleMinutes = 10.0;      // spreads right after a market (re)opens are not typical and are not sampled
@@ -413,6 +415,7 @@ namespace cAlgo.Robots
                 AddMarket(item, true);
 
             LogBudgetSummary();
+            LogResults();
             if (_markets.Count == 0)
             {
                 Log("FATAL: no listed symbol can be traded with this account and budget (see the MARKET lines above). "
@@ -475,6 +478,7 @@ namespace cAlgo.Robots
                 Log("STOP v" + BotVersion + ": trades " + _statTrades + " (wins " + _statWins + ", losses " + _statLosses
                     + ", scratch " + _statScratch + "), TP1 hits " + _statTp1 + ", time exits " + _statTimeExits
                     + ", break exits " + _statBreakExits + ", net " + Signed(_statNet, 2) + " " + _ccy);
+                LogResults();
             }
             catch (Exception ex)
             {
@@ -2716,12 +2720,62 @@ namespace cAlgo.Robots
                 m.TradesToday = 0;
         }
 
+        /// <summary>
+        /// Every closed position of this budget, rebuilt from the trade history so it survives restarts: the numbers that
+        /// say whether the strategy earns on this account before real money is risked on it.
+        /// </summary>
+        private void LogResults()
+        {
+            try
+            {
+                var open = new HashSet<int>();
+                foreach (Position p in Positions.FindAll(BotLabel))
+                    open.Add(p.Id);
+                var net = new Dictionary<int, double>();
+                var closedAt = new Dictionary<int, DateTime>();
+                foreach (HistoricalTrade h in History.FindAll(BotLabel))
+                {
+                    if (!InBudget(h.EntryTime) || open.Contains(h.PositionId))
+                        continue;
+                    double v;
+                    net.TryGetValue(h.PositionId, out v);
+                    net[h.PositionId] = v + h.NetProfit;
+                    DateTime t;
+                    if (!closedAt.TryGetValue(h.PositionId, out t) || h.ClosingTime > t)
+                        closedAt[h.PositionId] = h.ClosingTime;
+                }
+                string since = BotBudget > 0 ? "since " + _budgetStart.ToString("yyyy-MM-dd HH:mm", Inv) + " UTC" : "in the history";
+                if (net.Count == 0)
+                {
+                    Log("RESULTS " + since + ": no closed trades yet");
+                    return;
+                }
+                var ids = new List<int>(net.Keys);
+                ids.Sort((a, b) => closedAt[a].CompareTo(closedAt[b]));
+                var nets = new List<double>(ids.Count);
+                foreach (int id in ids)
+                    nets.Add(net[id]);
+                TradeSummary r = MarketMath.Summarize(nets, ScratchBand);
+                string pf = r.GrossLoss > 0 ? F(r.GrossWin / r.GrossLoss, 2) : (r.GrossWin > 0 ? "no losses" : "n/a");
+                Log("RESULTS " + since + ": " + r.Trades + " trades (" + r.Wins + " wins, " + r.Losses + " losses, " + r.Scratches + " scratch), net "
+                    + Signed(r.Net, 2) + " " + _ccy + (BotBudget > 0 ? " (" + Signed(r.Net / BotBudget * 100.0, 1) + "% of the budget)" : "")
+                    + ", profit factor " + pf + ", avg win " + Signed(r.Wins > 0 ? r.GrossWin / r.Wins : 0.0, 2) + ", avg loss "
+                    + Signed(r.Losses > 0 ? -r.GrossLoss / r.Losses : 0.0, 2) + ", max drawdown " + F(r.MaxDrawdown, 2) + " " + _ccy
+                    + " | " + MarketMath.Verdict(r, VerdictMinTrades));
+            }
+            catch (Exception ex)
+            {
+                LogError("results", ex);
+            }
+        }
+
         private void CheckNewDay(DateTime now)
         {
             if (now.Date == _day)
                 return;
             Log("NEW DAY " + now.ToString("yyyy-MM-dd", Inv) + ": previous day " + Signed(BotEquity() - _dayStartEquity, 2) + " " + _ccy
                 + ", " + _tradesToday + " trade(s); budget equity " + F(BotEquity(), 2) + " " + _ccy + ", account balance " + F(Account.Balance, 2));
+            LogResults();
             ResetDay(now);
         }
 
@@ -3749,6 +3803,19 @@ namespace cAlgo.Robots
     }
 
     /// <summary>Round-turn commission per unit of volume in account currency, from the symbol's commission settings.</summary>
+    /// <summary>Closed-trade statistics for RESULTS (see MarketMath.Summarize).</summary>
+    internal sealed class TradeSummary
+    {
+        public int Trades;
+        public int Wins;
+        public int Losses;
+        public int Scratches;
+        public double Net;
+        public double GrossWin;
+        public double GrossLoss;
+        public double MaxDrawdown;
+    }
+
     internal static class CommissionMath
     {
         /// <param name="commission">base commission for one side of the trade</param>
@@ -4070,6 +4137,58 @@ namespace cAlgo.Robots
             int minutes = unit == "m" ? n : unit == "h" ? n * 60 : n * 1440;
             int[] known = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 45, 60, 120, 180, 240, 360, 480, 720, 1440 };
             return Array.IndexOf(known, minutes) >= 0 ? minutes : 0;
+        }
+
+        /// <summary>
+        /// Win/loss statistics of closed trades given in closing order: a trade within scratchBand of zero is a scratch;
+        /// the drawdown is the largest fall of the running total from its previous high (starting at zero).
+        /// </summary>
+        public static TradeSummary Summarize(IList<double> nets, double scratchBand)
+        {
+            var r = new TradeSummary();
+            double total = 0.0;
+            double peak = 0.0;
+            for (int i = 0; i < nets.Count; i++)
+            {
+                double v = nets[i];
+                if (double.IsNaN(v) || double.IsInfinity(v))
+                    continue;
+                r.Trades++;
+                if (v > scratchBand)
+                {
+                    r.Wins++;
+                    r.GrossWin += v;
+                }
+                else if (v < -scratchBand)
+                {
+                    r.Losses++;
+                    r.GrossLoss -= v;
+                }
+                else
+                {
+                    r.Scratches++;
+                }
+                total += v;
+                if (total > peak)
+                    peak = total;
+                if (peak - total > r.MaxDrawdown)
+                    r.MaxDrawdown = peak - total;
+            }
+            r.Net = total;
+            return r;
+        }
+
+        /// <summary>A plain-words reading of the results: no judgement before minTrades closed trades.</summary>
+        public static string Verdict(TradeSummary r, int minTrades)
+        {
+            if (r.Trades < minTrades)
+                return "too early to judge (" + r.Trades + "/" + minTrades + " trades)";
+            double pf = r.GrossLoss > 0 ? r.GrossWin / r.GrossLoss : (r.GrossWin > 0 ? double.PositiveInfinity : 0.0);
+            if (r.Net > 0 && pf >= 1.2)
+                return "EARNING so far on this account";
+            if (r.Net < 0 || pf < 1.0)
+                return "LOSING so far - do not put real money on it";
+            return "about break-even - not worth real money yet";
         }
 
         /// <summary>

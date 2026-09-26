@@ -168,6 +168,25 @@ namespace Harness
             double jpyRoundTurn = 6.0 / 100000 * usdToEur;                    // 3 USD per lot per side, base USD
             Check(Math.Abs(MarketMath.CommissionDistance(jpyRoundTurn, jpyPipValue, 0.01) - 0.00888) < 1e-5, "Razor on USDJPY at 148 = 0.89 pip");
 
+            // RESULTS: wins, losses, scratches, profit factor and the drawdown of the running total.
+            TradeSummary r = MarketMath.Summarize(new List<double> { 1.0, -0.5, 0.005, 2.0, -1.0, -1.5, 0.5 }, 0.01);
+            Check(r.Trades == 7 && r.Wins == 3 && r.Losses == 3 && r.Scratches == 1, "results: 3 wins, 3 losses, 1 scratch");
+            Check(Math.Abs(r.Net - 0.505) < 1e-9, "results: net is the sum");
+            Check(Math.Abs(r.GrossWin - 3.5) < 1e-9 && Math.Abs(r.GrossLoss - 3.0) < 1e-9, "results: gross win 3.5, gross loss 3.0");
+            Check(Math.Abs(r.MaxDrawdown - 2.5) < 1e-9, "results: drawdown 2.505 -> 0.005 is 2.5");
+            Check(MarketMath.Summarize(new List<double> { -1.0, -1.0 }, 0.01).MaxDrawdown == 2.0, "results: a losing start is a drawdown from zero");
+            Check(MarketMath.Summarize(new List<double>(), 0.01).Trades == 0, "results: no trades");
+            Check(MarketMath.Verdict(r, 100).StartsWith("too early"), "verdict: 7 trades are too few");
+            var many = new List<double>();
+            for (int i = 0; i < 60; i++) { many.Add(1.3); many.Add(-1.0); }
+            Check(MarketMath.Verdict(MarketMath.Summarize(many, 0.01), 100).StartsWith("EARNING"), "verdict: PF 1.3 over 120 trades earns");
+            var losing = new List<double>();
+            for (int i = 0; i < 60; i++) { losing.Add(0.9); losing.Add(-1.0); }
+            Check(MarketMath.Verdict(MarketMath.Summarize(losing, 0.01), 100).StartsWith("LOSING"), "verdict: PF 0.9 loses");
+            var flat = new List<double>();
+            for (int i = 0; i < 60; i++) { flat.Add(1.1); flat.Add(-1.0); }
+            Check(MarketMath.Verdict(MarketMath.Summarize(flat, 0.01), 100).StartsWith("about break-even"), "verdict: PF 1.1 is break-even");
+
             // Mean true range, including the gap from the previous close.
             double[] h = { 10, 12, 11, 15 };
             double[] l = { 9, 10, 10, 13 };

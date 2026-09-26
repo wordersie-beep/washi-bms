@@ -327,6 +327,7 @@ namespace Sim
         public int TotalHistoryBars = 4200;
         public double LoggedMaxLen;
         public string LongestLine = "";
+        public Action<QuantAI_Scalper_24x7_V3> Configure;   // the scenario's settings, applied again to a restarted instance
         public bool Activity;            // weekly activity cycle: busy weekday afternoons, quiet nights, very quiet weekends
         public double Delivery = 1.0;    // share of the broker's ticks that reach the bot (a busy cloud may skip some)
 
@@ -1129,7 +1130,7 @@ namespace Sim
             foreach (SymState st in Syms.Values) st.TickHandlers.Clear();
             var bot = new QuantAI_Scalper_24x7_V3();
             Wire(bot);
-            configure?.Invoke(bot);
+            (configure ?? Configure)?.Invoke(bot);
             Log.Add(Now.ToString("ddd HH:mm:ss", CultureInfo.InvariantCulture) + " | ---------------- RESTART ----------------");
             Call("OnStart");
         }
@@ -1247,7 +1248,9 @@ namespace Sim
             w.Balance = w.StartBalance = balance;
             var bot = new QuantAI_Scalper_24x7_V3();
             w.Wire(bot);
-            configure?.Invoke(bot);
+            // The scenarios below were written for the 50 EUR budget; the bot's own default (200) is exercised by scenario N.
+            w.Configure = b => { b.BotBudget = 50; configure?.Invoke(b); };
+            w.Configure(bot);
             beforeStart?.Invoke(w);
             var sw = System.Diagnostics.Stopwatch.StartNew();
             w.Run(start, duration, onSecond);
@@ -1537,6 +1540,38 @@ namespace Sim
                 if (!(mLater > mFirst)) mw.Violations.Add("margin-capped BCH trades did not grow after the real 1:5 margin was seen");
             }
 
+            // 14. The new default budget of 200 EUR on the demo: all six Forex pairs fit (GBPUSD too), several positions at once,
+            // margin within 90 % of the budget; RESULTS at the stop must agree with the CLOSED lines.
+            World nw = Scenario("N: budget 200 (the new default) on Monday", 24, new DateTime(2026, 9, 28, 7, 0, 0, DateTimeKind.Utc), TimeSpan.FromHours(10),
+                     b => { b.BotBudget = 200; }, 49092.50, Path.Combine(dir, "logN.txt"));
+            bool nGbp = nw.Log.Any(x => x.Contains("MARKET GBPUSD: forex"));
+            int nMaxOpen = 0;
+            {
+                int openNow = 0;
+                foreach (string x in nw.Log)
+                {
+                    if (x.Contains(" ENTRY ")) { openNow++; nMaxOpen = Math.Max(nMaxOpen, openNow); }
+                    else if (x.Contains(" CLOSED #")) openNow = Math.Max(0, openNow - 1);
+                }
+            }
+            string nResults = nw.Log.LastOrDefault(x => x.Contains("| RESULTS "));
+            int nClosed = nw.Log.Count(x => x.Contains(" CLOSED #"));
+            double nClosedNet = nw.Log.Where(x => x.Contains(" CLOSED #")).Sum(x =>
+            {
+                var mn = System.Text.RegularExpressions.Regex.Match(x, @"net ([+-][0-9.]+) EUR");
+                return mn.Success ? double.Parse(mn.Groups[1].Value, CultureInfo.InvariantCulture) : 0.0;
+            });
+            var nr = nResults != null ? System.Text.RegularExpressions.Regex.Match(nResults, @": (\d+) trades .*net ([+-][0-9.]+) EUR") : null;
+            int nResTrades = nr != null && nr.Success ? int.Parse(nr.Groups[1].Value) : -1;
+            double nResNet = nr != null && nr.Success ? double.Parse(nr.Groups[2].Value, CultureInfo.InvariantCulture) : double.NaN;
+            Console.WriteLine("N GBPUSD traded " + nGbp + " | max open " + nMaxOpen + " | closed " + nClosed + " net " + nClosedNet.ToString("F2") + " | RESULTS "
+                              + (nResults != null ? nResults.Substring(nResults.IndexOf("RESULTS")) : "none"));
+            if (!nGbp) nw.Violations.Add("GBPUSD not in play on a 200 EUR budget");
+            if (nMaxOpen < 2) nw.Violations.Add("never more than one position on a 200 EUR budget");
+            if (nResults == null) nw.Violations.Add("no RESULTS line at the stop");
+            else if (nResTrades != nClosed || Math.Abs(nResNet - nClosedNet) > 0.01 * Math.Max(1, nClosed))
+                nw.Violations.Add("RESULTS disagree with the CLOSED lines: " + nResTrades + " trades " + nResNet + " vs " + nClosed + " trades " + nClosedNet.ToString("F2"));
+
             string[] checks =
             {
                 "Выходные, бюджет 50 EUR: только крипта, выбор таймфрейма, суточный и субботний перерывы",
@@ -1551,7 +1586,8 @@ namespace Sim
                 "Старая позиция BTC на бюджете 50 EUR: ведётся вне бюджета, новых входов нет",
                 "Тихая суббота после активной недели, спреды как у Pepperstone, бот видит 60 % тиков",
                 "Форекс: символ занижает комиссию в 7 раз — бот узнаёт настоящую по первой сделке и уходит с m1",
-                "BCH: брокер блокирует залог 1:5, бот предполагал 1:2 — после первой сделки объём по реальному залогу"
+                "BCH: брокер блокирует залог 1:5, бот предполагал 1:2 — после первой сделки объём по реальному залогу",
+                "Бюджет 200 EUR (новый по умолчанию): все пары форекса, несколько позиций сразу, итоги RESULTS сходятся со сделками"
             };
             string[] notes =
             {
@@ -1570,12 +1606,15 @@ namespace Sim
                     + ", наибольшая стоимость входа " + lMaxCost.ToString("F2", CultureInfo.InvariantCulture) + " ATR (предел 0.25)",
                 "объёмы BCH: " + string.Join(", ", mEntries.Select(v => v.ToString("0.##", CultureInfo.InvariantCulture))) + "; залог первой: "
                     + (mMargins.Count > 0 ? mMargins[0][0].ToString("F2", CultureInfo.InvariantCulture) + " EUR при оценке " + mMargins[0][1].ToString("F2", CultureInfo.InvariantCulture) : "—")
-                    + ", дальше оценка = реальному залогу (риск 3 %, чтобы залог был ограничением)"
+                    + ", дальше оценка = реальному залогу (риск 3 %, чтобы залог был ограничением)",
+                "GBPUSD в работе: " + (nGbp ? "да" : "нет") + ", позиций одновременно до " + nMaxOpen + ", RESULTS: " + nResTrades + " сделок, "
+                    + (double.IsNaN(nResNet) ? "—" : nResNet.ToString("+0.00;-0.00", CultureInfo.InvariantCulture)) + " EUR (по строкам CLOSED "
+                    + nClosed + ", " + nClosedNet.ToString("+0.00;-0.00", CultureInfo.InvariantCulture) + ")"
             };
-            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw, mw };
-            // Scenario order in Rows follows the calls: A B C D E F H G I J K L M.
-            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L", "M" };
-            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M" };
+            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw, mw, nw };
+            // Scenario order in Rows follows the calls: A B C D E F H G I J K L M N.
+            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L", "M", "N" };
+            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N" };
             for (int k = 0; k < Rows.Count && k < order.Length; k++)
             {
                 int idx = Array.IndexOf(letters, order[k]);
@@ -1589,7 +1628,7 @@ namespace Sim
             Console.WriteLine();
             Console.WriteLine("Unknown API members used by the bot (not mocked):");
             foreach (var kv in Mk.Unknown.OrderByDescending(k => k.Value)) Console.WriteLine("  " + kv.Key + " x" + kv.Value);
-            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw, mw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
+            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw, mw, nw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
             Console.WriteLine(ok ? "SIMULATION OK" : "SIMULATION FOUND PROBLEMS");
             return ok ? 0 : 1;
         }
