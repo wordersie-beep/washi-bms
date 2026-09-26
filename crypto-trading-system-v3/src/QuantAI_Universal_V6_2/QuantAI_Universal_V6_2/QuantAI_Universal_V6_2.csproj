@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Имя .algo берётся из имени РОДИТЕЛЬСКОЙ папки проекта — вложенность не менять. -->
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>QuantAI_Universal_V6_2</AssemblyName>
+    <Version>6.2.0</Version>
+    <RootNamespace>cAlgo.Robots</RootNamespace>
+    <Description>AI-ансамбль из 5 стратегий: онлайн Naive Bayes, RL-веса, вероятностный фильтр режима, ATR-риск, частичная фиксация и трейлинг.</Description>
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>false</UseWPF>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="cTrader.Automate" Version="1.0.21" />
+  </ItemGroup>
+</Project>
