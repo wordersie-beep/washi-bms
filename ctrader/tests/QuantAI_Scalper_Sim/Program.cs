@@ -1257,6 +1257,7 @@ namespace Sim
             sw.Stop();
             System.IO.File.WriteAllLines(logFile, w.Log);
             CheckEntryCosts(w, specs);
+            CheckPlans(w);
             Report(w, sw.Elapsed);
             Rows.Add(new ReportRow
             {
@@ -1300,6 +1301,53 @@ namespace Sim
             }
         }
 
+        /// <summary>
+        /// Every entry has a PLAN line, and the plan's money comes true: a position closed at its original stop loses what the
+        /// plan said, one closed whole at TP1 gains what it said (within slippage and rounding).
+        /// </summary>
+        private static void CheckPlans(World w)
+        {
+            var loss = new Dictionary<string, double>();
+            var gain = new Dictionary<string, double>();
+            int entries = 0, plans = 0, checkedStops = 0, checkedTargets = 0;
+            foreach (string line in w.Log)
+            {
+                if (line.Contains(" ENTRY "))
+                    entries++;
+                var mp = System.Text.RegularExpressions.Regex.Match(line, @"PLAN #(\d+): stop \S+ = -([0-9.]+) EUR(?: \| TP1 \S+ = \+([0-9.]+) EUR( on )?)?");
+                if (!mp.Success)
+                    continue;
+                plans++;
+                loss[mp.Groups[1].Value] = double.Parse(mp.Groups[2].Value, CultureInfo.InvariantCulture);
+                if (mp.Groups[3].Success && !mp.Groups[4].Success)
+                    gain[mp.Groups[1].Value] = double.Parse(mp.Groups[3].Value, CultureInfo.InvariantCulture);
+            }
+            if (plans != entries)
+                w.Violations.Add(entries + " entries but " + plans + " PLAN lines");
+            foreach (string line in w.Log)
+            {
+                var mc = System.Text.RegularExpressions.Regex.Match(line, @"CLOSED #(\d+) \S+ \S+ by (STOP LOSS|TP1 \(server\)): net ([+-][0-9.]+) EUR");
+                if (!mc.Success)
+                    continue;
+                string id = mc.Groups[1].Value;
+                double net = double.Parse(mc.Groups[3].Value, CultureInfo.InvariantCulture);
+                double expected;
+                if (mc.Groups[2].Value == "STOP LOSS" && loss.TryGetValue(id, out expected))
+                {
+                    checkedStops++;
+                    if (Math.Abs(net + expected) > Math.Max(0.03, 0.15 * expected))
+                        w.Violations.Add("#" + id + " stopped at " + net.ToString("F2") + " EUR, the plan said -" + expected.ToString("F2"));
+                }
+                else if (mc.Groups[2].Value != "STOP LOSS" && gain.TryGetValue(id, out expected))
+                {
+                    checkedTargets++;
+                    if (Math.Abs(net - expected) > Math.Max(0.03, 0.15 * expected))
+                        w.Violations.Add("#" + id + " took TP1 at " + net.ToString("F2") + " EUR, the plan said +" + expected.ToString("F2"));
+                }
+            }
+            Console.WriteLine("PLAN lines " + plans + "/" + entries + " | stops checked " + checkedStops + " | whole TP1 checked " + checkedTargets);
+        }
+
         private static void WriteReport(string path)
         {
             string H(string x) => System.Net.WebUtility.HtmlEncode(x);
@@ -1333,7 +1381,8 @@ namespace Sim
             }
             sb.Append("<p class=\"sub\">Правила, проверяемые каждую секунду: стоп у каждой позиции, не больше одной позиции на символ и 8 всего, "
                       + "залог бюджета ≤ 90 %, ни одной позиции в длинный перерыв рынка, после открытия рынка нет сетапов, "
-                      + "взведённых до длинного перерыва; после прогона — ни одного входа дороже предела (спред + комиссия).</p></body></html>");
+                      + "взведённых до длинного перерыва; после прогона — ни одного входа дороже предела (спред + комиссия), у каждого входа "
+                      + "есть план, и выходы по стопу и TP1 дают обещанные в нём суммы.</p></body></html>");
             System.IO.File.WriteAllText(path, sb.ToString());
         }
 

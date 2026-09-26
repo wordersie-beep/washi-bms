@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.4.0
+//  QuantAI_Scalper_24x7_V3  v3.4.1
 //  cTrader Automate cBot | multi-market micro-impulse scalper for small budgets, trading around the clock
 //    - crypto 24/7 (weekends included), Forex whenever its market is open
 //    - ONE instance trades every symbol of two lists (a demo account allows one cloud instance)
@@ -56,7 +56,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.4.0";
+        private const string BotVersion = "3.4.1";
 
         #region Parameters
 
@@ -1576,9 +1576,41 @@ namespace cAlgo.Robots
                  + " | conf " + (double.IsNaN(conf) ? "n/a" : Pct(conf)) + " | TV " + F(burst, 2) + "x | cost " + F(CostRatio(m), 2) + " ATR | positions "
                  + Positions.FindAll(BotLabel).Length + "/" + MaxOpenPositions);
             LogM(m, "  " + sizing + (aiInfo.Length > 0 ? " | AI " + aiInfo : ""));
+            LogM(m, "  " + TradePlan(m, p, st));
             if (m.IsChart)
                 DrawEntry(m, p);
             return true;
+        }
+
+        /// <summary>
+        /// What happens next to a new position, in money and prices: the loss at the stop, the gain at TP1, where the stop moves
+        /// to break-even and when the time exit comes - so a trade can be followed on a phone without knowing the rules.
+        /// </summary>
+        private string TradePlan(Market m, Position p, TradeState st)
+        {
+            Symbol sym = m.Symbol;
+            double perPrice = sym.PipSize > 0 ? sym.PipValue / sym.PipSize : 0.0;   // account ccy per unit per 1.0 of price
+            double units = p.VolumeInUnits;
+            double tp1Units = st.Splittable ? st.PartialVolume : (st.CloseAllAtTp1 ? units : 0.0);
+            double loss = st.RiskDist * units * perPrice + m.CommissionPerUnit * units;
+            double gain = st.Tp1Dist * tp1Units * perPrice - m.CommissionPerUnit * tp1Units;
+            var sb = new StringBuilder(200);
+            sb.Append("PLAN #").Append(p.Id).Append(": stop ").Append(P(m, st.IsLong ? p.EntryPrice - st.RiskDist : p.EntryPrice + st.RiskDist))
+              .Append(" = -").Append(F(loss, 2)).Append(' ').Append(_ccy);
+            if (tp1Units > 0)
+            {
+                sb.Append(" | TP1 ").Append(P(m, TargetPrice(p, st.Tp1Dist))).Append(" = +").Append(F(gain, 2)).Append(' ').Append(_ccy);
+                if (tp1Units < units)
+                    sb.Append(" on ").Append(Lots(m, tp1Units)).Append(", the rest trails");
+            }
+            if (BeTriggerR > 0)
+            {
+                double trigger = st.IsLong ? p.EntryPrice + BeTriggerR * st.RiskDist : p.EntryPrice - BeTriggerR * st.RiskDist;
+                sb.Append(" | at ").Append(P(m, trigger)).Append(" the stop moves to ").Append(P(m, BreakevenPrice(m, p))).Append(" (break-even)");
+            }
+            if (TimeExitBars > 0)
+                sb.Append(" | time exit ").Append(p.EntryTime.AddSeconds(TimeExitBars * m.RiskSec).ToString("HH:mm", Inv)).Append(" UTC if TP1 is not reached");
+            return sb.ToString();
         }
 
         /// <summary>
