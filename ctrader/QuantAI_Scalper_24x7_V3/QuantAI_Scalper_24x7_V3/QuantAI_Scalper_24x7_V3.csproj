@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
-    Build outside cTrader:  dotnet build -c Release   ->  bin/Release/net6.0/QuantAI_Scalper_M1_MicroDepot_Pro.algo
+    Build outside cTrader:  dotnet build -c Release   ->  bin/Release/net6.0/QuantAI_Scalper_24x7_V3.algo
     The API is pinned to cTrader.Automate 1.0.9 (cTrader 5.0), the first release with Robot.DefaultSymbolName /
     DefaultTimeFrame, so the .algo opens in every cTrader 5 app (Windows, Mac, Web, Mobile) and in the cloud.
     cTrader itself keeps its own project file when the source is pasted into its editor.

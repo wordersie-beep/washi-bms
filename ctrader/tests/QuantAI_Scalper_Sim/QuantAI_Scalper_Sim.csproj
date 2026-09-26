@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    End-to-end simulation: the real cBot class runs against mocked cTrader services (account, symbols, bars,
+    indicators, positions, history, orders, timer, log) injected through reflection into cTrader.Automate 1.0.21.
+    Eight scenarios: weekend crypto on a 50 EUR budget, the Forex week open, a real 20 EUR account, the Friday
+    close with 4 lots, a restart with an open position, the daily loss limit, a broker minimum stop and a broker
+    that blocks more margin than estimated.
+    Run:  dotnet run -c Release [log-folder]   (exit code 0 = no errors and no rule violations)
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <AlgoBuild>False</AlgoBuild>
+    <AlgoPublish>False</AlgoPublish>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>CS0618;CS8632</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../QuantAI_Scalper_24x7_V3/QuantAI_Scalper_24x7_V3/QuantAI_Scalper_24x7_V3.cs" />
+    <Compile Include="Program.cs" />
+    <PackageReference Include="cTrader.Automate" Version="1.0.21" />
+  </ItemGroup>
+</Project>

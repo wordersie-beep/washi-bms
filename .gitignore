@@ -6,4 +6,7 @@ __pycache__/
 bin/
 obj/
 *.algo
-!ctrader/QuantAI_Scalper_M1_MicroDepot_Pro/release/*.algo
+!ctrader/QuantAI_Scalper_24x7_V3/release/*.algo
+
+# simulator output
+ctrader/tests/QuantAI_Scalper_Sim/sim-logs/

@@ -1,34 +1,35 @@
 // =====================================================================================================
-//  QuantAI_Scalper_M1_MicroDepot_Pro  v2.0.0
-//  cTrader Automate cBot | multi-market micro-impulse scalper
-//    - Forex on M1 during the week, crypto on M5 around the clock (weekends included)
-//    - ONE instance trades every symbol of the two lists (a demo account allows one cloud instance)
-//    - up to Max Open Positions at once, at most one per symbol
+//  QuantAI_Scalper_24x7_V3  v3.0.0
+//  cTrader Automate cBot | multi-market micro-impulse scalper for small budgets, trading around the clock
+//    - crypto 24/7 (weekends included), Forex whenever its market is open
+//    - ONE instance trades every symbol of two lists (a demo account allows one cloud instance)
+//    - sized for a 20-50 EUR budget: minimum volumes, margin checked by the largest of three estimates,
+//      markets the budget cannot carry are left out at start with the budget they would need
 //  Needs cTrader 5.0+ (Algo API 1.0.9+): Windows, Mac, Web and Mobile, local or cloud. C# 7.3 syntax only.
-//  Ready to run: the instance opens on EURUSD m1 and every parameter below already holds its working value.
+//  Ready to run: every parameter below already holds its working value.
 // -----------------------------------------------------------------------------------------------------
 //  ENGINE (per symbol)
-//   1. Tick Velocity Engine   Ticks in a sliding window (default 3 s) against the average tick rate of the
-//                             last 100 bars; a ratio of at least N marks an institutional inflow.
-//   2. Volman 20 EMA Squeeze  A tight box of recent bars hugging the 20 EMA, entered on the breaking tick.
-//   3. Liquidity Sweep        A false pierce of the 10-bar high/low, entered when price reclaims the EMA.
-//   4. AI classifier          Gaussian Naive Bayes over [Tick_Velocity, EMA20_Distance, RSI_Slope,
-//                             Spread_Ratio], trained per symbol on history, then online on every closed bar
-//                             with the outcome this bot's own exit rules would have produced.
-//   5. Exits                  SL 0.8 x ATR, TP1 1.0 x ATR closing 60 %, micro break-even at +0.4R, ATR
-//                             trailing for the runner, time exit after 5 bars of the ATR timeframe.
-//  PORTFOLIO
-//   - Size: Fixed Lots per trade (0 = Risk Percent of balance), capped by Max Lots, by the broker maximum
-//     and by margin: a trade may use Margin Per Trade % of free margin, and all open positions together may
-//     block Max Total Margin % of equity. When even the minimum volume needs more than the per-trade share,
-//     the minimum volume is still taken while the total limit allows it (a 50 EUR account keeps trading
-//     0.01 lot).
-//   - Forex follows the session hours and Max Spread / ATR; crypto trades 24/7 on its own timeframe and
-//     spread limit. A symbol the broker does not offer is skipped with a log line.
-//   - Daily loss limit for the whole account; loss-streak pause and cooldown per symbol.
+//   1. Timeframe             The fastest timeframe of the symbol's list whose typical spread fits Max Spread / ATR
+//                            (ATR averaged over the last 24 hours). Chosen at start, confirmed on the live spread.
+//   2. Tick Velocity Engine  Ticks in a sliding window (default 3 s) against the average tick rate of the
+//                            last 100 bars; a ratio of at least N marks an institutional inflow.
+//   3. Volman 20 EMA Squeeze A tight box of recent bars hugging the 20 EMA, entered on the breaking tick.
+//   4. Liquidity Sweep       A false pierce of the 10-bar high/low, entered when price reclaims the EMA.
+//   5. AI classifier         Gaussian Naive Bayes over [Tick_Velocity, EMA20_Distance, RSI_Slope,
+//                            Spread_Ratio], trained per symbol on history, then online on every closed bar
+//                            with the outcome this bot's own exit rules would have produced.
+//   6. Exits                 SL 0.8 x ATR, TP1 1.0 x ATR closing 60 %, micro break-even at +0.4R, ATR
+//                            trailing for the runner, time exit after 5 bars; flat before long market breaks.
+//  BUDGET AND MARGIN
+//   - Bot Budget: the bot sizes and limits itself as if the account held this much (0 = the whole account),
+//     so a large demo account behaves exactly like the small live account it prepares for.
+//   - A trade may block Margin Per Trade % of the free budget, all positions together Max Total Margin % of it.
+//     When even the minimum volume needs more than the per-trade share, the minimum volume is still taken
+//     while the total limit allows it. Margin = the largest of the broker estimate, notional / leverage and
+//     the margin actually seen on this symbol's positions.
 //
 //  Every threshold that drives a trading decision is a UI parameter and is used exactly as entered. The log
-//  prints the values in force, every skipped signal with its reasons and a STATUS summary every 15 minutes.
+//  prints the values in force, skipped signals with their reasons and a STATUS summary every 15 minutes.
 //  Pip-denominated parameters mean broker pips on Forex and half a basis point of price on crypto and other
 //  non-Forex symbols. Backtest with "Tick data": the tick velocity engine needs real ticks.
 // =====================================================================================================
@@ -51,62 +52,77 @@ namespace cAlgo.Robots
     }
 
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
-    public class QuantAI_Scalper_M1_MicroDepot_Pro : Robot
+    public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "2.0.0";
+        private const string BotVersion = "3.0.0";
 
         #region Parameters
 
-        // ---- 0. Markets --------------------------------------------------------------------------------
+        // ---- 0. Budget and markets ---------------------------------------------------------------------
 
-        [Parameter("Forex Symbols", Group = "0. Markets", DefaultValue = "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,USDCHF")]
+        [Parameter("Bot Budget (account ccy, 0 = whole account)", Group = "0. Budget & Markets", DefaultValue = 50.0, MinValue = 0.0, Step = 10.0)]
+        public double BotBudget { get; set; }
+
+        [Parameter("Forex Symbols (A|B = alternatives)", Group = "0. Budget & Markets", DefaultValue = "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,USDCHF")]
         public string FxSymbols { get; set; }
 
-        [Parameter("Crypto Symbols (24/7)", Group = "0. Markets", DefaultValue = "BTCUSD,ETHUSD")]
+        [Parameter("Crypto Symbols (24/7)", Group = "0. Budget & Markets", DefaultValue = "BTCUSD,ETHUSD,SOLUSD,XRPUSD,LTCUSD,BCHUSD")]
         public string CryptoSymbols { get; set; }
 
-        [Parameter("Max Open Positions", Group = "0. Markets", DefaultValue = 8, MinValue = 1)]
+        [Parameter("Max Open Positions", Group = "0. Budget & Markets", DefaultValue = 8, MinValue = 1)]
         public int MaxOpenPositions { get; set; }
 
-        [Parameter("Crypto Signal & ATR TimeFrame", Group = "0. Markets", DefaultValue = "Minute5")]
-        public TimeFrame CryptoTimeFrame { get; set; }
+        [Parameter("Forex TimeFrames (fastest first)", Group = "0. Budget & Markets", DefaultValue = "m1,m5,m15")]
+        public string FxTimeFrames { get; set; }
 
-        [Parameter("Crypto Max Spread / ATR", Group = "0. Markets", DefaultValue = 0.35, MinValue = 0.0, Step = 0.01)]
+        [Parameter("Crypto TimeFrames (fastest first)", Group = "0. Budget & Markets", DefaultValue = "m5,m15,m30,h1")]
+        public string CryptoTimeFrames { get; set; }
+
+        [Parameter("Forex Max Spread / ATR", Group = "0. Budget & Markets", DefaultValue = 0.12, MinValue = 0.0, Step = 0.01)]
+        public double MaxSpreadToAtr { get; set; }
+
+        [Parameter("Crypto Max Spread / ATR", Group = "0. Budget & Markets", DefaultValue = 0.25, MinValue = 0.0, Step = 0.01)]
         public double CryptoMaxSpreadToAtr { get; set; }
 
-        [Parameter("Crypto Trades 24/7 (ignore session)", Group = "0. Markets", DefaultValue = true)]
+        [Parameter("Crypto Trades 24/7 (ignore session)", Group = "0. Budget & Markets", DefaultValue = true)]
         public bool CryptoIgnoresSession { get; set; }
+
+        [Parameter("Flat Before Breaks Longer Than (min, 0 = off)", Group = "0. Budget & Markets", DefaultValue = 15, MinValue = 0)]
+        public int FlatBeforeBreakMinutes { get; set; }
 
         // ---- 1. Risk and money ------------------------------------------------------------------------
 
-        [Parameter("Fixed Lots Per Trade (0 = Risk %)", Group = "1. Risk & Money", DefaultValue = 4.0, MinValue = 0.0, Step = 0.01)]
+        [Parameter("Fixed Lots Per Trade (0 = Risk %)", Group = "1. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 0.01)]
         public double FixedLots { get; set; }
 
-        [Parameter("Risk Percent (% of balance)", Group = "1. Risk & Money", DefaultValue = 1.0, MinValue = 0.01, MaxValue = 100.0, Step = 0.05)]
+        [Parameter("Risk Percent (% of budget)", Group = "1. Risk & Money", DefaultValue = 1.0, MinValue = 0.01, MaxValue = 100.0, Step = 0.05)]
         public double RiskPercent { get; set; }
 
-        [Parameter("Min Lots (floor)", Group = "1. Risk & Money", DefaultValue = 0.01, MinValue = 0.0, Step = 0.01)]
+        [Parameter("Min Lots (0 = broker minimum)", Group = "1. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 0.01)]
         public double MinLots { get; set; }
 
         [Parameter("Max Lots (cap)", Group = "1. Risk & Money", DefaultValue = 10.0, MinValue = 0.01, Step = 0.01)]
         public double MaxLots { get; set; }
 
-        [Parameter("Use Min Lot If Size Is Smaller", Group = "1. Risk & Money", DefaultValue = true)]
+        [Parameter("Use Min Volume If Size Is Smaller", Group = "1. Risk & Money", DefaultValue = true)]
         public bool AllowMinLotOverride { get; set; }
 
-        [Parameter("Margin Per Trade (% of free margin)", Group = "1. Risk & Money", DefaultValue = 30.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
+        [Parameter("Margin Per Trade (% of free budget)", Group = "1. Risk & Money", DefaultValue = 30.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
         public double MarginPerTradePercent { get; set; }
 
-        [Parameter("Max Total Margin (% of equity)", Group = "1. Risk & Money", DefaultValue = 90.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
+        [Parameter("Max Total Margin (% of budget)", Group = "1. Risk & Money", DefaultValue = 90.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
         public double MaxTotalMarginPercent { get; set; }
 
-        [Parameter("Leverage For Margin Check (0 = broker)", Group = "1. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 1.0)]
+        [Parameter("Forex Leverage For Margin (0 = broker)", Group = "1. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 1.0)]
         public double LeverageOverride { get; set; }
+
+        [Parameter("Crypto Leverage For Margin (0 = broker)", Group = "1. Risk & Money", DefaultValue = 2.0, MinValue = 0.0, Step = 1.0)]
+        public double CryptoLeverageOverride { get; set; }
 
         [Parameter("Max Slippage Pips (0 = market)", Group = "1. Risk & Money", DefaultValue = 0.5, MinValue = 0.0, Step = 0.1)]
         public double MaxSlippagePips { get; set; }
 
-        [Parameter("Daily Max Loss % (0 = off)", Group = "1. Risk & Money", DefaultValue = 6.0, MinValue = 0.0, Step = 0.5)]
+        [Parameter("Daily Max Loss % of budget (0 = off)", Group = "1. Risk & Money", DefaultValue = 6.0, MinValue = 0.0, Step = 0.5)]
         public double DailyMaxLossPercent { get; set; }
 
         [Parameter("Max Consecutive Losses Per Symbol (0 = off)", Group = "1. Risk & Money", DefaultValue = 4, MinValue = 0)]
@@ -141,6 +157,9 @@ namespace cAlgo.Robots
         [Parameter("Trailing Step Pips", Group = "2. Exits", DefaultValue = 0.2, MinValue = 0.0, Step = 0.1)]
         public double TrailStepPips { get; set; }
 
+        [Parameter("Trailing Step (x ATR)", Group = "2. Exits", DefaultValue = 0.05, MinValue = 0.0, Step = 0.01)]
+        public double TrailStepAtr { get; set; }
+
         [Parameter("Trail Only After TP1", Group = "2. Exits", DefaultValue = true)]
         public bool TrailOnlyAfterTp1 { get; set; }
 
@@ -153,18 +172,12 @@ namespace cAlgo.Robots
         [Parameter("Time Exit Bars (0 = off)", Group = "2. Exits", DefaultValue = 5, MinValue = 0)]
         public int TimeExitBars { get; set; }
 
-        [Parameter("Forex ATR & Time-Exit TimeFrame", Group = "2. Exits", DefaultValue = "Minute")]
-        public TimeFrame RiskTimeFrame { get; set; }
-
         [Parameter("ATR Period", Group = "2. Exits", DefaultValue = 14, MinValue = 2)]
         public int AtrPeriod { get; set; }
 
         // ---- 3. Entry filters --------------------------------------------------------------------------
 
-        [Parameter("Forex Max Spread / ATR", Group = "3. Entry Filters", DefaultValue = 0.12, MinValue = 0.0, Step = 0.01)]
-        public double MaxSpreadToAtr { get; set; }
-
-        [Parameter("Use Session Filter (Forex)", Group = "3. Entry Filters", DefaultValue = true)]
+        [Parameter("Forex Session Filter", Group = "3. Entry Filters", DefaultValue = false)]
         public bool UseSessionFilter { get; set; }
 
         [Parameter("Session Start Hour (UTC)", Group = "3. Entry Filters", DefaultValue = 6, MinValue = 0, MaxValue = 23)]
@@ -194,9 +207,6 @@ namespace cAlgo.Robots
         public double TickVelocityMultiplier { get; set; }
 
         // ---- 5. Volman setups --------------------------------------------------------------------------
-
-        [Parameter("Forex Signal TimeFrame (M1/M5)", Group = "5. Volman Setups", DefaultValue = "Minute")]
-        public TimeFrame SignalTimeFrame { get; set; }
 
         [Parameter("EMA Period", Group = "5. Volman Setups", DefaultValue = 20, MinValue = 2)]
         public int EmaPeriod { get; set; }
@@ -245,7 +255,7 @@ namespace cAlgo.Robots
         [Parameter("Min Samples Per Class", Group = "6. AI Classifier (Naive Bayes)", DefaultValue = 100, MinValue = 2)]
         public int AiMinSamplesPerClass { get; set; }
 
-        [Parameter("Label Horizon (ATR TF bars)", Group = "6. AI Classifier (Naive Bayes)", DefaultValue = 5, MinValue = 1)]
+        [Parameter("Label Horizon (bars)", Group = "6. AI Classifier (Naive Bayes)", DefaultValue = 5, MinValue = 1)]
         public int AiHorizonBars { get; set; }
 
         [Parameter("RSI Period", Group = "6. AI Classifier (Naive Bayes)", DefaultValue = 14, MinValue = 2)]
@@ -271,6 +281,9 @@ namespace cAlgo.Robots
         [Parameter("Log Skip Reasons", Group = "7. Log & Display", DefaultValue = true)]
         public bool LogSkipReasons { get; set; }
 
+        [Parameter("Max Skip Lines Per Hour (0 = no limit)", Group = "7. Log & Display", DefaultValue = 60, MinValue = 0)]
+        public int MaxSkipLinesPerHour { get; set; }
+
         [Parameter("Show Chart HUD", Group = "7. Log & Display", DefaultValue = true)]
         public bool ShowHud { get; set; }
 
@@ -282,21 +295,26 @@ namespace cAlgo.Robots
         #region Technical constants
 
         // Numerical plumbing only - none of these decides whether a trade is taken.
-        private const int IndicatorWarmupFactor = 3;     // bars per indicator period before values are trusted
-        private const int CalibrationWindowBars = 30;    // bars used to match OnTick counts with broker tick volume
-        private const int CalibrationMinBars = 3;        // calibration is applied once this many full bars were seen
-        private const int SpreadWindowTicks = 500;       // in-session spreads kept for the rolling median
-        private const int SpreadCalibrationTicks = 300;  // in-session ticks before the AI is retrained on the live spread
-        private const int TypicalAtrBars = 60;           // ATR bars averaged when judging whether the spread fits the strategy
-        private const int MarginFitIterations = 20;      // volume steps tried when dynamic leverage makes margin non-linear
-        private const int MaxNoMoneyRetries = 2;         // halve the volume and retry after a "no money" reject
-        private const double RetryDelaySeconds = 1.0;    // first pause before retrying a failed close/modify
-        private const double MaxRetryDelaySeconds = 60.0; // the pause doubles per failure up to this
+        private const int IndicatorWarmupFactor = 3;          // bars per indicator period before values are trusted
+        private const int CalibrationWindowBars = 30;         // bars used to match OnTick counts with broker tick volume
+        private const int CalibrationMinBars = 3;             // calibration is applied once this many full bars were seen
+        private const int SpreadWindowTicks = 500;            // spreads kept for the rolling median
+        private const int SpreadCalibrationTicks = 300;       // ticks before the timeframe and the AI are fitted to the live spread
+        private const double SpreadSettleMinutes = 10.0;      // spreads right after a market (re)opens are not typical and are not sampled
+        private const double TypicalAtrHours = 24.0;          // ATR averaged over a full day when judging whether the spread fits a timeframe
+        private const int MarginFitIterations = 20;           // volume steps tried when dynamic leverage makes margin non-linear
+        private const int MaxHistoryLoads = 60;               // LoadMoreHistory calls per series before giving up
+        private const int MaxNoMoneyRetries = 2;              // halve the volume and retry after a "no money" reject
+        private const double RetryDelaySeconds = 1.0;         // first pause before retrying a failed close/modify
+        private const double MaxRetryDelaySeconds = 60.0;     // the pause doubles per failure up to this
         private const double ErrorLogIntervalSeconds = 10.0;
-        private const double TrailMinIntervalSeconds = 1.0; // at most one trailing-stop request per position per second
+        private const double TrailMinIntervalSeconds = 2.0;   // at most one trailing-stop request per position this often (demo rate limits)
+        private const double FlatLeadSeconds = 60.0;          // positions are closed this long before a long market break
+        private const double BreakCheckIntervalSeconds = 30.0; // how often the market-break lookahead is refreshed
+        private const double TickRateWindowCapSeconds = 300.0; // the live tick-rate feature never looks back further than this
         private const double VolumeEpsilon = 1e-6;
-        private const double FxPipRatio = 0.5e-4;        // broker pip / price at or above this = a Forex-style pip
-        private const double NonFxPipRatio = 0.5e-4;     // otherwise one "pip" of the parameters = 0.5 basis point of price
+        private const double FxPipRatio = 0.5e-4;             // broker pip / price at or above this = a Forex-style pip
+        private const double NonFxPipRatio = 0.5e-4;          // otherwise one "pip" of the parameters = 0.5 basis point of price
         private const string ObjPrefix = "QAI_";
 
         #endregion
@@ -308,11 +326,14 @@ namespace cAlgo.Robots
         private readonly List<Market> _markets = new List<Market>();
         private readonly Dictionary<string, Market> _bySymbol = new Dictionary<string, Market>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<int, TradeState> _trades = new Dictionary<int, TradeState>();
+        private readonly List<string> _budgetSkipped = new List<string>();
+        private readonly List<string> _notOffered = new List<string>();
 
         private DateTime _day = DateTime.MinValue;
-        private double _dayStartBalance;
+        private double _dayStartEquity;
         private int _tradesToday;
         private bool _dailyHalt;
+        private double _runResult;   // net result of this run's closed trades (moves the budget)
 
         private string _ccy = "";
         private bool _quiet;
@@ -325,6 +346,9 @@ namespace cAlgo.Robots
         private DateTime _nextStatus = DateTime.MinValue;
         private DateTime _statusSince;
         private bool? _wasInSession;
+        private DateTime _skipHour = DateTime.MinValue;
+        private int _skipLinesThisHour;
+        private int _skipLinesSuppressed;
 
         private int _statTrades;
         private int _statWins;
@@ -332,6 +356,7 @@ namespace cAlgo.Robots
         private int _statScratch;
         private int _statTp1;
         private int _statTimeExits;
+        private int _statBreakExits;
         private double _statNet;
 
         #endregion
@@ -358,18 +383,28 @@ namespace cAlgo.Robots
             LogBanner();
 
             List<string> crypto = MarketMath.ParseSymbols(CryptoSymbols);
-            var cryptoSet = new HashSet<string>(crypto, StringComparer.OrdinalIgnoreCase);
-            foreach (string name in MarketMath.ParseSymbols(FxSymbols))
+            var cryptoKeys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string item in crypto)
             {
-                if (!cryptoSet.Contains(name))
-                    AddMarket(name, false);
+                foreach (string alt in MarketMath.Alternatives(item))
+                    cryptoKeys.Add(MarketMath.SymbolKey(alt));
             }
-            foreach (string name in crypto)
-                AddMarket(name, true);
+            foreach (string item in MarketMath.ParseSymbols(FxSymbols))
+            {
+                bool listedAsCrypto = false;
+                foreach (string alt in MarketMath.Alternatives(item))
+                    listedAsCrypto |= cryptoKeys.Contains(MarketMath.SymbolKey(alt));
+                if (!listedAsCrypto)
+                    AddMarket(item, false);
+            }
+            foreach (string item in crypto)
+                AddMarket(item, true);
 
+            LogBudgetSummary();
             if (_markets.Count == 0)
             {
-                Log("FATAL: none of the listed symbols can be traded on this account - check 'Forex Symbols' and 'Crypto Symbols'. The cBot stops.");
+                Log("FATAL: no listed symbol can be traded with this account and budget (see the MARKET lines above). "
+                    + "Raise 'Bot Budget' or add cheaper symbols. The cBot stops.");
                 Stop();
                 return;
             }
@@ -381,7 +416,7 @@ namespace cAlgo.Robots
 
             var names = new List<string>();
             foreach (Market m in _markets)
-                names.Add(m.Name + (m.IsCrypto ? " (crypto " + m.SigTf.ShortName + ")" : ""));
+                names.Add(m.Name + " " + m.SigTf.ShortName);
             Log("READY: " + _markets.Count + " markets - " + string.Join(", ", names) + " | max " + MaxOpenPositions + " open positions");
             UpdateHud();
         }
@@ -396,12 +431,14 @@ namespace cAlgo.Robots
         {
             try
             {
-                // Time exits must fire even when a feed goes quiet, so management also runs here.
+                // Time exits and break exits must fire even when a feed goes quiet, so management also runs here.
                 DateTime now = Server.Time;
                 CheckNewDay(now);
                 CheckDailyLoss();
                 foreach (Market m in _markets)
                     ManageMarketPositions(m);
+                ObserveMargins();
+                CheckMarketTransitions(now);
                 CheckSessionTransition(now);
                 EmitStatusIfDue(now);
                 UpdateHud();
@@ -425,7 +462,7 @@ namespace cAlgo.Robots
             {
                 Log("STOP v" + BotVersion + ": trades " + _statTrades + " (wins " + _statWins + ", losses " + _statLosses
                     + ", scratch " + _statScratch + "), TP1 hits " + _statTp1 + ", time exits " + _statTimeExits
-                    + ", net " + Signed(_statNet, 2) + " " + _ccy);
+                    + ", break exits " + _statBreakExits + ", net " + Signed(_statNet, 2) + " " + _ccy);
             }
             catch (Exception ex)
             {
@@ -435,44 +472,56 @@ namespace cAlgo.Robots
 
         private string ValidateParameters()
         {
-            if (MinLots > MaxLots)
+            if (MinLots > 0 && MinLots > MaxLots)
                 return "Min Lots (" + F(MinLots, 2) + ") is greater than Max Lots (" + F(MaxLots, 2) + ")";
             if (string.IsNullOrWhiteSpace(BotLabel))
                 return "Position Label is empty";
-            if (SignalTimeFrame == null || RiskTimeFrame == null || CryptoTimeFrame == null)
-                return "a TimeFrame parameter is empty";
-            if (MarketMath.ParseSymbols(FxSymbols).Count == 0 && MarketMath.ParseSymbols(CryptoSymbols).Count == 0)
+            bool hasFx = MarketMath.ParseSymbols(FxSymbols).Count > 0;
+            bool hasCrypto = MarketMath.ParseSymbols(CryptoSymbols).Count > 0;
+            if (!hasFx && !hasCrypto)
                 return "both symbol lists are empty";
+            if (hasFx && TimeFrameList(FxTimeFrames).Count == 0)
+                return "'Forex TimeFrames' has no valid timeframe (use m1, m5, m15, m30, h1, h4)";
+            if (hasCrypto && TimeFrameList(CryptoTimeFrames).Count == 0)
+                return "'Crypto TimeFrames' has no valid timeframe (use m1, m5, m15, m30, h1, h4)";
             return null;
         }
 
-        /// <summary>The broker's name for a listed symbol: exact match first, then the same letters and digits (BTC/USD = BTCUSD).</summary>
-        private string ResolveSymbolName(string requested)
+        /// <summary>The broker's name for a list item: its alternatives in order, each by exact name, then by letters and digits.</summary>
+        private string ResolveSymbolName(string item)
         {
-            if (Symbols.Exists(requested))
-                return requested;
-            string key = MarketMath.SymbolKey(requested);
-            if (key.Length == 0)
-                return null;
-            for (int i = 0; i < Symbols.Count; i++)
+            List<string> alternatives = MarketMath.Alternatives(item);
+            foreach (string alt in alternatives)
             {
-                string candidate = Symbols[i];
-                if (!string.IsNullOrEmpty(candidate) && MarketMath.SymbolKey(candidate) == key)
-                    return candidate;
+                if (Symbols.Exists(alt))
+                    return alt;
+            }
+            foreach (string alt in alternatives)
+            {
+                string key = MarketMath.SymbolKey(alt);
+                if (key.Length == 0)
+                    continue;
+                for (int i = 0; i < Symbols.Count; i++)
+                {
+                    string candidate = Symbols[i];
+                    if (!string.IsNullOrEmpty(candidate) && MarketMath.SymbolKey(candidate) == key)
+                        return candidate;
+                }
             }
             return null;
         }
 
-        /// <summary>Resolves a symbol, loads its history, builds indicators and trains its AI.</summary>
-        private void AddMarket(string requested, bool isCrypto)
+        /// <summary>Resolves a symbol, checks the budget can carry its minimum volume, then picks its timeframe and trains its AI.</summary>
+        private void AddMarket(string item, bool isCrypto)
         {
-            string name = requested;
+            string name = item;
             try
             {
-                name = ResolveSymbolName(requested);
+                name = ResolveSymbolName(item);
                 if (name == null)
                 {
-                    Log("MARKET " + requested + ": not offered on this account - skipped");
+                    _notOffered.Add(item);
+                    Log("MARKET " + item + ": not offered on this account - skipped");
                     return;
                 }
                 if (_bySymbol.ContainsKey(name))
@@ -483,68 +532,56 @@ namespace cAlgo.Robots
                     Log("MARKET " + name + ": symbol could not be loaded - skipped");
                     return;
                 }
-                if (sym.TradingMode != SymbolTradingMode.FullAccess)
-                    Log("MARKET " + name + ": WARNING trading mode is " + sym.TradingMode + " - new entries wait until the broker enables trading");
 
                 var m = new Market();
                 m.Name = name;
                 m.Symbol = sym;
                 m.IsCrypto = isCrypto;
                 m.IsChart = string.Equals(name, SymbolName, StringComparison.OrdinalIgnoreCase);
-                m.SigTf = isCrypto ? CryptoTimeFrame : SignalTimeFrame;
-                m.RiskTf = isCrypto ? CryptoTimeFrame : RiskTimeFrame;
-                m.SameTf = m.SigTf.Equals(m.RiskTf);
                 m.MaxSpreadToAtr = isCrypto ? CryptoMaxSpreadToAtr : MaxSpreadToAtr;
-                m.Sig = MarketData.GetBars(m.SigTf, name);
-                m.Risk = m.SameTf ? m.Sig : MarketData.GetBars(m.RiskTf, name);
-                m.SigSec = TimeFrameSeconds(m.SigTf, m.Sig);
-                m.RiskSec = TimeFrameSeconds(m.RiskTf, m.Risk);
-                if (m.SigSec < 60.0 || m.RiskSec < 60.0)
+                m.Candidates = TimeFrameList(isCrypto ? CryptoTimeFrames : FxTimeFrames);
+
+                Bars probe = MarketData.GetBars(m.Candidates[0], name);
+                m.LastPrice = sym.Bid > 0 ? sym.Bid : (probe.Count > 0 ? probe.ClosePrices[probe.Count - 1] : 0.0);
+                m.FxLike = !isCrypto && MarketMath.IsFxLike(sym.PipSize, m.LastPrice, FxPipRatio);
+                m.BotPip = MarketMath.BotPip(sym.PipSize, m.LastPrice, m.FxLike, NonFxPipRatio);
+                m.CommissionPerUnit = CommissionEstimatePerUnit(m);
+                m.CommissionSource = m.CommissionPerUnit > 0 ? "symbol info" : "none reported";
+
+                // Budget check before any history is loaded: a symbol whose minimum volume the budget cannot carry
+                // would only ever log "insufficient margin".
+                double minVolume = MinTradableVolume(m);
+                string how;
+                m.MinVolumeMargin = EstimateMargin(m, TradeType.Buy, minVolume, out how);
+                double allowed = BotEquity() * MaxTotalMarginPercent / 100.0;
+                if (m.MinVolumeMargin > allowed + VolumeEpsilon)
                 {
-                    Log("MARKET " + name + ": signal/ATR timeframes must be time based (m1 or higher) - skipped");
+                    double needed = m.MinVolumeMargin * 100.0 / MaxTotalMarginPercent;
+                    _budgetSkipped.Add(name + " " + F(needed, 0));
+                    Log("MARKET " + name + ": minimum " + Lots(m, minVolume) + " needs " + F(m.MinVolumeMargin, 2) + " " + _ccy + " margin (" + how
+                        + "), the budget allows " + F(allowed, 2) + " - skipped (needs a budget of about " + F(needed, 0) + " " + _ccy + ")");
                     return;
                 }
+                if (!(m.MinVolumeMargin > 0))
+                    Log("MARKET " + name + ": WARNING margin of the minimum volume cannot be estimated (" + how + ") - entries wait until it can");
+                if (sym.TradingMode != SymbolTradingMode.FullAccess)
+                    Log("MARKET " + name + ": WARNING trading mode is " + sym.TradingMode + " - new entries wait until the broker enables trading");
 
-                LoadHistory(m);
-
-                m.Ema = Indicators.ExponentialMovingAverage(m.Sig.ClosePrices, EmaPeriod);
-                m.AtrSig = Indicators.AverageTrueRange(m.Sig, AtrPeriod, MovingAverageType.WilderSmoothing);
-                m.AtrRisk = m.SameTf ? m.AtrSig : Indicators.AverageTrueRange(m.Risk, AtrPeriod, MovingAverageType.WilderSmoothing);
-                m.Rsi = Indicators.RelativeStrengthIndex(m.Sig.ClosePrices, RsiPeriod);
-
-                double price = sym.Bid > 0 ? sym.Bid : (m.Sig.Count > 0 ? m.Sig.ClosePrices[m.Sig.Count - 1] : 0.0);
-                m.FxLike = MarketMath.IsFxLike(sym.PipSize, price, FxPipRatio);
-                m.BotPip = MarketMath.BotPip(sym.PipSize, price, m.FxLike, NonFxPipRatio);
-
-                m.Ticks = new TickVelocityEngine(Math.Max(TickWindowSeconds, m.SigSec) + 5.0);
+                m.Ticks = new TickVelocityEngine(Math.Max(TickWindowSeconds, TickRateWindowCapSeconds) + 5.0);
                 m.Calib = new TickCalibrator(CalibrationWindowBars);
                 m.Spreads = new SpreadTracker(SpreadWindowTicks);
-                m.Ai = new GaussianNaiveBayes(AiFeatures.Dim, AiTrainingBars * 2);
                 m.EngineStart = Server.Time;
                 m.HBuf = new double[AiHorizonBars];
                 m.LBuf = new double[AiHorizonBars];
                 m.WinH = new double[SqueezeBars];
                 m.WinL = new double[SqueezeBars];
-                m.CommissionPerUnit = CommissionEstimatePerUnit(m);
-                m.CommissionSource = m.CommissionPerUnit > 0 ? "symbol info" : "none reported";
-                int lastClosed = m.Sig.Count - 2;
-                if (lastClosed >= 0)
-                    m.BaselineTicksPerBar = MeanTickVolume(m.Sig, lastClosed, TickBaselineBars);
+                m.WasOpen = sym.MarketHours.IsOpened();
 
-                Log("MARKET " + name + ": " + (isCrypto ? "crypto" : "forex") + " | signal " + m.SigTf.ShortName + ", ATR/time-exit " + m.RiskTf.ShortName
-                    + " | spread/ATR <= " + F(m.MaxSpreadToAtr, 2) + " | " + (m.FxLike ? "pip " + sym.PipSize.ToString("G", Inv) : "1 pip = 0.5 bp = " + P(m, m.BotPip))
-                    + " | volume min " + Units(sym.VolumeInUnitsMin) + " step " + Units(sym.VolumeInUnitsStep) + ", lot " + Units(sym.LotSize)
-                    + " | commission " + CommissionText(m) + " | spread now " + D(m, sym.Spread) + " | tick baseline " + F(m.BaselineTicksPerBar, 1) + "/bar"
-                    + (m.BaselineTicksPerBar <= 0 ? " | WARNING: no tick volume in history, the tick filter cannot pass" : ""));
-
-                TrainFromHistory(m);
-                if (lastClosed >= 0)
-                {
-                    m.LastSigClosed = m.Sig.OpenTimes[lastClosed];
-                    EvaluateSetups(m, lastClosed);
-                }
-                if (m.Risk.Count >= 2)
-                    m.LastRiskClosed = m.Risk.OpenTimes[m.Risk.Count - 2];
+                int tfIndex = 0;
+                string tfNote = "provisional until the live spread is known";
+                if (m.WasOpen.Value && SpreadSampleAllowed(m, Server.Time) && sym.Spread >= 0)
+                    tfIndex = ChooseTimeframeIndex(m, sym.Spread, "spread now", out tfNote);
+                ConfigureTimeframe(m, tfIndex, tfNote);
 
                 _markets.Add(m);
                 _bySymbol[name] = m;
@@ -563,6 +600,113 @@ namespace cAlgo.Robots
             {
                 Log("MARKET " + name + ": could not start (" + ex.GetType().Name + ": " + ex.Message + ") - skipped");
             }
+        }
+
+        /// <summary>(Re)builds everything that depends on the timeframe: bars, history, indicators, baseline, AI, setups.</summary>
+        private void ConfigureTimeframe(Market m, int index, string note)
+        {
+            m.TfIndex = index;
+            m.SigTf = m.Candidates[index];
+            m.RiskTf = m.SigTf;
+            m.SameTf = true;
+            m.Sig = MarketData.GetBars(m.SigTf, m.Name);
+            m.Risk = m.Sig;
+            m.SigSec = TimeFrameSeconds(m.SigTf, m.Sig);
+            m.RiskSec = m.SigSec;
+
+            LoadHistory(m);
+
+            m.Ema = Indicators.ExponentialMovingAverage(m.Sig.ClosePrices, EmaPeriod);
+            m.AtrSig = Indicators.AverageTrueRange(m.Sig, AtrPeriod, MovingAverageType.WilderSmoothing);
+            m.AtrRisk = m.AtrSig;
+            m.Rsi = Indicators.RelativeStrengthIndex(m.Sig.ClosePrices, RsiPeriod);
+
+            m.Ai = new GaussianNaiveBayes(AiFeatures.Dim, AiTrainingBars * 2);
+            m.Pending.Clear();
+            m.CalBarOpen = DateTime.MinValue;
+            m.CalBarTicks = 0;
+            m.CalBarFull = false;
+            m.SqzArmed = false;
+            m.BullSweep = false;
+            m.BearSweep = false;
+
+            int lastClosed = m.Sig.Count - 2;
+            m.BaselineTicksPerBar = lastClosed >= 0 ? MeanTickVolume(m.Sig, lastClosed, TickBaselineBars) : 0.0;
+
+            string minNote = m.MinVolumeMargin > 0 ? F(m.MinVolumeMargin, 2) + " " + _ccy : "n/a";
+            Log("MARKET " + m.Name + ": " + (m.IsCrypto ? "crypto" : "forex") + " " + m.SigTf.ShortName + " (" + note + ") | spread/ATR <= "
+                + F(m.MaxSpreadToAtr, 2) + " | " + (m.FxLike ? "pip " + m.Symbol.PipSize.ToString("G", Inv) : "1 pip = 0.5 bp = " + P(m, m.BotPip))
+                + " | min " + Lots(m, MinTradableVolume(m)) + ", margin " + minNote + " | commission " + CommissionText(m));
+            if (m.BaselineTicksPerBar <= 0)
+                LogM(m, "WARNING: no tick volume in the history, the tick filter cannot pass");
+
+            TrainFromHistory(m);
+            if (lastClosed >= 0)
+            {
+                m.LastSigClosed = m.Sig.OpenTimes[lastClosed];
+                EvaluateSetups(m, lastClosed);
+            }
+            if (m.Risk.Count >= 2)
+                m.LastRiskClosed = m.Risk.OpenTimes[m.Risk.Count - 2];
+        }
+
+        /// <summary>
+        /// The fastest candidate timeframe whose ATR, averaged over the last day, is large enough for the spread
+        /// (spread / ATR within the symbol's limit); the slowest one when none fits.
+        /// </summary>
+        private int ChooseTimeframeIndex(Market m, double spread, string spreadLabel, out string note)
+        {
+            int n = m.Candidates.Count;
+            var ratios = new double[n];
+            var sb = new StringBuilder(96);
+            for (int i = 0; i < n; i++)
+            {
+                TimeFrame tf = m.Candidates[i];
+                Bars bars = m.Sig != null && tf.Equals(m.SigTf) ? m.Sig : MarketData.GetBars(tf, m.Name);
+                double tfSec = TimeFrameSeconds(tf, bars);
+                int count = tfSec > 0 ? (int)Math.Ceiling(TypicalAtrHours * 3600.0 / tfSec) : 0;
+                EnsureBars(bars, count + 2, null);
+                double atr = TypicalRange(bars, count);
+                ratios[i] = atr > 0 ? spread / atr : double.PositiveInfinity;
+                if (i > 0)
+                    sb.Append(", ");
+                sb.Append(tf.ShortName).Append(' ').Append(atr > 0 ? F(ratios[i], 2) : "n/a");
+            }
+            int index = MarketMath.FirstFitting(ratios, m.MaxSpreadToAtr);
+            m.TfFits = index >= 0;
+            note = spreadLabel + " " + D(m, spread) + " / day ATR: " + sb + (index >= 0 ? "" : " - none fits " + F(m.MaxSpreadToAtr, 2) + ", slowest used");
+            return index >= 0 ? index : n - 1;
+        }
+
+        private static double TypicalRange(Bars bars, int count)
+        {
+            int last = bars.Count - 2;
+            if (last < 1 || count < 1)
+                return 0.0;
+            int first = Math.Max(0, last - count);
+            int len = last - first + 1;
+            var h = new double[len];
+            var l = new double[len];
+            var c = new double[len];
+            for (int i = 0; i < len; i++)
+            {
+                h[i] = bars.HighPrices[first + i];
+                l[i] = bars.LowPrices[first + i];
+                c[i] = bars.ClosePrices[first + i];
+            }
+            return MarketMath.MeanTrueRange(h, l, c, len - 1, count);
+        }
+
+        private List<TimeFrame> TimeFrameList(string list)
+        {
+            var result = new List<TimeFrame>();
+            foreach (int minutes in MarketMath.ParseTimeFrameMinutes(list))
+            {
+                TimeFrame tf = TimeFrameFromMinutes(minutes);
+                if (tf != null)
+                    result.Add(tf);
+            }
+            return result;
         }
 
         private void OnMarketTick(Market m)
@@ -599,37 +743,35 @@ namespace cAlgo.Robots
 
         private void LoadHistory(Market m)
         {
-            int needSig = AiTrainingBars + WarmupBars() + 2;
-            EnsureBars(m.Sig, needSig, m.Name + " " + m.SigTf.ShortName);
-            if (!m.SameTf)
-            {
-                // Labels are simulated on the ATR timeframe, so it has to cover the same span of time.
-                int needRisk = (int)Math.Ceiling(needSig * m.SigSec / m.RiskSec) + AtrPeriod * IndicatorWarmupFactor + AiHorizonBars + 2;
-                EnsureBars(m.Risk, needRisk, m.Name + " " + m.RiskTf.ShortName);
-            }
+            // MarketData.GetBars returns only what the platform already holds - for a symbol whose chart is not open
+            // that can be a handful of bars - so history is requested explicitly until there is enough.
+            EnsureBars(m.Sig, AiTrainingBars + WarmupBars() + 2, m.Name + " " + m.SigTf.ShortName);
         }
 
+        /// <summary>Loads history until the series has the bars; what is null logs nothing (timeframe probes).</summary>
         private void EnsureBars(Bars bars, int needed, string what)
         {
             try
             {
-                while (bars.Count < needed)
+                for (int call = 0; call < MaxHistoryLoads && bars.Count < needed; call++)
                 {
-                    if (bars.LoadMoreHistory() <= 0)
+                    int before = bars.Count;
+                    if (bars.LoadMoreHistory() <= 0 || bars.Count <= before)
                         break;
                 }
             }
             catch (Exception ex)
             {
-                Log("HISTORY: cannot load more " + what + " bars (" + ex.Message + ")");
+                if (what != null)
+                    Log("HISTORY: cannot load more " + what + " bars (" + ex.Message + ")");
             }
-            if (bars.Count < needed)
+            if (what != null && bars.Count < needed)
                 Log("HISTORY: " + what + " has " + bars.Count + " bars, wanted " + needed + " - the AI trains on what is available and keeps learning online");
         }
 
         /// <summary>
-        /// Spread used to label training samples: the fixed UI value, otherwise the median of recent in-session
-        /// spreads (robust to rollover and news spikes), otherwise the spread of the moment.
+        /// Spread used to label training samples: the fixed UI value, otherwise the median of recent typical spreads
+        /// (robust to rollover and news spikes), otherwise the spread of the moment.
         /// </summary>
         private double TrainingSpread(Market m)
         {
@@ -641,69 +783,74 @@ namespace cAlgo.Robots
         }
 
         /// <summary>
-        /// The start-up bootstrap only knows the spread of the moment the cBot was launched, which is stale or
-        /// wide at weekends and rollover. Once enough in-session ticks were seen, the model is rebuilt from
-        /// history with the live median spread; until then AI-filtered entries of this symbol wait.
+        /// After enough typical ticks the timeframe is confirmed on the live median spread (switching once if the start-up
+        /// choice was wrong) and the AI is rebuilt from history with that spread; until then AI-filtered entries wait.
         /// </summary>
         private void CheckSpreadCalibration(Market m)
         {
-            if (m.SpreadChecked || m.Spreads.Count < SpreadCalibrationTicks)
+            if (m.SpreadChecked || m.Spreads.Count < SpreadCalibrationTicks || Server.Time < m.TfCheckAfter)
                 return;
-            m.SpreadChecked = true;
             double live = m.Spreads.Median();
+            string note;
+            int index;
+            try
+            {
+                index = ChooseTimeframeIndex(m, live, "live spread", out note);
+            }
+            catch (Exception ex)
+            {
+                // Keep the current timeframe rather than retrying the failing check on every tick.
+                LogM(m, "TIMEFRAME check failed (" + ex.GetType().Name + ": " + ex.Message + ") - staying on " + m.SigTf.ShortName);
+                index = m.TfIndex;
+                note = "";
+            }
+            if (index != m.TfIndex)
+            {
+                if (Positions.FindAll(BotLabel, m.Name).Length > 0)
+                {
+                    m.TfCheckAfter = Server.Time.AddMinutes(1);   // switch once the position is closed
+                    return;
+                }
+                m.SpreadChecked = true;
+                m.SpreadCalibrated = true;
+                LogM(m, "TIMEFRAME " + m.SigTf.ShortName + " -> " + m.Candidates[index].ShortName + " (" + note + ")");
+                ConfigureTimeframe(m, index, note);
+                CheckSpreadFitsStrategy(m, live);
+                return;
+            }
+            m.SpreadChecked = true;
             CheckSpreadFitsStrategy(m, live);
             if (AiTrainSpreadPips > 0)
                 return;
             m.SpreadCalibrated = true;
-            LogM(m, "AI RETRAIN: live spread median " + D(m, live) + " over " + m.Spreads.Count + " ticks (start-up used " + D(m, m.BootstrapSpread) + ")");
+            LogM(m, "AI RETRAIN on " + m.SigTf.ShortName + ": live spread median " + D(m, live) + " over " + m.Spreads.Count + " ticks (start-up used "
+                 + D(m, m.BootstrapSpread) + ")");
             m.Ai = new GaussianNaiveBayes(AiFeatures.Dim, AiTrainingBars * 2);
             m.Pending.Clear();
             TrainFromHistory(m);
         }
 
         /// <summary>
-        /// A typical spread above the symbol's Max Spread / ATR x typical ATR means nearly every signal will be
-        /// skipped - on Forex that is the signature of a mark-up (Standard) account - so it is said once, loudly.
+        /// A typical spread above the limit on every candidate timeframe means nearly every signal will be skipped - on
+        /// Forex that is the signature of a mark-up (Standard) account - so it is said once, loudly.
         /// </summary>
         private void CheckSpreadFitsStrategy(Market m, double typicalSpread)
         {
-            double typicalAtr = MeanRiskAtr(m, TypicalAtrBars);
-            if (!(typicalAtr > 0) || !(typicalSpread >= 0))
-                return;
-            double limit = m.MaxSpreadToAtr * typicalAtr;
-            if (typicalSpread <= limit)
+            if (m.TfFits)
             {
-                LogM(m, "SPREAD CHECK OK: typical spread " + D(m, typicalSpread) + " <= " + Pct(m.MaxSpreadToAtr) + " of the typical ATR " + D(m, typicalAtr)
-                     + " (" + D(m, limit) + ")");
+                LogM(m, "SPREAD CHECK OK on " + m.SigTf.ShortName + ": typical spread " + D(m, typicalSpread) + " fits " + Pct(m.MaxSpreadToAtr) + " of the day ATR");
                 return;
             }
             m.SpreadWarning = true;
             string hint;
             if (m.IsCrypto)
-                hint = "Crypto spreads are wide against " + m.SigTf.ShortName + " moves; raise 'Crypto Max Spread / ATR' or use a higher crypto timeframe to trade it more often.";
+                hint = "Raise 'Crypto Max Spread / ATR' or add a slower timeframe to 'Crypto TimeFrames' to trade it more often.";
             else if (_isPepperstone)
                 hint = "This looks like a Pepperstone Standard account (1 pip mark-up); the strategy is built for a Razor account (raw spread + commission).";
             else
                 hint = "The strategy is built for a raw-spread (ECN) account with commission.";
-            LogM(m, "WARNING: typical spread " + D(m, typicalSpread) + " is above " + Pct(m.MaxSpreadToAtr) + " of the typical ATR " + D(m, typicalAtr)
-                 + " (" + D(m, limit) + "), so most signals will be skipped as 'Spread too high'. " + hint);
-        }
-
-        private double MeanRiskAtr(Market m, int bars)
-        {
-            int last = m.Risk.Count - 2;
-            double sum = 0.0;
-            int n = 0;
-            for (int i = last; i >= 0 && n < bars; i--)
-            {
-                double v = m.AtrRisk.Result[i];
-                if (Valid(v) && v > 0)
-                {
-                    sum += v;
-                    n++;
-                }
-            }
-            return n > 0 ? sum / n : 0.0;
+            LogM(m, "WARNING: typical spread " + D(m, typicalSpread) + " is above " + Pct(m.MaxSpreadToAtr) + " of the ATR on every listed timeframe, "
+                 + "so most signals will be skipped as 'Spread'. " + hint);
         }
 
         private void TrainFromHistory(Market m)
@@ -732,7 +879,7 @@ namespace cAlgo.Robots
             if (!m.Ai.IsReady(AiMinSamplesPerClass))
                 return "warming up: wins " + m.Ai.Wins + ", losses " + m.Ai.Losses + " (need " + AiMinSamplesPerClass + " each)"
                        + (UseAiFilter ? " - entries wait" : " - AI filter OFF");
-            var sb = new StringBuilder("ready, class means win/loss:");
+            var sb = new StringBuilder("ready, win/loss means:");
             for (int f = 0; f < AiFeatures.Dim; f++)
             {
                 sb.Append(' ').Append(AiFeatures.Names[f]).Append(' ')
@@ -755,33 +902,25 @@ namespace cAlgo.Robots
             if (!Valid(atrS) || atrS <= 0 || !Valid(ema) || !Valid(rsiNow) || !Valid(rsiPrev))
                 return null;
 
-            DateTime closeTime = m.Sig.OpenTimes[c].AddSeconds(m.SigSec);
-            int r = LastIndexBefore(m.Risk, closeTime);
-            if (r < 0 || r > m.Risk.Count - 2)
-                return null;
-            double atrR = m.AtrRisk.Result[r];
-            if (!Valid(atrR) || atrR <= 0)
-                return null;
-
-            // History has no intrabar tick timing, so the classifier's velocity feature is the bar's tick
-            // volume against the average of the previous N bars. Live, the same quantity is measured over a
-            // rolling window of one bar length (see BarTickVelocity), keeping training and inference aligned.
+            // History has no intrabar tick timing, so the classifier's velocity feature is the bar's tick volume
+            // against the average of the previous N bars. Live, the same rate is measured over a rolling window
+            // (see BarTickVelocity), keeping training and inference aligned.
             double baseline = MeanTickVolume(m.Sig, c - 1, TickBaselineBars);
             if (baseline <= 0)
                 return null;
             double tv = m.Sig.TickVolumes[c] / baseline;
 
             var s = new PendingSample();
-            s.CloseTime = closeTime;
+            s.CloseTime = m.Sig.OpenTimes[c].AddSeconds(m.SigSec);
             s.EntryBid = close;
             s.Spread = spread;
-            s.AtrRisk = atrR;
-            s.LongX = AiFeatures.Build(tv, close - ema, atrS, rsiNow - rsiPrev, spread / atrR, 1);
-            s.ShortX = AiFeatures.Build(tv, close - ema, atrS, rsiNow - rsiPrev, spread / atrR, -1);
+            s.AtrRisk = atrS;
+            s.LongX = AiFeatures.Build(tv, close - ema, atrS, rsiNow - rsiPrev, spread / atrS, 1);
+            s.ShortX = AiFeatures.Build(tv, close - ema, atrS, rsiNow - rsiPrev, spread / atrS, -1);
             return s;
         }
 
-        /// <summary>Labels the sample once enough ATR-timeframe bars have closed. True when it is finished with.</summary>
+        /// <summary>Labels the sample once enough bars have closed. True when it is finished with.</summary>
         private bool TryResolveSample(Market m, PendingSample s)
         {
             if (m.Risk.Count < 2 || m.Risk.OpenTimes[0] > s.CloseTime)
@@ -954,26 +1093,16 @@ namespace cAlgo.Robots
                 if (m.BullSweep)
                 {
                     if (lo < m.BullExtreme)
-                    {
                         m.BullSweep = false;
-                    }
                     else if (--m.BullBarsLeft <= 0)
-                    {
                         m.BullSweep = false;
-                        LogM(m, "SWEEP BULL expired: no reclaim of the EMA within " + SweepMaxBarsToReclaim + " bars");
-                    }
                 }
                 if (m.BearSweep)
                 {
                     if (hi > m.BearExtreme)
-                    {
                         m.BearSweep = false;
-                    }
                     else if (--m.BearBarsLeft <= 0)
-                    {
                         m.BearSweep = false;
-                        LogM(m, "SWEEP BEAR expired: no loss of the EMA within " + SweepMaxBarsToReclaim + " bars");
-                    }
                 }
 
                 if (SweepDetector.IsBullSweep(priorLow, lo, cl, minPierce, SweepRequireCloseInside))
@@ -983,8 +1112,6 @@ namespace cAlgo.Robots
                     m.BullExtreme = lo;
                     m.BullBarsLeft = SweepMaxBarsToReclaim;
                     m.BullTime = m.Sig.OpenTimes[c];
-                    LogM(m, "SWEEP BULL: " + SweepLookbackBars + "-bar low " + P(m, priorLow) + " pierced to " + P(m, lo) + " (" + D(m, priorLow - lo)
-                         + "), close " + P(m, cl) + " -> BUY on reclaim of EMA >= " + P(m, ema + buffer) + " within " + SweepMaxBarsToReclaim + " bars");
                 }
                 if (SweepDetector.IsBearSweep(priorHigh, hi, cl, minPierce, SweepRequireCloseInside))
                 {
@@ -993,8 +1120,6 @@ namespace cAlgo.Robots
                     m.BearExtreme = hi;
                     m.BearBarsLeft = SweepMaxBarsToReclaim;
                     m.BearTime = m.Sig.OpenTimes[c];
-                    LogM(m, "SWEEP BEAR: " + SweepLookbackBars + "-bar high " + P(m, priorHigh) + " pierced to " + P(m, hi) + " (" + D(m, hi - priorHigh)
-                         + "), close " + P(m, cl) + " -> SELL on loss of EMA <= " + P(m, ema - buffer) + " within " + SweepMaxBarsToReclaim + " bars");
                 }
 
                 bool piercedLow = lo < priorLow;
@@ -1025,33 +1150,24 @@ namespace cAlgo.Robots
 
         private void LogBar(Market m, int c, PendingSample s)
         {
-            double atrR = RiskAtr(m);
+            double atr = RiskAtr(m);
             double spread = m.Symbol.Spread;
             bool armed = m.SqzArmed || m.BullSweep || m.BearSweep;
             var sb = new StringBuilder(256);
-            sb.Append("BAR ").Append(m.Sig.OpenTimes[c].ToString("HH:mm", Inv)).Append(armed ? " ARMED" : " NO SETUP");
+            sb.Append("BAR ").Append(m.Sig.OpenTimes[c].ToString("HH:mm", Inv)).Append(' ').Append(m.SigTf.ShortName).Append(armed ? " ARMED" : " no setup");
             sb.Append(" | C ").Append(P(m, m.Sig.ClosePrices[c])).Append(" EMA ").Append(P(m, m.Ema.Result[c]));
-            sb.Append(" ATR ").Append(D(m, atrR));
-            if (!m.SameTf)
-                sb.Append(" (sig ").Append(D(m, m.AtrSig.Result[c])).Append(')');
-            sb.Append(" | Spread ").Append(D(m, spread)).Append(" = ").Append(atrR > 0 ? Pct(spread / atrR) : "n/a")
-              .Append(" ATR (max ").Append(Pct(m.MaxSpreadToAtr)).Append(')');
+            sb.Append(" ATR ").Append(D(m, atr));
+            sb.Append(" | spread ").Append(D(m, spread)).Append(" = ").Append(atr > 0 ? Pct(spread / atr) : "n/a").Append(" ATR");
             if (s != null)
                 sb.Append(" | TV bar ").Append(F(Math.Exp(s.LongX[0]), 2)).Append('x');
-            sb.Append(" | SQZ ").Append(m.SqzNote).Append(" | SWP ").Append(m.SwpNote);
-            if (s != null)
+            if (s != null && m.Ai.IsReady(AiMinSamplesPerClass))
             {
-                if (m.Ai.IsReady(AiMinSamplesPerClass))
-                {
-                    sb.Append(" | AI L ").Append(Pct(m.Ai.Predict(s.LongX, AiUseEmpiricalPrior, null)))
-                      .Append(" S ").Append(Pct(m.Ai.Predict(s.ShortX, AiUseEmpiricalPrior, null)));
-                }
-                else
-                {
-                    sb.Append(" | AI warming ").Append(m.Ai.Wins).Append('/').Append(m.Ai.Losses);
-                }
+                sb.Append(" | AI L ").Append(Pct(m.Ai.Predict(s.LongX, AiUseEmpiricalPrior, null)))
+                  .Append(" S ").Append(Pct(m.Ai.Predict(s.ShortX, AiUseEmpiricalPrior, null)));
             }
             LogM(m, sb.ToString());
+            if (armed)
+                LogM(m, "  SQZ " + m.SqzNote + " | SWP " + m.SwpNote);
         }
 
         #endregion
@@ -1073,13 +1189,11 @@ namespace cAlgo.Robots
             if (m.BullSweep && m.Sig.LowPrices[f] < m.BullExtreme)
             {
                 m.BullSweep = false;
-                LogM(m, "SWEEP BULL cancelled: new low " + P(m, m.Sig.LowPrices[f]) + " below the swept wick " + P(m, m.BullExtreme));
                 m.SwpNote = SweepNote(m);
             }
             if (m.BearSweep && m.Sig.HighPrices[f] > m.BearExtreme)
             {
                 m.BearSweep = false;
-                LogM(m, "SWEEP BEAR cancelled: new high " + P(m, m.Sig.HighPrices[f]) + " above the swept wick " + P(m, m.BearExtreme));
                 m.SwpNote = SweepNote(m);
             }
 
@@ -1122,25 +1236,22 @@ namespace cAlgo.Robots
 
             AddGlobalGates(m, reasons, codes);
 
-            double atrR = RiskAtr(m);
+            double atr = RiskAtr(m);
             double maxChase = MaxChaseAtr * m.SetupAtr;
             if (chase > maxChase)
                 AddReason(reasons, codes, "CHASE", "Price already " + D(m, chase) + " past trigger > max " + D(m, maxChase) + " (" + F(MaxChaseAtr, 2) + " ATR)");
 
             double spread = m.Symbol.Spread;
-            double spreadRatio = atrR > 0 ? spread / atrR : double.PositiveInfinity;
+            double spreadRatio = atr > 0 ? spread / atr : double.PositiveInfinity;
             if (!(spreadRatio <= m.MaxSpreadToAtr))
             {
-                AddReason(reasons, codes, "SPREAD", "Spread too high (" + D(m, spread) + " = " + (atrR > 0 ? Pct(spreadRatio) : "n/a")
-                          + " of ATR " + D(m, atrR) + " > " + Pct(m.MaxSpreadToAtr) + ")");
+                AddReason(reasons, codes, "SPREAD", "Spread " + D(m, spread) + " = " + (atr > 0 ? Pct(spreadRatio) : "n/a") + " of ATR " + D(m, atr)
+                          + " > " + Pct(m.MaxSpreadToAtr));
             }
 
             double burst = BurstRatio(m);
             if (UseTickVelocity && burst < TickVelocityMultiplier)
-            {
-                AddReason(reasons, codes, "TV", "Low Tick Velocity (" + F(burst, 2) + "x < " + F(TickVelocityMultiplier, 2) + "x in "
-                          + F(TickWindowSeconds, 1) + "s)");
-            }
+                AddReason(reasons, codes, "TV", "Low Tick Velocity (" + F(burst, 2) + "x < " + F(TickVelocityMultiplier, 2) + "x in " + F(TickWindowSeconds, 1) + "s)");
 
             double conf = double.NaN;
             string aiInfo = "";
@@ -1216,6 +1327,13 @@ namespace cAlgo.Robots
                 AddReason(reasons, codes, "CLOSED", "Market closed");
             else if (m.Symbol.TradingMode != SymbolTradingMode.FullAccess)
                 AddReason(reasons, codes, "TMODE", "Broker trading mode " + m.Symbol.TradingMode);
+            double horizon = (TimeExitBars > 0 ? TimeExitBars * m.RiskSec : 0.0) + FlatLeadSeconds;
+            DateTime breakAt;
+            if (LongBreakWithin(m, horizon, out breakAt))
+            {
+                AddReason(reasons, codes, "BREAK", "Market break at " + breakAt.ToString("HH:mm", Inv) + " UTC longer than " + FlatBeforeBreakMinutes
+                          + " min is due before the time exit");
+            }
             double need = RequiredWarmupSeconds(m);
             double ran = (now - m.EngineStart).TotalSeconds;
             if (ran < need)
@@ -1225,7 +1343,7 @@ namespace cAlgo.Robots
         private double RequiredWarmupSeconds(Market m)
         {
             if (UseAiFilter)
-                return Math.Max(TickWindowSeconds, m.SigSec);
+                return Math.Max(TickWindowSeconds, LiveRateWindow(m));
             return UseTickVelocity ? TickWindowSeconds : 0.0;
         }
 
@@ -1245,10 +1363,33 @@ namespace cAlgo.Robots
             m.LastSkip = "SKIP [" + tag + "] " + string.Join(" | ", reasons);
             if (!LogSkipReasons)
                 return;
-            // One line per setup, direction and combination of reasons per bar: detailed, never a flood.
-            if (!m.SkipKeys.Add(tag + "|" + codes))
+            // One line per setup and direction per bar, and at most N lines per hour in total: detailed, never a
+            // flood (a full log can stop a cBot); the STATUS summary counts every reason of every signal.
+            if (!m.SkipKeys.Add(tag))
+                return;
+            if (!AllowSkipLine())
                 return;
             LogM(m, "SKIP [" + tag + " @" + P(m, level) + "]: " + string.Join(" | ", reasons));
+        }
+
+        private bool AllowSkipLine()
+        {
+            if (MaxSkipLinesPerHour <= 0)
+                return true;
+            DateTime now = Server.Time;
+            var hour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, now.Kind);
+            if (hour != _skipHour)
+            {
+                _skipHour = hour;
+                _skipLinesThisHour = 0;
+            }
+            if (_skipLinesThisHour >= MaxSkipLinesPerHour)
+            {
+                _skipLinesSuppressed++;
+                return false;
+            }
+            _skipLinesThisHour++;
+            return true;
         }
 
         private bool OpenTrade(Market m, string setup, TradeType type, double level, double conf, double burst, string aiInfo)
@@ -1256,26 +1397,27 @@ namespace cAlgo.Robots
             string tag = setup + " " + (type == TradeType.Buy ? "BUY" : "SELL");
             Symbol sym = m.Symbol;
             double pip = sym.PipSize;
-            double atrR = RiskAtr(m);
-            double slPips = Math.Round(SlAtrMultiplier * atrR / pip, 1);
-            double tp1Pips = Math.Round(Tp1AtrMultiplier * atrR / pip, 1);
+            double atr = RiskAtr(m);
+            double slPips = Math.Round(SlAtrMultiplier * atr / pip, 1);
+            double tp1Pips = Math.Round(Tp1AtrMultiplier * atr / pip, 1);
             if (slPips <= 0 || tp1Pips <= 0)
             {
                 RecordSignal(m, SignalKey(m, tag), "DIST");
-                LogSkip(m, tag, level, "DIST", new List<string> { "SL/TP distance rounds to zero (ATR " + D(m, atrR) + ")" });
+                LogSkip(m, tag, level, "DIST", new List<string> { "SL/TP distance rounds to zero (ATR " + D(m, atr) + ")" });
                 return false;
             }
             double minStopPips = BrokerMinDistancePips(m, true);
             if (minStopPips > 0 && slPips < minStopPips - 1e-9)
             {
                 RecordSignal(m, SignalKey(m, tag), "MINSL");
-                LogSkip(m, tag, level, "MINSL", new List<string> { "SL " + D(m, slPips * pip) + " is closer than the broker minimum stop distance "
+                LogSkip(m, tag, level, "MINSL", new List<string> { "SL " + D(m, slPips * pip) + " is closer than the broker minimum stop "
                                                                     + D(m, minStopPips * pip) });
                 return false;
             }
 
             string sizing;
-            double volume = ComputeVolume(m, type, slPips, out sizing);
+            double marginEstimate;
+            double volume = ComputeVolume(m, type, slPips, out sizing, out marginEstimate);
             if (volume <= 0)
             {
                 RecordSignal(m, SignalKey(m, tag), "SIZE");
@@ -1294,7 +1436,7 @@ namespace cAlgo.Robots
                 if (closeAllAtTp1)
                     tpPips = tp1Pips;
                 else if (Tp2AtrMultiplier > 0)
-                    tpPips = Math.Round(Tp2AtrMultiplier * atrR / pip, 1);
+                    tpPips = Math.Round(Tp2AtrMultiplier * atr / pip, 1);
                 double minTpPips = BrokerMinDistancePips(m, false);
                 if (tpPips.HasValue && minTpPips > 0 && tpPips.Value < minTpPips - 1e-9)
                     tpPips = null;   // too close for a server-side TP: the bot closes at the target itself
@@ -1311,13 +1453,28 @@ namespace cAlgo.Robots
                 volume = smaller;
             }
 
+            if (result != null && !result.IsSuccessful && result.Error == ErrorCode.NoMoney && volume > 0)
+            {
+                // The broker wants more margin than every estimate said: remember that this volume needs at least the
+                // free margin it was refused with, so the next signals are sized (or skipped) without another reject.
+                double refusedAt = Math.Max(Account.FreeMargin, 0.0);
+                double price = type == TradeType.Buy ? sym.Ask : sym.Bid;
+                if (refusedAt > 0 && price > 0)
+                {
+                    m.ObservedMarginPerUnit = Math.Max(m.ObservedMarginPerUnit * (m.ObservedMarginPrice > 0 ? price / m.ObservedMarginPrice : 1.0),
+                                                       refusedAt * 1.01 / volume);
+                    m.ObservedMarginPrice = price;
+                }
+            }
+
             if (result == null || !result.IsSuccessful || result.Position == null)
             {
                 // The setup is dropped so a rejecting broker is not hit again on every tick of the bar.
                 RecordSignal(m, SignalKey(m, tag), "ORDER");
                 ConsumeSetup(m, setup, type);
                 LogM(m, "ORDER FAILED [" + tag + "]: " + (result != null && result.Error.HasValue ? result.Error.Value.ToString() : "no position returned")
-                     + " - setup dropped | " + sizing);
+                     + " - setup dropped");
+                LogM(m, "  " + sizing);
                 return false;
             }
 
@@ -1335,6 +1492,7 @@ namespace cAlgo.Robots
             st.PartialVolume = plan.PartialVolume;
             st.CloseAllAtTp1 = closeAllAtTp1;
             st.Confidence = conf;
+            st.MarginAtEntry = marginEstimate * (volume > 0 ? p.VolumeInUnits / volume : 1.0);
             _trades[p.Id] = st;
             _tradesToday++;
             m.TradesToday++;
@@ -1357,22 +1515,21 @@ namespace cAlgo.Robots
                 LogM(m, "PROTECTION #" + p.Id + ": fill came back without a stop -> SL attached at " + P(m, slPrice));
             }
 
-            string commissionNote = "";
             if (p.VolumeInUnits > 0 && Math.Abs(p.Commissions) > 0)
             {
                 m.CommissionPerUnit = 2.0 * Math.Abs(p.Commissions) / p.VolumeInUnits;
                 m.CommissionSource = "last fill";
-                commissionNote = " | commission " + F(2.0 * Math.Abs(p.Commissions), 2) + " " + _ccy + " round turn (" + CommissionText(m) + ")";
             }
 
             string tp1Text = plan.Splittable
-                ? Lots(m, plan.PartialVolume) + " (" + F(plan.PartialVolume / st.InitialVolume * 100.0, 0) + "%), runner " + Lots(m, plan.RemainingVolume)
-                : (closeAllAtTp1 ? "100% (volume cannot be split)" : "none closed - whole position trails (volume cannot be split)");
+                ? F(plan.PartialVolume / st.InitialVolume * 100.0, 0) + "%"
+                : (closeAllAtTp1 ? "100% (not splittable)" : "0%, all trails (not splittable)");
             _lastEvent = m.Name + " ENTRY " + tag + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice);
-            LogM(m, "ENTRY " + tag + " #" + p.Id + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice) + " | SL " + P(m, p.StopLoss) + " ("
-                 + D(m, st.RiskDist) + " = " + F(SlAtrMultiplier, 2) + " ATR) | TP1 " + P(m, TargetPrice(p, st.Tp1Dist)) + " (" + D(m, st.Tp1Dist) + ") closes "
-                 + tp1Text + " | conf " + (double.IsNaN(conf) ? "n/a (AI off)" : Pct(conf) + " " + aiInfo) + " | TV " + F(burst, 2) + "x | " + sizing
-                 + commissionNote + " | open positions " + Positions.FindAll(BotLabel).Length + "/" + MaxOpenPositions);
+            LogM(m, "ENTRY " + tag + " #" + p.Id + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice) + " " + m.SigTf.ShortName + " | SL " + P(m, p.StopLoss)
+                 + " (" + D(m, st.RiskDist) + ") | TP1 " + P(m, TargetPrice(p, st.Tp1Dist)) + " (" + D(m, st.Tp1Dist) + ") closes " + tp1Text
+                 + " | conf " + (double.IsNaN(conf) ? "n/a" : Pct(conf)) + " | TV " + F(burst, 2) + "x | positions "
+                 + Positions.FindAll(BotLabel).Length + "/" + MaxOpenPositions);
+            LogM(m, "  " + sizing + (aiInfo.Length > 0 ? " | AI " + aiInfo : ""));
             if (m.IsChart)
                 DrawEntry(m, p);
             return true;
@@ -1408,20 +1565,79 @@ namespace cAlgo.Robots
             m.SwpNote = SweepNote(m);
         }
 
-        /// <summary>
-        /// Volume in units: Fixed Lots, or the size whose stop-loss plus round-turn commission equals Risk Percent
-        /// of the balance; then bounded by the lot cap/floor, the broker maximum and the margin rules.
-        /// </summary>
-        private double ComputeVolume(Market m, TradeType type, double slPips, out string note)
+        #endregion
+
+        #region Budget, sizing and margin
+
+        /// <summary>Equity the bot sizes and limits itself by: the account equity, or the budget moved by the bot's own result.</summary>
+        private double BotEquity()
+        {
+            return MarketMath.BudgetEquity(Account.Equity, BotBudget, _runResult + BotFloatingResult());
+        }
+
+        private double BotFloatingResult()
+        {
+            double sum = 0.0;
+            foreach (Position p in Positions.FindAll(BotLabel))
+            {
+                if (Valid(p.NetProfit))
+                    sum += p.NetProfit;
+            }
+            return sum;
+        }
+
+        /// <summary>Margin blocked by the bot: the whole account's when there is no budget, else its own positions'.</summary>
+        private double BotUsedMargin()
+        {
+            if (!(BotBudget > 0))
+                return Account.Margin;
+            double used = 0.0;
+            foreach (Position p in Positions.FindAll(BotLabel))
+            {
+                double margin = p.Margin;
+                TradeState st;
+                if (!(margin > 0) && _trades.TryGetValue(p.Id, out st))
+                    margin = st.MarginAtEntry;
+                if (margin > 0)
+                    used += margin;
+            }
+            return used;
+        }
+
+        private double BotFreeMargin()
+        {
+            return Math.Max(0.0, Math.Min(Account.FreeMargin, BotEquity() - BotUsedMargin()));
+        }
+
+        /// <summary>Smallest volume the bot will trade on the symbol: the broker minimum, or Min Lots when that is larger.</summary>
+        private static double MinTradableVolume(Market m, double minLots)
         {
             Symbol sym = m.Symbol;
-            double balance = Account.Balance;
+            double floor = sym.VolumeInUnitsMin;
+            if (minLots > 0)
+                floor = Math.Max(floor, sym.QuantityToVolumeInUnits(minLots));
+            return VolumeMath.CeilToStep(floor, sym.VolumeInUnitsStep);
+        }
+
+        private double MinTradableVolume(Market m)
+        {
+            return MinTradableVolume(m, MinLots);
+        }
+
+        /// <summary>
+        /// Volume in units: Fixed Lots, or the size whose stop-loss plus round-turn commission equals Risk Percent of the
+        /// budget; then bounded by the lot cap/floor, the broker maximum and the margin rules.
+        /// </summary>
+        private double ComputeVolume(Market m, TradeType type, double slPips, out string note, out double marginEstimate)
+        {
+            Symbol sym = m.Symbol;
+            marginEstimate = 0.0;
+            double capital = BotEquity();
             double pipValue = sym.PipValue;   // account currency per broker pip for one unit
             double step = sym.VolumeInUnitsStep;
-            double vMin = sym.VolumeInUnitsMin;
-            if (pipValue <= 0 || slPips <= 0 || balance <= 0 || step <= 0)
+            if (pipValue <= 0 || slPips <= 0 || capital <= 0 || step <= 0)
             {
-                note = "Sizing impossible (balance " + F(balance, 2) + ", pip value " + pipValue.ToString("G6", Inv) + ")";
+                note = "Sizing impossible (budget equity " + F(capital, 2) + ", pip value " + pipValue.ToString("G6", Inv) + ")";
                 return 0.0;
             }
 
@@ -1431,14 +1647,14 @@ namespace cAlgo.Robots
             if (FixedLots > 0)
             {
                 raw = sym.QuantityToVolumeInUnits(FixedLots);
-                sb.Append("size: fixed ").Append(F(FixedLots, 2)).Append(" lot = ").Append(Units(raw)).Append('u');
+                sb.Append("size: fixed ").Append(F(FixedLots, 2)).Append(" lot");
             }
             else
             {
-                double riskMoney = balance * RiskPercent / 100.0;
+                double riskMoney = capital * RiskPercent / 100.0;
                 raw = riskMoney / lossPerUnit;
-                sb.Append("size: risk ").Append(F(riskMoney, 2)).Append(' ').Append(_ccy).Append(" / (SL ").Append(D(m, slPips * sym.PipSize))
-                  .Append(" + commission) = ").Append(Units(raw)).Append('u');
+                sb.Append("size: ").Append(F(RiskPercent, 2)).Append("% of ").Append(F(capital, 2)).Append(' ').Append(_ccy).Append(" = ")
+                  .Append(Units(raw)).Append('u');
             }
 
             double units = VolumeMath.FloorToStep(raw, step);
@@ -1446,91 +1662,109 @@ namespace cAlgo.Robots
             if (units > cap + VolumeEpsilon)
             {
                 units = VolumeMath.FloorToStep(cap, step);
-                sb.Append(" -> Max Lots / broker cap");
+                sb.Append(" -> cap");
             }
-            double floor = Math.Max(vMin, sym.QuantityToVolumeInUnits(MinLots));
+            double floor = MinTradableVolume(m);
             if (units < floor - VolumeEpsilon)
             {
                 if (!AllowMinLotOverride)
                 {
-                    note = sb.Append(" -> below Min Lots ").Append(Lots(m, floor)).Append(" and min-lot override is OFF").ToString();
+                    note = sb.Append(" -> below the minimum ").Append(Lots(m, floor)).Append(" and 'Use Min Volume' is OFF").ToString();
                     return 0.0;
                 }
-                units = VolumeMath.CeilToStep(floor, step);
-                sb.Append(" -> Min Lots floor");
+                units = floor;
+                sb.Append(" -> minimum");
             }
 
-            double freeMargin = Account.FreeMargin;
             string how = "";
+            double minMargin = EstimateMargin(m, type, floor, out how);
+            if (!(minMargin > 0))
+            {
+                note = sb.Append(" -> margin cannot be estimated (").Append(how).Append(")").ToString();
+                return 0.0;
+            }
+
+            double freeMargin = BotFreeMargin();
+            double usedMargin = BotUsedMargin();
             Func<double, double> marginFor = v => EstimateMargin(m, type, v, out how);
-            MarginFit fit = MarketMath.FitMargin(units, vMin, step, freeMargin, Account.Equity, Account.Margin, MarginPerTradePercent,
+            MarginFit fit = MarketMath.FitMargin(units, floor, step, freeMargin, capital, usedMargin, MarginPerTradePercent,
                                                  MaxTotalMarginPercent, AllowMinLotOverride, marginFor, MarginFitIterations);
             switch (fit.Rule)
             {
                 case MarginRule.TotalLimitReached:
-                    note = sb.Append(" -> Total margin limit reached: open positions block ").Append(F(Account.Margin, 2)).Append(' ').Append(_ccy)
-                             .Append(" of max ").Append(F(MaxTotalMarginPercent, 0)).Append("% of equity ").Append(F(Account.Equity, 2)).Append(' ')
-                             .Append(_ccy).ToString();
+                    note = sb.Append(" -> margin limit reached: positions block ").Append(F(usedMargin, 2)).Append(" of ")
+                             .Append(F(capital * MaxTotalMarginPercent / 100.0, 2)).Append(' ').Append(_ccy).Append(" (")
+                             .Append(F(MaxTotalMarginPercent, 0)).Append("% of ").Append(F(capital, 2)).Append(')').ToString();
                     return 0.0;
                 case MarginRule.Insufficient:
-                    note = sb.Append(" -> Insufficient margin: ").Append(Lots(m, vMin)).Append(" needs ").Append(F(fit.MinNeed, 2)).Append(' ').Append(_ccy)
-                             .Append(", available ").Append(F(fit.TotalLeft, 2)).Append(' ').Append(_ccy).Append(" (free margin ").Append(F(freeMargin, 2))
-                             .Append(", total limit ").Append(F(MaxTotalMarginPercent, 0)).Append("% of equity")
-                             .Append(AllowMinLotOverride ? "" : ", min-lot override OFF").Append(", ").Append(how).Append(')').ToString();
+                    note = sb.Append(" -> not enough margin: ").Append(Lots(m, floor)).Append(" needs ").Append(F(fit.MinNeed, 2)).Append(' ').Append(_ccy)
+                             .Append(", available ").Append(F(fit.TotalLeft, 2)).Append(" (").Append(how).Append(')').ToString();
                     return 0.0;
                 case MarginRule.ReducedToShare:
-                    sb.Append(" -> margin limit ").Append(F(fit.PerTrade, 2)).Append(' ').Append(_ccy).Append(" (").Append(F(MarginPerTradePercent, 0))
-                      .Append("% of free margin, all positions <= ").Append(F(MaxTotalMarginPercent, 0)).Append("% of equity, ").Append(how).Append(')');
+                    sb.Append(" -> margin share ").Append(F(fit.PerTrade, 2)).Append(' ').Append(_ccy);
                     break;
                 case MarginRule.MinimumWithinTotal:
-                    sb.Append(" -> min volume within the ").Append(F(MaxTotalMarginPercent, 0)).Append("% total margin limit (").Append(how).Append(')');
+                    sb.Append(" -> minimum within the ").Append(F(MaxTotalMarginPercent, 0)).Append("% limit");
                     break;
             }
             units = fit.Units;
+            marginEstimate = EstimateMargin(m, type, units, out how);
 
             double effectiveRisk = units * lossPerUnit;
-            sb.Append(" = ").Append(Lots(m, units)).Append(", risk incl. commission ").Append(F(effectiveRisk, 2)).Append(' ').Append(_ccy)
-              .Append(" (").Append(F(effectiveRisk / balance * 100.0, 2)).Append("%), margin ").Append(F(EstimateMargin(m, type, units, out how), 2))
-              .Append(' ').Append(_ccy);
+            sb.Append(" = ").Append(Lots(m, units)).Append(", risk ").Append(F(effectiveRisk, 2)).Append(' ').Append(_ccy)
+              .Append(" (").Append(F(effectiveRisk / capital * 100.0, 2)).Append("%), margin ").Append(F(marginEstimate, 2)).Append(" (").Append(how).Append(')');
             note = sb.ToString();
             return units;
         }
 
-        /// <summary>Margin the broker blocks for the volume: the platform's own figure unless a leverage is forced in the UI.</summary>
+        /// <summary>
+        /// Margin of the volume in account currency: the largest of the broker estimate, notional / leverage and the margin
+        /// actually seen on this symbol. The broker estimate alone has proved unreliable (NaN, zero, or below the real
+        /// margin of a crypto position at 1:2), so it is never trusted on its own. 0 = no estimate at all.
+        /// </summary>
         private double EstimateMargin(Market m, TradeType type, double units, out string how)
         {
+            double broker = 0.0;
+            try
+            {
+                broker = m.Symbol.GetEstimatedMargin(type, units);
+            }
+            catch (Exception)
+            {
+                broker = 0.0;
+            }
+            double leverage;
+            double own = OwnMarginEstimate(m, type, units, out leverage);
+            double seen = 0.0;
+            if (m.ObservedMarginPerUnit > 0)
+            {
+                // Margin moves with the price at a fixed leverage, so the figure seen earlier is scaled to today's price.
+                double now = type == TradeType.Buy ? m.Symbol.Ask : m.Symbol.Bid;
+                double scale = m.ObservedMarginPrice > 0 && now > 0 ? now / m.ObservedMarginPrice : 1.0;
+                seen = m.ObservedMarginPerUnit * units * scale;
+            }
+            how = "broker " + (Valid(broker) && broker > 0 ? F(broker, 2) : "n/a") + ", 1:" + F(leverage, 0) + " " + (own > 0 ? F(own, 2) : "n/a")
+                  + (seen > 0 ? ", seen " + F(seen, 2) : "");
+            return MarketMath.MaxEstimate(broker, own, seen);
+        }
+
+        private double OwnMarginEstimate(Market m, TradeType type, double units, out double leverage)
+        {
+            leverage = EffectiveLeverage(m);
             Symbol sym = m.Symbol;
-            if (LeverageOverride <= 0)
-            {
-                try
-                {
-                    double margin = sym.GetEstimatedMargin(type, units);
-                    if (Valid(margin) && margin > 0)
-                    {
-                        how = "broker margin";
-                        return margin;
-                    }
-                }
-                catch (Exception)
-                {
-                    // fall back to leverage maths below
-                }
-            }
-            double leverage = EffectiveLeverage(m);
-            if (!(leverage > 0))
-            {
-                how = "no leverage info";
-                return 0.0;
-            }
             double price = type == TradeType.Buy ? sym.Ask : sym.Bid;
-            how = "leverage 1:" + F(leverage, 0);
+            if (!(price > 0))
+                price = m.LastPrice;
+            if (!(leverage > 0) || !(price > 0) || !(sym.PipSize > 0) || !(sym.PipValue > 0))
+                return 0.0;
             return units * price * (sym.PipValue / sym.PipSize) / leverage;
         }
 
         private double EffectiveLeverage(Market m)
         {
-            if (LeverageOverride > 0)
-                return LeverageOverride;
+            double forced = m.IsCrypto ? CryptoLeverageOverride : LeverageOverride;
+            if (forced > 0)
+                return forced;
             double leverage = Account.PreciseLeverage;
             double symbolLeverage = SymbolLeverage(m);
             if (symbolLeverage > 0 && (leverage <= 0 || symbolLeverage < leverage))
@@ -1562,6 +1796,30 @@ namespace cAlgo.Robots
             catch (Exception)
             {
                 return 0.0;
+            }
+        }
+
+        /// <summary>Remembers the margin the broker really blocks per unit and reports it once per position.</summary>
+        private void ObserveMargins()
+        {
+            foreach (Position p in Positions.FindAll(BotLabel))
+            {
+                Market m;
+                if (!_bySymbol.TryGetValue(p.SymbolName, out m) || !(p.VolumeInUnits > 0))
+                    continue;
+                double margin = p.Margin;
+                if (!(margin > 0) || !Valid(margin))
+                    continue;
+                m.ObservedMarginPerUnit = margin / p.VolumeInUnits;
+                m.ObservedMarginPrice = p.EntryPrice;
+                TradeState st;
+                if (_trades.TryGetValue(p.Id, out st) && !st.MarginLogged)
+                {
+                    st.MarginLogged = true;
+                    bool above = st.MarginAtEntry > 0 && margin > st.MarginAtEntry * 1.10;
+                    LogM(m, (above ? "WARNING: " : "") + "MARGIN #" + p.Id + ": broker blocks " + F(margin, 2) + " " + _ccy + " (estimated "
+                         + F(st.MarginAtEntry, 2) + ")" + (above ? " - later entries on " + m.Name + " use the real figure" : ""));
+                }
             }
         }
 
@@ -1608,7 +1866,7 @@ namespace cAlgo.Robots
                     default:
                         return 0.0;
                 }
-                double price = sym.Bid > 0 ? sym.Bid : sym.Ask;
+                double price = sym.Bid > 0 ? sym.Bid : m.LastPrice;
                 bool quoteUsd = sym.QuoteAsset != null && sym.QuoteAsset.Name == "USD";
                 bool baseUsd = sym.BaseAsset != null && sym.BaseAsset.Name == "USD";
                 return CommissionMath.RoundTurnPerUnit(basis, sym.Commission, price, sym.LotSize, sym.PipValue / sym.PipSize,
@@ -1625,8 +1883,7 @@ namespace cAlgo.Robots
             double pipValue = m.Symbol.PipValue;
             if (!(m.CommissionPerUnit > 0) || !(pipValue > 0))
                 return "0 (" + m.CommissionSource + ")";
-            double perMinVolume = m.CommissionPerUnit * m.Symbol.VolumeInUnitsMin;
-            return D(m, m.CommissionPerUnit / pipValue * m.Symbol.PipSize) + " = " + F(perMinVolume, 3) + " " + _ccy + " per min volume (" + m.CommissionSource + ")";
+            return D(m, m.CommissionPerUnit / pipValue * m.Symbol.PipSize) + " round turn (" + m.CommissionSource + ")";
         }
 
         private double[] LiveFeatures(Market m, int dir)
@@ -1638,10 +1895,9 @@ namespace cAlgo.Robots
             double ema = m.Ema.Result[f];
             double rsiNow = m.Rsi.Result[f];
             double rsiPrev = m.Rsi.Result[f - RsiSlopeBars];
-            double atrR = RiskAtr(m);
-            if (!Valid(atrS) || atrS <= 0 || !Valid(ema) || !Valid(rsiNow) || !Valid(rsiPrev) || atrR <= 0)
+            if (!Valid(atrS) || atrS <= 0 || !Valid(ema) || !Valid(rsiNow) || !Valid(rsiPrev))
                 return null;
-            return AiFeatures.Build(BarTickVelocity(m), m.Symbol.Bid - ema, atrS, rsiNow - rsiPrev, m.Symbol.Spread / atrR, dir);
+            return AiFeatures.Build(BarTickVelocity(m), m.Symbol.Bid - ema, atrS, rsiNow - rsiPrev, m.Symbol.Spread / atrS, dir);
         }
 
         #endregion
@@ -1657,6 +1913,8 @@ namespace cAlgo.Robots
             if (!m.Symbol.MarketHours.IsOpened())
                 return;
             DateTime now = Server.Time;
+            DateTime breakAt;
+            bool breakNear = LongBreakWithin(m, FlatLeadSeconds, out breakAt);
 
             foreach (Position p in mine)
             {
@@ -1670,6 +1928,26 @@ namespace cAlgo.Robots
                 if (fav > st.MaxFavorable)
                     st.MaxFavorable = fav;
 
+                // 0. Flat before a long market break: a stop cannot protect against the gap at the reopen.
+                if (breakNear)
+                {
+                    st.CloseReason = "BREAK EXIT";
+                    LogM(m, "BREAK EXIT #" + p.Id + ": market closes at " + breakAt.ToString("HH:mm", Inv) + " UTC for over " + FlatBeforeBreakMinutes
+                         + " min, closing at market (" + SignedD(m, fav) + ")");
+                    TradeResult r = ClosePosition(p);
+                    if (r.IsSuccessful)
+                    {
+                        _statBreakExits++;
+                    }
+                    else
+                    {
+                        st.CloseReason = null;
+                        Backoff(st, now);
+                        LogM(m, "BREAK EXIT failed #" + p.Id + ": " + r.Error);
+                    }
+                    continue;
+                }
+
                 // 1. TP1: partial close (or full close / hand-over to the trail when the volume cannot be split).
                 if (!st.Tp1Done && fav >= st.Tp1Dist - m.Symbol.TickSize * 0.5)
                 {
@@ -1677,7 +1955,7 @@ namespace cAlgo.Robots
                         continue;
                 }
 
-                // 2. Time exit: the market did not deliver TP1 within N bars of the ATR timeframe.
+                // 2. Time exit: the market did not deliver TP1 within N bars.
                 if (TimeExitBars > 0 && !st.Tp1Done && (now - st.EntryTime).TotalSeconds >= TimeExitBars * m.RiskSec)
                 {
                     st.CloseReason = "TIME EXIT";
@@ -1726,8 +2004,7 @@ namespace cAlgo.Robots
                         st.Tp1Done = true;
                         st.Failures = 0;
                         _statTp1++;
-                        LogM(m, "TP1 #" + p.Id + " " + SignedD(m, fav) + ": closed " + Lots(m, part) + " (" + F(part / st.InitialVolume * 100.0, 0)
-                             + "%), runner " + Lots(m, p.VolumeInUnits)
+                        LogM(m, "TP1 #" + p.Id + " " + SignedD(m, fav) + ": closed " + Lots(m, part) + ", runner " + Lots(m, p.VolumeInUnits)
                              + (TrailAtrMultiplier > 0 ? " trails " + F(TrailAtrMultiplier, 2) + " x ATR" : " keeps its stop"));
                         if (BeTriggerR > 0 && !st.BeDone)
                             MoveToBreakeven(m, p, st, px, "TP1");
@@ -1812,6 +2089,9 @@ namespace cAlgo.Robots
             double atr = RiskAtr(m);
             if (atr <= 0)
                 return;
+            DateTime now = Server.Time;
+            if ((now - st.LastTrail).TotalSeconds < TrailMinIntervalSeconds)
+                return;
             bool isLong = p.TradeType == TradeType.Buy;
             double dist = TrailAtrMultiplier * atr;
             double candidate = isLong ? px - dist : px + dist;
@@ -1824,10 +2104,7 @@ namespace cAlgo.Robots
             if (isLong ? candidate >= px : candidate <= px)
                 return;
 
-            DateTime now = Server.Time;
-            if ((now - st.LastTrail).TotalSeconds < TrailMinIntervalSeconds)
-                return;
-            double step = Math.Max(TrailStepPips * m.BotPip, m.Symbol.TickSize);
+            double step = Math.Max(Math.Max(TrailStepPips * m.BotPip, TrailStepAtr * atr), m.Symbol.TickSize);
             if (p.StopLoss.HasValue)
             {
                 double improvement = isLong ? candidate - p.StopLoss.Value : p.StopLoss.Value - candidate;
@@ -1839,8 +2116,13 @@ namespace cAlgo.Robots
             if (r.IsSuccessful)
             {
                 st.Failures = 0;
-                LogM(m, "TRAIL #" + p.Id + ": SL -> " + P(m, candidate) + " (" + F(TrailAtrMultiplier, 2) + " x ATR = " + D(m, dist) + ", locked "
-                     + SignedD(m, isLong ? candidate - p.EntryPrice : p.EntryPrice - candidate) + ")");
+                st.TrailMoves++;
+                // Only the first move is logged; the CLOSED line reports how often the stop was trailed.
+                if (st.TrailMoves == 1)
+                {
+                    LogM(m, "TRAIL #" + p.Id + ": SL -> " + P(m, candidate) + " (" + F(TrailAtrMultiplier, 2) + " x ATR = " + D(m, dist) + ", locked "
+                         + SignedD(m, isLong ? candidate - p.EntryPrice : p.EntryPrice - candidate) + ")");
+                }
             }
             else
             {
@@ -1875,7 +2157,7 @@ namespace cAlgo.Robots
 
             // A position opened by an earlier run of this cBot: rebuild its plan from the order comment.
             double pip = m.Symbol.PipSize;
-            double atrR = RiskAtr(m);
+            double atr = RiskAtr(m);
             bool isLong = p.TradeType == TradeType.Buy;
             string comment = p.Comment ?? "";
             double initVolume = CommentValue(comment, "v=");
@@ -1889,8 +2171,8 @@ namespace cAlgo.Robots
             st.IsLong = isLong;
             st.EntryTime = p.EntryTime;
             bool stopOnLossSide = p.StopLoss.HasValue && (isLong ? p.StopLoss.Value < p.EntryPrice : p.StopLoss.Value > p.EntryPrice);
-            st.RiskDist = slPips > 0 ? slPips * pip : (stopOnLossSide ? Math.Abs(p.EntryPrice - p.StopLoss.Value) : SlAtrMultiplier * atrR);
-            st.Tp1Dist = tpPips > 0 ? tpPips * pip : Tp1AtrMultiplier * atrR;
+            st.RiskDist = slPips > 0 ? slPips * pip : (stopOnLossSide ? Math.Abs(p.EntryPrice - p.StopLoss.Value) : SlAtrMultiplier * atr);
+            st.Tp1Dist = tpPips > 0 ? tpPips * pip : Tp1AtrMultiplier * atr;
             st.BeDone = p.StopLoss.HasValue && !stopOnLossSide;
             st.InitialVolume = initVolume > 0 ? initVolume : p.VolumeInUnits;
             st.Tp1Done = initVolume > 0 && p.VolumeInUnits < initVolume - VolumeEpsilon;
@@ -1902,6 +2184,7 @@ namespace cAlgo.Robots
                 st.CloseAllAtTp1 = !plan.Splittable && (Tp1ClosePercent >= 100.0 || NoSplitMode == NoSplitAction.CloseAllAtTp1);
             }
             st.Confidence = double.NaN;
+            st.MarginLogged = true;   // no entry estimate to compare the broker's figure with
             _trades[p.Id] = st;
             LogM(m, "RECOVERED #" + p.Id + " " + (isLong ? "BUY" : "SELL") + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice) + " SL " + P(m, p.StopLoss)
                  + " | R " + D(m, st.RiskDist) + ", TP1 " + D(m, st.Tp1Dist) + (st.Tp1Done ? ", TP1 already taken" : "") + (st.BeDone ? ", stop at/after BE" : ""));
@@ -1916,7 +2199,8 @@ namespace cAlgo.Robots
                 if (_bySymbol.TryGetValue(p.SymbolName, out m))
                     GetOrRecoverState(m, p);
                 else
-                    Log("RECOVER: position #" + p.Id + " on " + p.SymbolName + " is not in the symbol lists - it keeps its server-side stop but is not managed");
+                    Log("RECOVER: position #" + p.Id + " on " + p.SymbolName + " is on no active market of this run - it keeps its server-side stop "
+                        + "but is not managed; close it by hand if needed");
             }
         }
 
@@ -1958,7 +2242,13 @@ namespace cAlgo.Robots
 
                 _statTrades++;
                 _statNet += net;
-                if (gross > 0)
+                _runResult += net;
+                bool breakEvenStop = st != null && st.BeDone && !st.Tp1Done && args.Reason == PositionCloseReason.StopLoss;
+                if (breakEvenStop)
+                {
+                    _statScratch++;   // the stop sat at entry: neither a win nor a loss, whatever the rounding
+                }
+                else if (gross > 0)
                 {
                     _statWins++;
                     if (m != null)
@@ -1980,8 +2270,9 @@ namespace cAlgo.Robots
                     _statTp1++;   // server-side TP1 of an unsplittable position
                 _lastEvent = p.SymbolName + " CLOSED by " + why + " " + Signed(net, 2) + " " + _ccy;
                 Log(p.SymbolName + " CLOSED #" + p.Id + " " + (st != null ? st.Setup : "?") + " " + (p.TradeType == TradeType.Buy ? "BUY" : "SELL") + " by " + why
-                    + ": net " + Signed(net, 2) + " " + _ccy + " (gross " + Signed(gross, 2) + ", " + fills + " fill(s)) | day "
-                    + Signed(Account.Balance - _dayStartBalance, 2) + " " + _ccy + " | loss streak " + (m != null ? m.ConsecLosses : 0));
+                    + ": net " + Signed(net, 2) + " " + _ccy + " (gross " + Signed(gross, 2) + ", " + fills + " fill(s)"
+                    + (st != null && st.TrailMoves > 0 ? ", trailed " + st.TrailMoves + "x" : "") + ") | day " + Signed(BotEquity() - _dayStartEquity, 2)
+                    + " " + _ccy + " | budget equity " + F(BotEquity(), 2) + " | loss streak " + (m != null ? m.ConsecLosses : 0));
 
                 if (m != null && MaxConsecutiveLosses > 0 && m.ConsecLosses >= MaxConsecutiveLosses)
                 {
@@ -2015,7 +2306,7 @@ namespace cAlgo.Robots
 
         #endregion
 
-        #region Tick engine, spread, sessions, day guards
+        #region Tick engine, spread, sessions, breaks, day guards
 
         private void CountTickForCalibration(Market m)
         {
@@ -2052,16 +2343,36 @@ namespace cAlgo.Robots
             return expected > 0 ? CalibratedTicks(m, TickWindowSeconds) / expected : 0.0;
         }
 
-        /// <summary>Ticks in the last bar-length window relative to the average bar (the AI feature).</summary>
+        /// <summary>Window of the live tick-rate feature: one bar, but never more than TickRateWindowCapSeconds.</summary>
+        private static double LiveRateWindow(Market m)
+        {
+            return Math.Min(m.SigSec, TickRateWindowCapSeconds);
+        }
+
+        /// <summary>Recent tick rate relative to the average bar (the AI feature), scaled to a whole bar.</summary>
         private double BarTickVelocity(Market m)
         {
-            return m.BaselineTicksPerBar > 0 ? CalibratedTicks(m, m.SigSec) / m.BaselineTicksPerBar : 0.0;
+            double window = LiveRateWindow(m);
+            if (!(m.BaselineTicksPerBar > 0) || !(window > 0) || !(m.SigSec > 0))
+                return 0.0;
+            return CalibratedTicks(m, window) / (m.BaselineTicksPerBar * window / m.SigSec);
+        }
+
+        /// <summary>
+        /// Typical spreads only: Forex inside the session hours (its liquid part), crypto around the clock, never in the
+        /// first minutes after a market (re)opens when quotes are still wide.
+        /// </summary>
+        private bool SpreadSampleAllowed(Market m, DateTime now)
+        {
+            if (m.OpenedAt != DateTime.MinValue && (now - m.OpenedAt).TotalMinutes < SpreadSettleMinutes)
+                return false;
+            return m.IsCrypto || InSessionHours(now);
         }
 
         private void TrackSpread(Market m, DateTime now)
         {
             double s = m.Symbol.Spread;
-            if (s < 0 || !InSessionFor(m, now))
+            if (s < 0 || !SpreadSampleAllowed(m, now))
                 return;
             m.Spreads.Add(s);
         }
@@ -2074,9 +2385,9 @@ namespace cAlgo.Robots
             return Valid(v) && v > 0 ? v : 0.0;
         }
 
-        private bool InSession(DateTime now)
+        private bool InSessionHours(DateTime now)
         {
-            if (!UseSessionFilter || SessionStartHour == SessionEndHour)
+            if (SessionStartHour == SessionEndHour)
                 return true;
             int h = now.Hour;
             if (SessionStartHour < SessionEndHour)
@@ -2084,15 +2395,68 @@ namespace cAlgo.Robots
             return h >= SessionStartHour || h < SessionEndHour;
         }
 
+        private bool InSession(DateTime now)
+        {
+            return !UseSessionFilter || InSessionHours(now);
+        }
+
         private bool InSessionFor(Market m, DateTime now)
         {
             return (m.IsCrypto && CryptoIgnoresSession) || InSession(now);
         }
 
+        /// <summary>
+        /// True when the market closes within the given number of seconds for longer than Flat Before Breaks (a weekend,
+        /// a long maintenance), with the time of the close. Short breaks (crypto maintenance, the Forex rollover) are held.
+        /// </summary>
+        private bool LongBreakWithin(Market m, double seconds, out DateTime breakAt)
+        {
+            breakAt = DateTime.MinValue;
+            if (FlatBeforeBreakMinutes <= 0)
+                return false;
+            DateTime now = Server.Time;
+            if (now >= m.BreakCheckedUntil)
+            {
+                m.BreakCheckedUntil = now.AddSeconds(BreakCheckIntervalSeconds);
+                m.LongBreakAt = DateTime.MinValue;
+                try
+                {
+                    MarketHours hours = m.Symbol.MarketHours;
+                    TimeSpan left = hours.TimeTillClose();
+                    if (left > TimeSpan.Zero && left.TotalDays < 7.0)
+                    {
+                        DateTime close = now + left;
+                        if (!MarketMath.ReopensWithin(t => SafeIsOpened(hours, t), close, FlatBeforeBreakMinutes))
+                            m.LongBreakAt = close;
+                    }
+                }
+                catch (Exception)
+                {
+                    m.LongBreakAt = DateTime.MinValue;
+                }
+            }
+            if (m.LongBreakAt == DateTime.MinValue)
+                return false;
+            breakAt = m.LongBreakAt;
+            return (m.LongBreakAt - now).TotalSeconds <= seconds;
+        }
+
+        private static bool SafeIsOpened(MarketHours hours, DateTime time)
+        {
+            try
+            {
+                return hours.IsOpened(time);
+            }
+            catch (Exception)
+            {
+                return true;   // unknown schedule: treat as open rather than invent a break
+            }
+        }
+
         private void ResetDay(DateTime now)
         {
             _day = now.Date;
-            _dayStartBalance = Account.Balance;
+            _dayStartEquity = BotEquity();
             _tradesToday = 0;
             _dailyHalt = false;
             foreach (Market m in _markets)
@@ -2103,21 +2467,67 @@ namespace cAlgo.Robots
         {
             if (now.Date == _day)
                 return;
-            Log("NEW DAY " + now.ToString("yyyy-MM-dd", Inv) + ": previous day " + Signed(Account.Balance - _dayStartBalance, 2) + " " + _ccy
-                + ", " + _tradesToday + " trade(s); balance " + F(Account.Balance, 2) + " " + _ccy);
+            Log("NEW DAY " + now.ToString("yyyy-MM-dd", Inv) + ": previous day " + Signed(BotEquity() - _dayStartEquity, 2) + " " + _ccy
+                + ", " + _tradesToday + " trade(s); budget equity " + F(BotEquity(), 2) + " " + _ccy + ", account balance " + F(Account.Balance, 2));
             ResetDay(now);
         }
 
         private void CheckDailyLoss()
         {
-            if (DailyMaxLossPercent <= 0 || _dailyHalt || _dayStartBalance <= 0)
+            if (DailyMaxLossPercent <= 0 || _dailyHalt || _dayStartEquity <= 0)
                 return;
-            double loss = _dayStartBalance - Account.Equity;
-            if (loss >= _dayStartBalance * DailyMaxLossPercent / 100.0)
+            double loss = _dayStartEquity - BotEquity();
+            if (loss >= _dayStartEquity * DailyMaxLossPercent / 100.0)
             {
                 _dailyHalt = true;
-                Log("HALT: day loss " + F(loss, 2) + " " + _ccy + " >= " + F(DailyMaxLossPercent, 1) + "% of " + F(_dayStartBalance, 2) + " " + _ccy
+                Log("HALT: day loss " + F(loss, 2) + " " + _ccy + " >= " + F(DailyMaxLossPercent, 1) + "% of " + F(_dayStartEquity, 2) + " " + _ccy
                     + " -> no new entries on any symbol until 00:00 UTC (open positions keep their stops)");
+            }
+        }
+
+        /// <summary>Reports markets opening and closing (weekends, maintenance) in one line per change.</summary>
+        private void CheckMarketTransitions(DateTime now)
+        {
+            List<string> opened = null;
+            Dictionary<string, List<string>> closed = null;
+            foreach (Market m in _markets)
+            {
+                bool open = m.Symbol.MarketHours.IsOpened();
+                if (m.WasOpen.HasValue && m.WasOpen.Value != open)
+                {
+                    if (open)
+                    {
+                        m.OpenedAt = now;
+                        (opened ?? (opened = new List<string>())).Add(m.Name);
+                    }
+                    else
+                    {
+                        TimeSpan wait = TimeSpan.Zero;
+                        try
+                        {
+                            wait = m.Symbol.MarketHours.TimeTillOpen();
+                        }
+                        catch (Exception)
+                        {
+                            wait = TimeSpan.Zero;
+                        }
+                        string when = wait > TimeSpan.Zero ? "opens in " + Duration(wait) : "reopening time unknown";
+                        if (closed == null)
+                            closed = new Dictionary<string, List<string>>();
+                        List<string> group;
+                        if (!closed.TryGetValue(when, out group))
+                            closed[when] = group = new List<string>();
+                        group.Add(m.Name);
+                    }
+                }
+                m.WasOpen = open;
+            }
+            if (opened != null)
+                Log("MARKET OPEN: " + string.Join(", ", opened));
+            if (closed != null)
+            {
+                foreach (KeyValuePair<string, List<string>> g in closed)
+                    Log("MARKET CLOSED (" + g.Key + "): " + string.Join(", ", g.Value));
             }
         }
 
@@ -2180,7 +2590,10 @@ namespace cAlgo.Robots
                     + (CryptoIgnoresSession ? " | crypto keeps trading 24/7" : ""));
         }
 
-        /// <summary>A plain-language summary every N minutes: what formed, what fired, what blocked it, and why right now.</summary>
+        /// <summary>
+        /// A plain-language summary every N minutes: the budget, then one line per market that did something (setups,
+        /// signals, positions) and one line naming the quiet ones with what holds them back right now.
+        /// </summary>
         private void EmitStatusIfDue(DateTime now)
         {
             if (StatusEveryMinutes <= 0)
@@ -2196,31 +2609,51 @@ namespace cAlgo.Robots
             _nextStatus = NextStatusTime(now);
 
             var closed = new List<string>();
-            int openMarkets = 0;
-            int signals = 0;
+            var quiet = new List<string>();
+            var active = new List<Market>();
             foreach (Market m in _markets)
             {
-                if (m.Symbol.MarketHours.IsOpened())
-                    openMarkets++;
-                else
+                bool open = m.Symbol.MarketHours.IsOpened();
+                bool busy = m.StatusSignals > 0 || m.StatusSqz > 0 || m.StatusSwp > 0 || Positions.FindAll(BotLabel, m.Name).Length > 0;
+                if (!open && !busy)
                     closed.Add(m.Name);
-                signals += m.StatusSignals;
+                else if (busy)
+                    active.Add(m);
+                else
+                    quiet.Add(m.Name + " " + m.SigTf.ShortName + QuietNote(m, now));
             }
-            if (openMarkets > 0 || signals > 0)
-            {
-                Log("STATUS " + now.ToString("HH:mm", Inv) + " UTC since " + _statusSince.ToString("HH:mm", Inv) + " | positions "
-                    + Positions.FindAll(BotLabel).Length + "/" + MaxOpenPositions + " | today " + _tradesToday + " trade(s), "
-                    + Signed(Account.Equity - _dayStartBalance, 2) + " " + _ccy + (_dailyHalt ? " | HALTED (daily loss)" : "")
-                    + (closed.Count > 0 ? " | market closed: " + string.Join(",", closed) : ""));
-                foreach (Market m in _markets)
-                {
-                    if (m.Symbol.MarketHours.IsOpened() || m.StatusSignals > 0)
-                        Log(m.Name + " | " + StatusCounts(m) + " | now " + StatusNow(m, now));
-                }
-            }
+
+            double equity = BotEquity();
+            Log("STATUS " + now.ToString("HH:mm", Inv) + " UTC since " + _statusSince.ToString("HH:mm", Inv) + " | budget equity " + F(equity, 2) + " " + _ccy
+                + ", margin " + F(BotUsedMargin(), 2) + "/" + F(equity * MaxTotalMarginPercent / 100.0, 2) + " | positions " + Positions.FindAll(BotLabel).Length
+                + "/" + MaxOpenPositions + " | today " + _tradesToday + " trade(s), " + Signed(equity - _dayStartEquity, 2) + " " + _ccy
+                + (_dailyHalt ? " | HALTED (daily loss)" : "") + (_skipLinesSuppressed > 0 ? " | " + _skipLinesSuppressed + " SKIP lines not printed (limit "
+                + MaxSkipLinesPerHour + "/h)" : ""));
+            foreach (Market m in active)
+                Log(m.Name + " " + m.SigTf.ShortName + " | " + StatusCounts(m) + " | now " + StatusNow(m, now));
+            if (quiet.Count > 0)
+                Log("quiet (no setup): " + string.Join(", ", quiet));
+            if (closed.Count > 0)
+                Log("market closed: " + string.Join(", ", closed));
+
             foreach (Market m in _markets)
                 ResetStatusCounters(m);
+            _skipLinesSuppressed = 0;
             _statusSince = now;
+        }
+
+        private string QuietNote(Market m, DateTime now)
+        {
+            double atr = RiskAtr(m);
+            if (atr > 0 && m.Symbol.Spread > m.MaxSpreadToAtr * atr)
+                return " spread " + F(m.Symbol.Spread / atr, 2) + ">" + F(m.MaxSpreadToAtr, 2);
+            if (UseAiFilter && AiTrainSpreadPips <= 0 && !m.SpreadCalibrated)
+                return " calibrating " + m.Spreads.Count + "/" + SpreadCalibrationTicks;
+            if (UseAiFilter && !m.Ai.IsReady(AiMinSamplesPerClass))
+                return " AI warming";
+            if (!InSessionFor(m, now))
+                return " out of session";
+            return "";
         }
 
         private DateTime NextStatusTime(DateTime now)
@@ -2244,20 +2677,16 @@ namespace cAlgo.Robots
         private string StatusCounts(Market m)
         {
             var sb = new StringBuilder(160);
-            if (m.StatusSqz == 0 && m.StatusSwp == 0)
-                sb.Append("no setup formed");
-            else
-                sb.Append("squeeze armed on ").Append(m.StatusSqz).Append(" bar(s), sweeps ").Append(m.StatusSwp);
-            sb.Append(" | signals ").Append(m.StatusSignals).Append(", trades ").Append(m.StatusTrades);
+            sb.Append("squeezes ").Append(m.StatusSqz).Append(", sweeps ").Append(m.StatusSwp).Append(", signals ").Append(m.StatusSignals)
+              .Append(", trades ").Append(m.StatusTrades);
             if (m.StatusConfCount > 0)
-                sb.Append(" | AI conf ").Append(Pct(m.StatusConfMin)).Append('-').Append(Pct(m.StatusConfMax))
-                  .Append(" (avg ").Append(Pct(m.StatusConfSum / m.StatusConfCount)).Append(", target ").Append(Pct(MinConfidence)).Append(')');
+                sb.Append(" | AI ").Append(Pct(m.StatusConfMin)).Append('-').Append(Pct(m.StatusConfMax)).Append(" (target ").Append(Pct(MinConfidence)).Append(')');
             if (m.StatusReasons.Count > 0)
             {
                 var items = new List<KeyValuePair<string, int>>(m.StatusReasons);
                 items.Sort((a, b) => b.Value.CompareTo(a.Value));
                 sb.Append(" | skipped by:");
-                for (int i = 0; i < items.Count; i++)
+                for (int i = 0; i < items.Count && i < 4; i++)
                     sb.Append(i == 0 ? " " : ", ").Append(ReasonName(items[i].Key)).Append(' ').Append(items[i].Value);
             }
             return sb.ToString();
@@ -2267,20 +2696,18 @@ namespace cAlgo.Robots
         {
             double atr = RiskAtr(m);
             double spread = m.Symbol.Spread;
-            double limit = m.MaxSpreadToAtr * atr;
             string ai;
             if (!UseAiFilter)
-                ai = "AI filter off";
+                ai = "AI off";
             else if (AiTrainSpreadPips <= 0 && !m.SpreadCalibrated)
-                ai = "AI calibrating spread " + m.Spreads.Count + "/" + SpreadCalibrationTicks;
+                ai = "calibrating " + m.Spreads.Count + "/" + SpreadCalibrationTicks;
             else if (!m.Ai.IsReady(AiMinSamplesPerClass))
-                ai = "AI warming up " + m.Ai.Wins + "/" + m.Ai.Losses;
+                ai = "AI warming " + m.Ai.Wins + "/" + m.Ai.Losses;
             else
                 ai = "AI ready";
-            return "spread " + D(m, spread) + (spread <= limit ? " <= " : " > ") + "limit " + D(m, limit) + " (" + Pct(m.MaxSpreadToAtr) + " of ATR " + D(m, atr) + ")"
-                   + ", tick burst " + F(BurstRatio(m), 2) + "x (need " + F(TickVelocityMultiplier, 2) + "x" + (UseTickVelocity ? "" : ", filter off") + ")"
-                   + ", " + ai + ", " + (InSessionFor(m, now) ? "in session" : "OUT OF SESSION") + (m.SpreadWarning ? ", SPREAD TOO WIDE" : "")
-                   + " | today " + m.TradesToday + " trade(s)";
+            return "spread " + (atr > 0 ? F(spread / atr, 2) : "n/a") + " ATR (max " + F(m.MaxSpreadToAtr, 2) + "), burst " + F(BurstRatio(m), 2)
+                   + "x (need " + F(TickVelocityMultiplier, 2) + "), " + ai + (InSessionFor(m, now) ? "" : ", out of session")
+                   + (m.SpreadWarning ? ", SPREAD TOO WIDE" : "") + ", today " + m.TradesToday;
         }
 
         private static string ReasonName(string code)
@@ -2291,12 +2718,13 @@ namespace cAlgo.Robots
                 case "TV": return "Tick velocity";
                 case "AI": return "AI confidence";
                 case "AIWARM": return "AI warming up";
-                case "AISPR": return "AI spread calibration";
+                case "AISPR": return "Spread calibration";
                 case "AINA": return "AI features n/a";
                 case "CHASE": return "Chase";
                 case "SESSION": return "Session";
                 case "CLOSED": return "Market closed";
                 case "TMODE": return "Trading disabled";
+                case "BREAK": return "Market break ahead";
                 case "POS": return "Position open";
                 case "MAXPOS": return "Max open positions";
                 case "COOL": return "Cooldown";
@@ -2372,14 +2800,15 @@ namespace cAlgo.Robots
             try
             {
                 DateTime now = Server.Time;
+                double equity = BotEquity();
                 var sb = new StringBuilder(1024);
-                sb.Append("QuantAI Scalper v").Append(BotVersion).Append(" | ").Append(_markets.Count).Append(" markets | positions ")
-                  .Append(Positions.FindAll(BotLabel).Length).Append('/').Append(MaxOpenPositions).Append(" | ").Append(now.ToString("HH:mm:ss", Inv)).Append(" UTC\n");
-                sb.Append("State: ").Append(StateText(now)).Append(" | today ").Append(_tradesToday).Append(" trade(s), ")
-                  .Append(Signed(Account.Equity - _dayStartBalance, 2)).Append(' ').Append(_ccy).Append('\n');
+                sb.Append("QuantAI Scalper 24x7 v").Append(BotVersion).Append(" | ").Append(now.ToString("HH:mm:ss", Inv)).Append(" UTC\n");
+                sb.Append("Budget equity ").Append(F(equity, 2)).Append(' ').Append(_ccy).Append(" | margin ").Append(F(BotUsedMargin(), 2)).Append('/')
+                  .Append(F(equity * MaxTotalMarginPercent / 100.0, 2)).Append(" | positions ").Append(Positions.FindAll(BotLabel).Length).Append('/')
+                  .Append(MaxOpenPositions).Append(" | today ").Append(Signed(equity - _dayStartEquity, 2)).Append(_dailyHalt ? " HALTED" : "").Append('\n');
                 foreach (Market m in _markets)
                 {
-                    sb.Append(m.Name).Append(": ");
+                    sb.Append(m.Name).Append(' ').Append(m.SigTf.ShortName).Append(": ");
                     if (!m.Symbol.MarketHours.IsOpened())
                     {
                         sb.Append("market closed\n");
@@ -2387,7 +2816,7 @@ namespace cAlgo.Robots
                     }
                     double atr = RiskAtr(m);
                     sb.Append(m.SqzArmed ? "SQZ armed" : (m.BullSweep || m.BearSweep ? "SWP armed" : "no setup"))
-                      .Append(" | spread ").Append(D(m, m.Symbol.Spread)).Append('/').Append(D(m, m.MaxSpreadToAtr * atr))
+                      .Append(" | spread ").Append(atr > 0 ? F(m.Symbol.Spread / atr, 2) : "n/a").Append('/').Append(F(m.MaxSpreadToAtr, 2)).Append(" ATR")
                       .Append(" | burst ").Append(F(BurstRatio(m), 2)).Append('x')
                       .Append(" | AI ").Append(double.IsNaN(m.LastConf) ? "-" : Pct(m.LastConf));
                     foreach (Position p in Positions.FindAll(BotLabel, m.Name))
@@ -2410,57 +2839,61 @@ namespace cAlgo.Robots
             }
         }
 
-        private string StateText(DateTime now)
-        {
-            if (_dailyHalt)
-                return "HALTED (daily loss)";
-            if (MaxTradesPerDay > 0 && _tradesToday >= MaxTradesPerDay)
-                return "DONE (max trades)";
-            return InSession(now) ? "TRADING" : "FOREX OUT OF SESSION" + (CryptoIgnoresSession ? ", crypto trading" : "");
-        }
-
         #endregion
 
         #region Helpers
 
         private void LogBanner()
         {
-            Log("=== QuantAI_Scalper_M1_MicroDepot_Pro v" + BotVersion + " | balance " + F(Account.Balance, 2) + " " + _ccy + " | broker "
-                + (string.IsNullOrEmpty(Account.BrokerName) ? "?" : Account.BrokerName) + " " + (Account.IsLive ? "LIVE" : "DEMO") + " " + Account.AccountType
+            double equity = BotEquity();
+            Log("=== QuantAI_Scalper_24x7_V3 v" + BotVersion + " | broker " + (string.IsNullOrEmpty(Account.BrokerName) ? "?" : Account.BrokerName)
+                + " " + (Account.IsLive ? "LIVE" : "DEMO") + " " + Account.AccountType + " | balance " + F(Account.Balance, 2) + " " + _ccy
                 + " | leverage 1:" + F(Account.PreciseLeverage, 0) + " | mode " + RunningMode + " ===");
-            Log("PARAMS markets: forex [" + FxSymbols + "] on " + SignalTimeFrame.ShortName + " | crypto [" + CryptoSymbols + "] on " + CryptoTimeFrame.ShortName
-                + (CryptoIgnoresSession ? " 24/7" : " in session") + " | max open positions " + MaxOpenPositions);
-            Log("PARAMS risk: " + (FixedLots > 0 ? "fixed " + F(FixedLots, 2) + " lot per trade" : F(RiskPercent, 2) + "% of balance per trade")
-                + " | lots " + F(MinLots, 2) + "-" + F(MaxLots, 2) + " (min-lot override " + OnOff(AllowMinLotOverride) + ") | margin per trade "
-                + F(MarginPerTradePercent, 0) + "% of free, all positions <= " + F(MaxTotalMarginPercent, 0) + "% of equity | leverage check "
-                + (LeverageOverride > 0 ? "1:" + F(LeverageOverride, 0) : "broker") + " | slippage " + (MaxSlippagePips > 0 ? F(MaxSlippagePips, 1) + " pip (>= spread)" : "market")
-                + " | daily loss " + (DailyMaxLossPercent > 0 ? F(DailyMaxLossPercent, 1) + "%" : "off") + " | loss streak per symbol "
-                + (MaxConsecutiveLosses > 0 ? MaxConsecutiveLosses + " -> pause " + LossStreakPauseMinutes + "m" : "off")
+            Log("PARAMS budget: " + (BotBudget > 0 ? F(BotBudget, 2) + " " + _ccy + " -> budget equity " + F(equity, 2) : "whole account (" + F(equity, 2) + ")")
+                + " | margin per trade " + F(MarginPerTradePercent, 0) + "% of free, all positions <= " + F(MaxTotalMarginPercent, 0) + "% ("
+                + F(equity * MaxTotalMarginPercent / 100.0, 2) + " " + _ccy + ") | margin leverage forex " + (LeverageOverride > 0 ? "1:" + F(LeverageOverride, 0) : "broker")
+                + ", crypto " + (CryptoLeverageOverride > 0 ? "1:" + F(CryptoLeverageOverride, 0) : "broker"));
+            Log("PARAMS markets: forex [" + FxSymbols + "] on " + FxTimeFrames + (UseSessionFilter ? ", session " + SessionStartHour + "-" + SessionEndHour + " UTC" : ", whenever open")
+                + " | crypto [" + CryptoSymbols + "] on " + CryptoTimeFrames + (CryptoIgnoresSession ? " 24/7" : " in session") + " | max " + MaxOpenPositions
+                + " positions | flat before breaks > " + (FlatBeforeBreakMinutes > 0 ? FlatBeforeBreakMinutes + " min" : "off"));
+            Log("PARAMS risk: " + (FixedLots > 0 ? "fixed " + F(FixedLots, 2) + " lot" : F(RiskPercent, 2) + "% of budget") + " per trade | lots "
+                + (MinLots > 0 ? F(MinLots, 2) : "broker min") + "-" + F(MaxLots, 2) + " (min volume if smaller " + OnOff(AllowMinLotOverride) + ") | slippage "
+                + (MaxSlippagePips > 0 ? F(MaxSlippagePips, 1) + " pip (>= spread)" : "market") + " | daily loss " + (DailyMaxLossPercent > 0 ? F(DailyMaxLossPercent, 1) + "%" : "off")
+                + " | loss streak " + (MaxConsecutiveLosses > 0 ? MaxConsecutiveLosses + " -> pause " + LossStreakPauseMinutes + "m" : "off")
                 + " | max trades/day " + (MaxTradesPerDay > 0 ? MaxTradesPerDay.ToString(Inv) : "off"));
-            Log("PARAMS exits: SL " + F(SlAtrMultiplier, 2) + " x ATR(" + AtrPeriod + ") | TP1 " + F(Tp1AtrMultiplier, 2) + " x ATR closes "
-                + F(Tp1ClosePercent, 0) + "% (unsplittable: " + NoSplitMode + ") | runner TP " + (Tp2AtrMultiplier > 0 ? F(Tp2AtrMultiplier, 2) + " x ATR" : "none")
-                + " | trail " + (TrailAtrMultiplier > 0 ? F(TrailAtrMultiplier, 2) + " x ATR, step " + F(TrailStepPips, 1) + " pip, " + (TrailOnlyAfterTp1 ? "after TP1" : "from entry") : "off")
-                + " | micro-BE " + (BeTriggerR > 0 ? "+" + F(BeTriggerR, 2) + "R -> entry+" + F(BeOffsetPips, 1) + " pip" : "off")
-                + " | time exit " + (TimeExitBars > 0 ? TimeExitBars + " bars (forex " + RiskTimeFrame.ShortName + ", crypto " + CryptoTimeFrame.ShortName + ")" : "off"));
-            Log("PARAMS filters: spread/ATR forex <= " + F(MaxSpreadToAtr, 3) + ", crypto <= " + F(CryptoMaxSpreadToAtr, 3) + " | session "
-                + (UseSessionFilter ? SessionStartHour.ToString("00", Inv) + ":00-" + SessionEndHour.ToString("00", Inv) + ":00 UTC (forex)" : "off")
-                + " | cooldown " + CooldownSeconds + "s per symbol | max chase " + F(MaxChaseAtr, 2) + " x ATR | tick velocity " + OnOff(UseTickVelocity)
-                + " N " + F(TickVelocityMultiplier, 2) + "x over " + F(TickWindowSeconds, 1) + "s vs " + TickBaselineBars + " bars");
-            Log("PARAMS setups: EMA " + EmaPeriod + " | squeeze " + (UseSqueeze ? SqueezeBars + " bars, range <= " + F(SqueezeMaxRangeAtr, 2)
-                + " x ATR, EMA gap <= " + F(SqueezeMaxEmaGapAtr, 2) + " x ATR" : "off") + " | buffer " + F(BreakoutBufferPips, 1) + " pip | sweep "
-                + (UseSweep ? SweepLookbackBars + "-bar H/L, pierce >= " + F(SweepMinPiercePips, 1) + " pip, close inside " + OnOff(SweepRequireCloseInside)
-                + ", EMA reclaim within " + SweepMaxBarsToReclaim + " bars" : "off"));
+            Log("PARAMS exits: SL " + F(SlAtrMultiplier, 2) + " x ATR(" + AtrPeriod + ") | TP1 " + F(Tp1AtrMultiplier, 2) + " x ATR closes " + F(Tp1ClosePercent, 0)
+                + "% (" + NoSplitMode + ") | runner TP " + (Tp2AtrMultiplier > 0 ? F(Tp2AtrMultiplier, 2) + " x ATR" : "none") + " | trail "
+                + (TrailAtrMultiplier > 0 ? F(TrailAtrMultiplier, 2) + " x ATR, step " + F(TrailStepPips, 1) + " pip / " + F(TrailStepAtr, 2) + " ATR" : "off")
+                + " | BE " + (BeTriggerR > 0 ? "+" + F(BeTriggerR, 2) + "R -> +" + F(BeOffsetPips, 1) + " pip" : "off") + " | time exit "
+                + (TimeExitBars > 0 ? TimeExitBars + " bars" : "off"));
+            Log("PARAMS filters: spread/ATR forex <= " + F(MaxSpreadToAtr, 2) + ", crypto <= " + F(CryptoMaxSpreadToAtr, 2) + " | cooldown " + CooldownSeconds
+                + "s | chase <= " + F(MaxChaseAtr, 2) + " ATR | tick velocity " + OnOff(UseTickVelocity) + " " + F(TickVelocityMultiplier, 2) + "x/"
+                + F(TickWindowSeconds, 1) + "s vs " + TickBaselineBars + " bars | squeeze " + (UseSqueeze ? SqueezeBars + " bars" : "off") + " | sweep "
+                + (UseSweep ? SweepLookbackBars + " bars" : "off"));
             Log("PARAMS AI: " + OnOff(UseAiFilter) + " | Min Confidence " + F(MinConfidence, 2) + " | window " + AiTrainingBars + " bars | min "
-                + AiMinSamplesPerClass + " per class | horizon " + AiHorizonBars + " ATR-TF bars | RSI(" + RsiPeriod + ") slope " + RsiSlopeBars
-                + " bars | prior " + (AiUseEmpiricalPrior ? "empirical" : "balanced") + " | train spread "
-                + (AiTrainSpreadPips > 0 ? F(AiTrainSpreadPips, 1) + " pip (fixed)" : "live median, retrain after " + SpreadCalibrationTicks + " ticks")
-                + " | status every " + (StatusEveryMinutes > 0 ? StatusEveryMinutes + " min" : "off"));
+                + AiMinSamplesPerClass + " per class | horizon " + AiHorizonBars + " bars | prior " + (AiUseEmpiricalPrior ? "empirical" : "balanced")
+                + " | train spread " + (AiTrainSpreadPips > 0 ? F(AiTrainSpreadPips, 1) + " pip" : "live median") + " | status every "
+                + (StatusEveryMinutes > 0 ? StatusEveryMinutes + " min" : "off") + " | skip lines " + (MaxSkipLinesPerHour > 0 ? "<= " + MaxSkipLinesPerHour + "/h" : "all"));
             if (TimeExitBars > 0 && AiHorizonBars != TimeExitBars)
-                Log("NOTE: AI label horizon (" + AiHorizonBars + ") differs from Time Exit Bars (" + TimeExitBars + "); the model then learns a different holding time than the bot uses");
+                Log("NOTE: AI label horizon (" + AiHorizonBars + ") differs from Time Exit Bars (" + TimeExitBars + ")");
             if (!UseSqueeze && !UseSweep)
                 Log("NOTE: both setups are OFF - the cBot only manages positions carrying the label '" + BotLabel + "'");
             if (IsBacktesting)
                 Log("NOTE: backtest with 'Tick data' - on bar data the tick velocity engine sees only synthetic ticks");
+        }
+
+        private void LogBudgetSummary()
+        {
+            double equity = BotEquity();
+            var tradable = new List<string>();
+            foreach (Market m in _markets)
+                tradable.Add(m.Name + " " + (m.MinVolumeMargin > 0 ? F(m.MinVolumeMargin, 2) : "n/a"));
+            Log("BUDGET " + F(equity, 2) + " " + _ccy + ", margin limit " + F(equity * MaxTotalMarginPercent / 100.0, 2) + " | minimum-volume margin: "
+                + (tradable.Count > 0 ? string.Join(", ", tradable) : "none"));
+            if (_budgetSkipped.Count > 0)
+                Log("BUDGET too small for: " + string.Join(", ", _budgetSkipped) + " " + _ccy + " (budget needed)");
+            if (_notOffered.Count > 0)
+                Log("NOT OFFERED by the broker: " + string.Join(", ", _notOffered));
         }
 
         private void Log(string message)
@@ -2551,6 +2984,13 @@ namespace cAlgo.Robots
             return value ? "ON" : "OFF";
         }
 
+        private static string Duration(TimeSpan span)
+        {
+            if (span.TotalHours >= 1.0)
+                return ((int)span.TotalHours).ToString(Inv) + "h " + span.Minutes.ToString("00", Inv) + "m";
+            return Math.Max(1, (int)Math.Ceiling(span.TotalMinutes)).ToString(Inv) + " min";
+        }
+
         private static bool Valid(double value)
         {
             return !double.IsNaN(value) && !double.IsInfinity(value);
@@ -2601,32 +3041,34 @@ namespace cAlgo.Robots
             return lo < bars.Count ? lo : -1;
         }
 
-        private static int LastIndexBefore(Bars bars, DateTime time)
-        {
-            int first = FirstIndexAtOrAfter(bars, time);
-            return first < 0 ? bars.Count - 1 : first - 1;
-        }
-
         private static int IndexOfTime(Bars bars, DateTime time)
         {
             int i = FirstIndexAtOrAfter(bars, time);
             return i >= 0 && bars.OpenTimes[i] == time ? i : -1;
         }
 
+        private static readonly TimeFrame[] KnownFrames =
+        {
+            TimeFrame.Minute, TimeFrame.Minute2, TimeFrame.Minute3, TimeFrame.Minute4, TimeFrame.Minute5, TimeFrame.Minute6,
+            TimeFrame.Minute7, TimeFrame.Minute8, TimeFrame.Minute9, TimeFrame.Minute10, TimeFrame.Minute15, TimeFrame.Minute20,
+            TimeFrame.Minute30, TimeFrame.Minute45, TimeFrame.Hour, TimeFrame.Hour2, TimeFrame.Hour3, TimeFrame.Hour4,
+            TimeFrame.Hour6, TimeFrame.Hour8, TimeFrame.Hour12, TimeFrame.Daily
+        };
+
+        private static readonly int[] KnownMinutes = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 45, 60, 120, 180, 240, 360, 480, 720, 1440 };
+
+        private static TimeFrame TimeFrameFromMinutes(int minutes)
+        {
+            int i = Array.IndexOf(KnownMinutes, minutes);
+            return i >= 0 ? KnownFrames[i] : null;
+        }
+
         private static double TimeFrameSeconds(TimeFrame tf, Bars bars)
         {
-            TimeFrame[] known =
+            for (int i = 0; i < KnownFrames.Length; i++)
             {
-                TimeFrame.Minute, TimeFrame.Minute2, TimeFrame.Minute3, TimeFrame.Minute4, TimeFrame.Minute5, TimeFrame.Minute6,
-                TimeFrame.Minute7, TimeFrame.Minute8, TimeFrame.Minute9, TimeFrame.Minute10, TimeFrame.Minute15, TimeFrame.Minute20,
-                TimeFrame.Minute30, TimeFrame.Minute45, TimeFrame.Hour, TimeFrame.Hour2, TimeFrame.Hour3, TimeFrame.Hour4,
-                TimeFrame.Hour6, TimeFrame.Hour8, TimeFrame.Hour12, TimeFrame.Daily
-            };
-            double[] minutes = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 45, 60, 120, 180, 240, 360, 480, 720, 1440 };
-            for (int i = 0; i < known.Length; i++)
-            {
-                if (tf.Equals(known[i]))
-                    return minutes[i] * 60.0;
+                if (tf.Equals(KnownFrames[i]))
+                    return KnownMinutes[i] * 60.0;
             }
             // Anything else: the shortest spacing between recent bars.
             double best = double.MaxValue;
@@ -2652,7 +3094,14 @@ namespace cAlgo.Robots
         public bool FxLike;
         public double BotPip;
         public double MaxSpreadToAtr;
+        public double LastPrice;
+        public double MinVolumeMargin;
+        public double ObservedMarginPerUnit;
+        public double ObservedMarginPrice;
 
+        public List<TimeFrame> Candidates = new List<TimeFrame>();
+        public int TfIndex;
+        public bool TfFits = true;
         public TimeFrame SigTf;
         public TimeFrame RiskTf;
         public bool SameTf;
@@ -2712,6 +3161,12 @@ namespace cAlgo.Robots
         public double CommissionPerUnit;
         public string CommissionSource = "none";
 
+        public bool? WasOpen;
+        public DateTime OpenedAt = DateTime.MinValue;
+        public DateTime BreakCheckedUntil = DateTime.MinValue;
+        public DateTime TfCheckAfter = DateTime.MinValue;
+        public DateTime LongBreakAt = DateTime.MinValue;
+
         public DateTime LastCloseTime = DateTime.MinValue;
         public int ConsecLosses;
         public DateTime PauseUntil = DateTime.MinValue;
@@ -2765,8 +3220,11 @@ namespace cAlgo.Robots
         public double Confidence;
         public DateTime RetryAfter;
         public DateTime LastTrail;
+        public int TrailMoves;
         public int Failures;
         public string CloseReason;
+        public double MarginAtEntry;
+        public bool MarginLogged;
     }
 
     /// <summary>Feature vector of the classifier: [Tick_Velocity, EMA20_Distance, RSI_Slope, Spread_Ratio].</summary>
@@ -3277,7 +3735,10 @@ namespace cAlgo.Robots
     {
         private const double Eps = 1e-6;
 
-        /// <summary>Names separated by commas, semicolons or spaces; duplicates (any case) are dropped.</summary>
+        /// <summary>
+        /// Items separated by commas, semicolons or spaces; duplicates (any case) are dropped. An item may list
+        /// alternative broker names separated by '|' (LINKUSD|LNKUSD): the first one the broker offers is used.
+        /// </summary>
         public static List<string> ParseSymbols(string list)
         {
             var result = new List<string>();
@@ -3291,6 +3752,129 @@ namespace cAlgo.Robots
                     result.Add(name);
             }
             return result;
+        }
+
+        /// <summary>The alternative names of one list item ("LINKUSD|LNKUSD" gives two).</summary>
+        public static List<string> Alternatives(string item)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrWhiteSpace(item))
+                return result;
+            foreach (string raw in item.Split(new[] { '|' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string name = raw.Trim();
+                if (name.Length > 0)
+                    result.Add(name);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Timeframes written as m1, m5, m15, m30, h1, h4, d1 (also Minute5, Hour, Daily) in minutes, in the order given;
+        /// unknown or duplicate entries are dropped.
+        /// </summary>
+        public static List<int> ParseTimeFrameMinutes(string list)
+        {
+            var result = new List<int>();
+            if (string.IsNullOrWhiteSpace(list))
+                return result;
+            foreach (string raw in list.Split(new[] { ',', ';', ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                int minutes = TimeFrameMinutes(raw.Trim().ToLowerInvariant());
+                if (minutes > 0 && !result.Contains(minutes))
+                    result.Add(minutes);
+            }
+            return result;
+        }
+
+        private static int TimeFrameMinutes(string token)
+        {
+            string unit;
+            string digits;
+            if (token.StartsWith("minute", StringComparison.Ordinal)) { unit = "m"; digits = token.Substring(6); }
+            else if (token.StartsWith("hour", StringComparison.Ordinal)) { unit = "h"; digits = token.Substring(4); }
+            else if (token.StartsWith("daily", StringComparison.Ordinal)) { unit = "d"; digits = token.Substring(5); }
+            else if (token.Length >= 1 && (token[0] == 'm' || token[0] == 'h' || token[0] == 'd')) { unit = token.Substring(0, 1); digits = token.Substring(1); }
+            else return 0;
+            int n = 1;
+            if (digits.Length > 0 && !int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out n))
+                return 0;
+            if (n <= 0)
+                return 0;
+            int minutes = unit == "m" ? n : unit == "h" ? n * 60 : n * 1440;
+            int[] known = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 45, 60, 120, 180, 240, 360, 480, 720, 1440 };
+            return Array.IndexOf(known, minutes) >= 0 ? minutes : 0;
+        }
+
+        /// <summary>
+        /// Index of the fastest timeframe whose spread / typical ATR ratio is within the limit, or -1 when none is.
+        /// Ratios must be ordered fastest first; a non-finite ratio never fits.
+        /// </summary>
+        public static int FirstFitting(double[] spreadToAtr, double limit)
+        {
+            for (int i = 0; i < spreadToAtr.Length; i++)
+            {
+                double r = spreadToAtr[i];
+                if (!double.IsNaN(r) && !double.IsInfinity(r) && r <= limit)
+                    return i;
+            }
+            return -1;
+        }
+
+        /// <summary>Mean true range of the last count closed bars ending at lastIndex (0 when there are too few).</summary>
+        public static double MeanTrueRange(IList<double> high, IList<double> low, IList<double> close, int lastIndex, int count)
+        {
+            int first = Math.Max(1, lastIndex - count + 1);
+            if (lastIndex < first)
+                return 0.0;
+            double sum = 0.0;
+            int n = 0;
+            for (int i = first; i <= lastIndex; i++)
+            {
+                double tr = Math.Max(high[i] - low[i], Math.Max(Math.Abs(high[i] - close[i - 1]), Math.Abs(low[i] - close[i - 1])));
+                if (double.IsNaN(tr) || double.IsInfinity(tr))
+                    continue;
+                sum += tr;
+                n++;
+            }
+            return n > 0 ? sum / n : 0.0;
+        }
+
+        /// <summary>
+        /// True when the market reopens within maxMinutes after closeTime, i.e. the coming break is short enough to hold
+        /// positions through it (crypto maintenance, the daily Forex rollover) rather than a weekend.
+        /// </summary>
+        public static bool ReopensWithin(Func<DateTime, bool> isOpen, DateTime closeTime, int maxMinutes)
+        {
+            for (int k = 1; k <= maxMinutes; k++)
+            {
+                if (isOpen(closeTime.AddMinutes(k)))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Equity the bot sizes and limits itself by: the account equity, or a smaller budget that moves with the bot's own
+        /// result (so a large demo account behaves like the small account the budget describes).
+        /// </summary>
+        public static double BudgetEquity(double accountEquity, double budget, double botResult)
+        {
+            if (!(budget > 0))
+                return Math.Max(0.0, accountEquity);
+            return Math.Max(0.0, Math.Min(accountEquity, budget + botResult));
+        }
+
+        /// <summary>The largest usable estimate; NaN, infinite, zero and negative estimates are ignored (0 = none usable).</summary>
+        public static double MaxEstimate(double a, double b, double c)
+        {
+            double best = 0.0;
+            foreach (double v in new[] { a, b, c })
+            {
+                if (!double.IsNaN(v) && !double.IsInfinity(v) && v > best)
+                    best = v;
+            }
+            return best;
         }
 
         /// <summary>Letters and digits only, upper case: "BTC/USD", "btcusd" and "BTCUSD." all give "BTCUSD".</summary>

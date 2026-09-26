@@ -36,6 +36,7 @@ namespace Harness
             FeatureTests();
             MarketTests();
             MarginTests();
+            V3Tests();
             PipelineSmokeTest();
             Console.WriteLine("passed " + _pass + ", failed " + _fail);
             return _fail == 0 ? 0 : 1;
@@ -118,6 +119,79 @@ namespace Harness
             f = MarketMath.FitMargin(400000, 1000, 1000, 10000 / 0.3, 1e9, 0, 30, 100, true, fixedPart, 20);
             Check(f.Rule == MarginRule.ReducedToShare && f.Units == 270000 && fixedPart(f.Units) <= 10000 + 1e-6,
                   "non-linear margin -> stepped down to " + f.Units);
+        }
+
+        private static void V3Tests()
+        {
+            // Alternative broker names inside one list item.
+            List<string> items = MarketMath.ParseSymbols("BTCUSD, LINKUSD|LNKUSD ,ETHUSD");
+            Check(items.Count == 3 && items[1] == "LINKUSD|LNKUSD", "'|' keeps alternatives in one item");
+            List<string> alts = MarketMath.Alternatives("LINKUSD| LNKUSD |");
+            Check(alts.Count == 2 && alts[0] == "LINKUSD" && alts[1] == "LNKUSD", "alternatives split and trimmed");
+            Check(MarketMath.Alternatives("").Count == 0, "no alternatives in an empty item");
+
+            // Timeframe lists.
+            List<int> tf = MarketMath.ParseTimeFrameMinutes("m5, M15;h1 m5 Minute30 Hour4 d1 x7 m7 m0 Daily");
+            Check(tf.Count == 7 && tf[0] == 5 && tf[1] == 15 && tf[2] == 60 && tf[3] == 30 && tf[4] == 240 && tf[5] == 1440 && tf[6] == 7,
+                  "timeframe list parsed in order, duplicates and unknowns dropped (" + string.Join(",", tf) + ")");
+            Check(MarketMath.ParseTimeFrameMinutes("m1").Count == 1 && MarketMath.ParseTimeFrameMinutes("Minute")[0] == 1, "m1 and Minute are one minute");
+            Check(MarketMath.ParseTimeFrameMinutes("m11, h5, zz").Count == 0, "unsupported timeframes rejected");
+            Check(MarketMath.ParseTimeFrameMinutes(null).Count == 0, "empty timeframe list");
+
+            // Fastest timeframe whose spread / ATR fits.
+            Check(MarketMath.FirstFitting(new[] { 0.40, 0.22, 0.15 }, 0.25) == 1, "BTC: m5 too costly, m15 fits");
+            Check(MarketMath.FirstFitting(new[] { 0.10, 0.05 }, 0.12) == 0, "Razor EURUSD: m1 fits");
+            Check(MarketMath.FirstFitting(new[] { 2.0, 1.2, double.PositiveInfinity }, 0.25) == -1, "ADA-like spread fits no timeframe");
+            Check(MarketMath.FirstFitting(new[] { double.NaN, 0.2 }, 0.25) == 1, "unknown ATR never fits");
+
+            // Mean true range, including the gap from the previous close.
+            double[] h = { 10, 12, 11, 15 };
+            double[] l = { 9, 10, 10, 13 };
+            double[] c = { 9.5, 11, 10.5, 14 };
+            // TR: bar1 max(2, |12-9.5|, |10-9.5|)=2.5; bar2 max(1, |11-11|, |10-11|)=1; bar3 max(2, |15-10.5|, |13-10.5|)=4.5
+            Near(MarketMath.MeanTrueRange(h, l, c, 3, 3), (2.5 + 1 + 4.5) / 3, 1e-12, "true range uses previous close");
+            Near(MarketMath.MeanTrueRange(h, l, c, 3, 10), (2.5 + 1 + 4.5) / 3, 1e-12, "true range with fewer bars than asked");
+            Check(MarketMath.MeanTrueRange(h, l, c, 0, 5) == 0.0, "no true range without a previous bar");
+
+            // Breaks: crypto maintenance is held, a Forex weekend is not.
+            var close = new DateTime(2026, 9, 25, 20, 59, 0);
+            Func<DateTime, bool> sixMinuteBreak = t => t < close || t >= close.AddMinutes(6);
+            Func<DateTime, bool> weekend = t => t < close || t >= close.AddHours(48);
+            Check(MarketMath.ReopensWithin(sixMinuteBreak, close, 15), "6-minute crypto break is short");
+            Check(!MarketMath.ReopensWithin(weekend, close, 15), "weekend is a long break");
+            Check(!MarketMath.ReopensWithin(sixMinuteBreak, close, 5), "a 6-minute break is long when only 5 are allowed");
+
+            // Budget equity: a demo account behaves like the budget, a small account like itself.
+            Near(MarketMath.BudgetEquity(49092, 50, 0), 50, 1e-9, "49k demo with a 50 budget = 50");
+            Near(MarketMath.BudgetEquity(49092, 50, -7.5), 42.5, 1e-9, "the budget follows the bot's losses");
+            Near(MarketMath.BudgetEquity(20, 50, 0), 20, 1e-9, "a 20 EUR account stays 20 under a 50 budget");
+            Near(MarketMath.BudgetEquity(49092, 0, 123), 49092, 1e-9, "budget 0 = whole account");
+            Check(MarketMath.BudgetEquity(10, 50, -80) == 0.0, "budget equity never negative");
+
+            // Margin estimate: the largest usable figure wins.
+            Near(MarketMath.MaxEstimate(double.NaN, 15.2, 0), 15.2, 1e-12, "NaN broker estimate ignored");
+            Near(MarketMath.MaxEstimate(7.6, 15.2, 16.0), 16.0, 1e-12, "seen margin above the others wins");
+            Check(MarketMath.MaxEstimate(0, -1, double.PositiveInfinity) == 0.0, "no usable estimate = 0");
+
+            // 20 and 50 EUR budgets at EU retail leverage (1:30 Forex, 1:2 crypto).
+            Func<double, double> eurusd = v => v / 30.0;                 // 0.01 lot = 1000 EUR -> 33.3 EUR
+            Func<double, double> usdjpy = v => v * 0.855 / 30.0;         // 0.01 lot = 1000 USD -> 28.5 EUR
+            Func<double, double> eth = v => v * 3500 * 0.855 / 2.0;      // 0.01 ETH -> 15.0 EUR
+            Func<double, double> btc = v => v * 85000 * 0.855 / 2.0;     // 0.01 BTC -> 363 EUR
+            MarginFit f = MarketMath.FitMargin(1000, 1000, 1000, 20, 20, 0, 30, 90, true, eurusd, 20);
+            Check(f.Rule == MarginRule.Insufficient, "20 EUR: EURUSD 0.01 lot does not fit (33 EUR > 18 EUR)");
+            f = MarketMath.FitMargin(1000, 1000, 1000, 20, 20, 0, 30, 90, true, usdjpy, 20);
+            Check(f.Rule == MarginRule.Insufficient, "20 EUR: USDJPY 0.01 lot does not fit (28.5 EUR > 18 EUR)");
+            f = MarketMath.FitMargin(0.01, 0.01, 0.01, 20, 20, 0, 30, 90, true, eth, 20);
+            Check(f.Rule == MarginRule.MinimumWithinTotal && Math.Abs(f.Units - 0.01) < 1e-9, "20 EUR: ETH 0.01 trades (15 EUR <= 18 EUR)");
+            f = MarketMath.FitMargin(0.01, 0.01, 0.01, 20, 20, 0, 30, 90, true, btc, 20);
+            Check(f.Rule == MarginRule.Insufficient, "20 EUR: BTC 0.01 does not fit");
+            f = MarketMath.FitMargin(1000, 1000, 1000, 50, 50, 0, 30, 90, true, eurusd, 20);
+            Check(f.Rule == MarginRule.MinimumWithinTotal && f.Units == 1000, "50 EUR: EURUSD 0.01 lot trades");
+            f = MarketMath.FitMargin(0.01, 0.01, 0.01, 50 - 1000 / 30.0, 50, 1000 / 30.0, 30, 90, true, eth, 20);
+            Check(f.Rule == MarginRule.Insufficient, "50 EUR: ETH next to an open EURUSD 0.01 does not fit (15 > 11.7)");
+            f = MarketMath.FitMargin(0.01, 0.01, 0.01, 50 - 15.0, 50, 15.0, 30, 90, true, eth, 20);
+            Check(f.Rule == MarginRule.MinimumWithinTotal, "50 EUR: a second 0.01 ETH-sized crypto position fits (15 <= 30)");
         }
 
         private static double Gauss(Random r)

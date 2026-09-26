@@ -15,7 +15,7 @@
     <RootNamespace>Harness</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../../QuantAI_Scalper_M1_MicroDepot_Pro/QuantAI_Scalper_M1_MicroDepot_Pro/QuantAI_Scalper_M1_MicroDepot_Pro.cs" />
+    <Compile Include="../../QuantAI_Scalper_24x7_V3/QuantAI_Scalper_24x7_V3/QuantAI_Scalper_24x7_V3.cs" />
     <Compile Include="Program.cs" />
     <PackageReference Include="cTrader.Automate" Version="1.0.21" />
   </ItemGroup>
