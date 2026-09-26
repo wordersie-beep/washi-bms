@@ -1495,6 +1495,48 @@ namespace Sim
             if (lFirst != null && lSwitch < 0) lw.Violations.Add("no timeframe change after the real commission on " + lSym);
             if (lMaxCost > 0.25 + 1e-9) lw.Violations.Add("entry above the cost limit after learning the commission: " + lMaxCost.ToString("F2"));
 
+            // 13. The broker really blocks 1:5 on BCH while the bot assumes 1:2 (the Pepperstone demo: 5.96 EUR blocked, 14.90
+            // estimated). After the first BCH position the bot must size from the real margin, so later BCH trades grow to
+            // the risk plan instead of staying margin-capped.
+            World mw = Scenario("M: BCH margin 1:5 at the broker, 1:2 assumed", 23, new DateTime(2026, 9, 26, 6, 0, 0, DateTimeKind.Utc), TimeSpan.FromHours(30),
+                     b => { b.RiskPercent = 3; }, 49092.50, Path.Combine(dir, "logM.txt"),
+                     specs =>
+                     {
+                         Spec eth = specs.First(x => x.Name == "ETHUSD"); eth.Spread = 2.00; eth.TickRate = 4.0; eth.SigmaMinute = 1.6;
+                         Spec xrp = specs.First(x => x.Name == "XRPUSD"); xrp.Price = 1.5481; xrp.Spread = 0.0050; xrp.TickRate = 3.0; xrp.SigmaMinute = 0.0018;
+                         Spec bch = specs.First(x => x.Name == "BCH/USD"); bch.Spread = 0.72; bch.TickRate = 3.0; bch.Leverage = 5;
+                         Spec sol = specs.First(x => x.Name == "SOLUSD"); sol.Spread = 0.40; sol.TickRate = 3.0; sol.SigmaMinute = 0.124;
+                     });
+            double VolOf(string line)
+            {
+                var mv = System.Text.RegularExpressions.Regex.Match(line, @" ENTRY \S+ \S+ #\d+ ([0-9.]+) lot");
+                return mv.Success ? double.Parse(mv.Groups[1].Value, CultureInfo.InvariantCulture) : 0.0;
+            }
+            var mEntries = mw.Log.Where(x => x.Contains("BCH/USD ENTRY ")).Select(VolOf).ToList();
+            // Blocked vs estimated margin of every BCH position: the first is estimated at 1:2, every later one must match reality.
+            var mMargins = mw.Log.Where(x => x.Contains("BCH/USD MARGIN #")).Select(x =>
+            {
+                var mm = System.Text.RegularExpressions.Regex.Match(x, @"blocks ([0-9.]+) EUR \(estimated ([0-9.]+)\)");
+                return mm.Success ? new[] { double.Parse(mm.Groups[1].Value, CultureInfo.InvariantCulture), double.Parse(mm.Groups[2].Value, CultureInfo.InvariantCulture) }
+                                  : new[] { 0.0, 0.0 };
+            }).ToList();
+            bool mFirstOver = mMargins.Count > 0 && mMargins[0][1] > mMargins[0][0] * 2.0;
+            bool mLaterReal = mMargins.Count > 1 && mMargins.Skip(1).All(x => x[0] > 0 && Math.Abs(x[1] - x[0]) <= x[0] * 0.10);
+            bool mRealUsed = mw.Log.Any(x => x.Contains("BCH/USD") && x.Contains("size:") && x.Contains("real margin used"));
+            double mFirst = mEntries.Count > 0 ? mEntries[0] : 0.0;
+            double mLater = mEntries.Count > 1 ? mEntries.Skip(1).Max() : 0.0;
+            Console.WriteLine("M BCH entries " + mEntries.Count + " | volumes " + string.Join(", ", mEntries.Select(v => v.ToString("0.##", CultureInfo.InvariantCulture)))
+                              + " | margins " + string.Join("; ", mMargins.Select(x => x[0].ToString("F2", CultureInfo.InvariantCulture) + " vs est " + x[1].ToString("F2", CultureInfo.InvariantCulture)))
+                              + " | real margin used " + mRealUsed);
+            if (mEntries.Count < 2) mw.Violations.Add("fewer than 2 BCH trades - the real-margin sizing was not exercised");
+            else
+            {
+                if (!mFirstOver) mw.Violations.Add("the first BCH estimate was not the 1:2 assumption");
+                if (!mLaterReal) mw.Violations.Add("a later BCH estimate did not match the real blocked margin");
+                if (!mRealUsed) mw.Violations.Add("the sizing line never said the real margin is used");
+                if (!(mLater > mFirst)) mw.Violations.Add("margin-capped BCH trades did not grow after the real 1:5 margin was seen");
+            }
+
             string[] checks =
             {
                 "Выходные, бюджет 50 EUR: только крипта, выбор таймфрейма, суточный и субботний перерывы",
@@ -1508,7 +1550,8 @@ namespace Sim
                 "Перезапуск сохраняет бюджет и начало дня",
                 "Старая позиция BTC на бюджете 50 EUR: ведётся вне бюджета, новых входов нет",
                 "Тихая суббота после активной недели, спреды как у Pepperstone, бот видит 60 % тиков",
-                "Форекс: символ занижает комиссию в 7 раз — бот узнаёт настоящую по первой сделке и уходит с m1"
+                "Форекс: символ занижает комиссию в 7 раз — бот узнаёт настоящую по первой сделке и уходит с m1",
+                "BCH: брокер блокирует залог 1:5, бот предполагал 1:2 — после первой сделки объём по реальному залогу"
             };
             string[] notes =
             {
@@ -1524,12 +1567,15 @@ namespace Sim
                     + kShare2.ToString("F1", CultureInfo.InvariantCulture) + " % времени; доля тиков выучена: " + kFactor.ToString("F2", CultureInfo.InvariantCulture)
                     + "; таймфреймы: " + string.Join(", ", kTfs.OrderBy(x => x.Key).Select(x => x.Key + " " + x.Value)),
                 "первая сделка " + (lSym.Length > 0 ? lSym : "—") + ", смена таймфрейма: " + (lSwitch >= 0 ? "да" : "нет") + ", входов после: " + lLater.Count
-                    + ", наибольшая стоимость входа " + lMaxCost.ToString("F2", CultureInfo.InvariantCulture) + " ATR (предел 0.25)"
+                    + ", наибольшая стоимость входа " + lMaxCost.ToString("F2", CultureInfo.InvariantCulture) + " ATR (предел 0.25)",
+                "объёмы BCH: " + string.Join(", ", mEntries.Select(v => v.ToString("0.##", CultureInfo.InvariantCulture))) + "; залог первой: "
+                    + (mMargins.Count > 0 ? mMargins[0][0].ToString("F2", CultureInfo.InvariantCulture) + " EUR при оценке " + mMargins[0][1].ToString("F2", CultureInfo.InvariantCulture) : "—")
+                    + ", дальше оценка = реальному залогу (риск 3 %, чтобы залог был ограничением)"
             };
-            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw };
-            // Scenario order in Rows follows the calls: A B C D E F H G I J K L.
-            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L" };
-            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L" };
+            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw, mw };
+            // Scenario order in Rows follows the calls: A B C D E F H G I J K L M.
+            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L", "M" };
+            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M" };
             for (int k = 0; k < Rows.Count && k < order.Length; k++)
             {
                 int idx = Array.IndexOf(letters, order[k]);
@@ -1543,7 +1589,7 @@ namespace Sim
             Console.WriteLine();
             Console.WriteLine("Unknown API members used by the bot (not mocked):");
             foreach (var kv in Mk.Unknown.OrderByDescending(k => k.Value)) Console.WriteLine("  " + kv.Key + " x" + kv.Value);
-            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
+            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw, mw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
             Console.WriteLine(ok ? "SIMULATION OK" : "SIMULATION FOUND PROBLEMS");
             return ok ? 0 : 1;
         }

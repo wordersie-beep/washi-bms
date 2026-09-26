@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.3.1
+//  QuantAI_Scalper_24x7_V3  v3.3.2
 //  cTrader Automate cBot | multi-market micro-impulse scalper for small budgets, trading around the clock
 //    - crypto 24/7 (weekends included), Forex whenever its market is open
 //    - ONE instance trades every symbol of two lists (a demo account allows one cloud instance)
@@ -56,7 +56,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.3.1";
+        private const string BotVersion = "3.3.2";
 
         #region Parameters
 
@@ -1819,9 +1819,12 @@ namespace cAlgo.Robots
                 double scale = m.ObservedMarginPrice > 0 && now > 0 ? now / m.ObservedMarginPrice : 1.0;
                 seen = m.ObservedMarginPerUnit * units * scale;
             }
+            // The margin a real position of this symbol blocked is the truth; the leverage assumption only guards the trades
+            // before it is known (a rejected order teaches a lower bound, not the truth, so it keeps the assumption).
+            bool real = m.MarginFromPosition && seen > 0;
             how = "broker " + (Valid(broker) && broker > 0 ? F(broker, 2) : "n/a") + ", 1:" + F(leverage, 0) + " " + (own > 0 ? F(own, 2) : "n/a")
-                  + (seen > 0 ? ", seen " + F(seen, 2) : "");
-            return MarketMath.MaxEstimate(broker, own, seen);
+                  + (seen > 0 ? ", seen " + F(seen, 2) : "") + (real ? " - real margin used" : "");
+            return real ? MarketMath.MaxEstimate(broker, seen, 0.0) : MarketMath.MaxEstimate(broker, own, seen);
         }
 
         private double OwnMarginEstimate(Market m, TradeType type, double units, out double leverage)
@@ -1888,13 +1891,15 @@ namespace cAlgo.Robots
                     continue;
                 m.ObservedMarginPerUnit = margin / p.VolumeInUnits;
                 m.ObservedMarginPrice = p.EntryPrice;
+                m.MarginFromPosition = true;
                 TradeState st;
                 if (_trades.TryGetValue(p.Id, out st) && !st.MarginLogged)
                 {
                     st.MarginLogged = true;
                     bool above = st.MarginAtEntry > 0 && margin > st.MarginAtEntry * 1.10;
+                    bool below = st.MarginAtEntry > 0 && margin < st.MarginAtEntry * 0.90;
                     LogM(m, (above ? "WARNING: " : "") + "MARGIN #" + p.Id + ": broker blocks " + F(margin, 2) + " " + _ccy + " (estimated "
-                         + F(st.MarginAtEntry, 2) + ")" + (above ? " - later entries on " + m.Name + " use the real figure" : ""));
+                         + F(st.MarginAtEntry, 2) + ")" + (above || below ? " - later entries on " + m.Name + " use the real figure" : ""));
                 }
             }
         }
@@ -3356,6 +3361,7 @@ namespace cAlgo.Robots
         public double MinVolumeMargin;
         public double ObservedMarginPerUnit;
         public double ObservedMarginPrice;
+        public bool MarginFromPosition;   // the observed margin came from a real position, not from a rejected order
 
         public List<TimeFrame> Candidates = new List<TimeFrame>();
         public int TfIndex;
