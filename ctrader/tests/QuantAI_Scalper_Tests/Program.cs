@@ -155,6 +155,19 @@ namespace Harness
             Check(MarketMath.BaselineBars(100, 0, 7200, 2) == 100, "baseline: unknown timeframe keeps the setting");
             Check(MarketMath.BaselineBars(100, 1200, 7200, 2) == 6, "baseline m20: 6 bars = 2 h exactly");
 
+            // Commission as a price distance: Pepperstone cTrader Razor, 3 USD per lot per side on EURUSD at 1.14 in EUR.
+            double usdToEur = 1.0 / 1.14;
+            double perUnitRoundTurn = 6.0 / 100000 * usdToEur;              // EUR per unit, both sides
+            double pipValue = 0.0001 * usdToEur;                              // EUR per unit per pip
+            double dist = MarketMath.CommissionDistance(perUnitRoundTurn, pipValue, 0.0001);
+            Check(Math.Abs(dist - 0.00006) < 1e-12, "Razor 3 USD/lot/side = 0.6 pip round turn on EURUSD");
+            Check(MarketMath.CommissionDistance(0, pipValue, 0.0001) == 0, "no commission (crypto) adds nothing");
+            Check(MarketMath.CommissionDistance(perUnitRoundTurn, 0, 0.0001) == 0, "unknown pip value adds nothing");
+            Check(MarketMath.CommissionDistance(perUnitRoundTurn, pipValue, 0) == 0, "unknown pip size adds nothing");
+            double jpyPipValue = 0.01 / 148.0 * usdToEur;                     // USDJPY: EUR per unit per pip
+            double jpyRoundTurn = 6.0 / 100000 * usdToEur;                    // 3 USD per lot per side, base USD
+            Check(Math.Abs(MarketMath.CommissionDistance(jpyRoundTurn, jpyPipValue, 0.01) - 0.00888) < 1e-5, "Razor on USDJPY at 148 = 0.89 pip");
+
             // Mean true range, including the gap from the previous close.
             double[] h = { 10, 12, 11, 15 };
             double[] l = { 9, 10, 10, 13 };

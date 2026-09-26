@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.2.0
+//  QuantAI_Scalper_24x7_V3  v3.3.0
 //  cTrader Automate cBot | multi-market micro-impulse scalper for small budgets, trading around the clock
 //    - crypto 24/7 (weekends included), Forex whenever its market is open
 //    - ONE instance trades every symbol of two lists (a demo account allows one cloud instance)
@@ -9,7 +9,7 @@
 //  Ready to run: every parameter below already holds its working value.
 // -----------------------------------------------------------------------------------------------------
 //  ENGINE (per symbol)
-//   1. Timeframe             The fastest timeframe of the symbol's list whose typical spread fits Max Spread / ATR
+//   1. Timeframe             The fastest timeframe of the symbol's list whose typical cost (spread + commission) fits Max Cost / ATR
 //                            (ATR averaged over the last 24 hours). Chosen at start, confirmed on the live spread.
 //   2. Tick Velocity Engine  Ticks in a sliding window (default 3 s) against the average tick rate of the
 //                            last 100 bars, but of no more than the last 2 hours; a ratio of at least N marks an
@@ -56,7 +56,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.2.0";
+        private const string BotVersion = "3.3.0";
 
         #region Parameters
 
@@ -80,10 +80,10 @@ namespace cAlgo.Robots
         [Parameter("Crypto TimeFrames (fastest first)", Group = "0. Budget & Markets", DefaultValue = "m5,m15,m30,h1")]
         public string CryptoTimeFrames { get; set; }
 
-        [Parameter("Forex Max Spread / ATR", Group = "0. Budget & Markets", DefaultValue = 0.12, MinValue = 0.0, Step = 0.01)]
+        [Parameter("Forex Max Cost / ATR (spread + commission)", Group = "0. Budget & Markets", DefaultValue = 0.25, MinValue = 0.0, Step = 0.01)]
         public double MaxSpreadToAtr { get; set; }
 
-        [Parameter("Crypto Max Spread / ATR", Group = "0. Budget & Markets", DefaultValue = 0.25, MinValue = 0.0, Step = 0.01)]
+        [Parameter("Crypto Max Cost / ATR (spread + commission)", Group = "0. Budget & Markets", DefaultValue = 0.25, MinValue = 0.0, Step = 0.01)]
         public double CryptoMaxSpreadToAtr { get; set; }
 
         [Parameter("Crypto Trades 24/7 (ignore session)", Group = "0. Budget & Markets", DefaultValue = true)]
@@ -303,6 +303,7 @@ namespace cAlgo.Robots
         private const double TickBaselineMaxHours = 2.0;      // the tick baseline covers at most this much recent time...
         private const int MinBaselineBars = 2;                // ...but never fewer bars than this
         private const double StaleBarGapMinutes = 15.0;       // a bar that closes this long after its end spanned a market break
+        private const double CommissionRecheckShare = 0.25;   // a fill commission this far from the estimate re-checks timeframe and AI
         private const int SpreadWindowTicks = 500;            // spreads kept for the rolling median
         private const int SpreadCalibrationTicks = 300;       // ticks before the timeframe and the AI are fitted to the live spread
         private const double SpreadSettleMinutes = 10.0;      // spreads right after a market (re)opens are not typical and are not sampled
@@ -558,7 +559,7 @@ namespace cAlgo.Robots
                 m.FxLike = !isCrypto && MarketMath.IsFxLike(sym.PipSize, m.LastPrice, FxPipRatio);
                 m.BotPip = MarketMath.BotPip(sym.PipSize, m.LastPrice, m.FxLike, NonFxPipRatio);
                 m.CommissionPerUnit = CommissionEstimatePerUnit(m);
-                m.CommissionSource = m.CommissionPerUnit > 0 ? "symbol info" : "none reported";
+                m.CommissionSource = CommissionInfo(sym, m.CommissionPerUnit > 0);
 
                 // Budget check before any history is loaded: a symbol whose minimum volume the budget cannot carry
                 // would only ever log "insufficient margin".
@@ -646,8 +647,10 @@ namespace cAlgo.Robots
             m.BaselineTicksPerBar = lastClosed >= 0 ? MeanTickVolume(m.Sig, lastClosed, BaselineBars(m)) : 0.0;
 
             string minNote = m.MinVolumeMargin > 0 ? F(m.MinVolumeMargin, 2) + " " + _ccy : "n/a";
-            Log("MARKET " + m.Name + ": " + (m.IsCrypto ? "crypto" : "forex") + " " + m.SigTf.ShortName + " (" + note + ") | spread/ATR <= "
-                + F(m.MaxSpreadToAtr, 2) + " | " + (m.FxLike ? "pip " + m.Symbol.PipSize.ToString("G", Inv) : "1 pip = 0.5 bp = " + P(m, m.BotPip))
+            string pipText = m.FxLike ? "pip " + m.Symbol.PipSize.ToString("G", Inv)
+                : m.BotPip > m.Symbol.PipSize ? "1 pip = 0.5 bp = " + P(m, m.BotPip) : "1 pip = broker pip " + P(m, m.BotPip);
+            Log("MARKET " + m.Name + ": " + (m.IsCrypto ? "crypto" : "forex") + " " + m.SigTf.ShortName + " (" + note + ") | cost/ATR <= "
+                + F(m.MaxSpreadToAtr, 2) + " | " + pipText
                 + " | min " + Lots(m, MinTradableVolume(m)) + ", margin " + minNote + " | commission " + CommissionText(m));
             if (m.BaselineTicksPerBar <= 0)
                 LogM(m, "WARNING: no tick volume in the history, the tick filter cannot pass");
@@ -668,6 +671,8 @@ namespace cAlgo.Robots
         /// </summary>
         private int ChooseTimeframeIndex(Market m, double spread, string spreadLabel, out string note)
         {
+            double commission = CommissionDistance(m);
+            double cost = spread + commission;
             int n = m.Candidates.Count;
             var ratios = new double[n];
             var sb = new StringBuilder(96);
@@ -679,14 +684,15 @@ namespace cAlgo.Robots
                 int count = tfSec > 0 ? (int)Math.Ceiling(TypicalAtrHours * 3600.0 / tfSec) : 0;
                 EnsureBars(bars, count + 2, null);
                 double atr = TypicalRange(bars, count);
-                ratios[i] = atr > 0 ? spread / atr : double.PositiveInfinity;
+                ratios[i] = atr > 0 ? cost / atr : double.PositiveInfinity;
                 if (i > 0)
                     sb.Append(", ");
                 sb.Append(tf.ShortName).Append(' ').Append(atr > 0 ? F(ratios[i], 2) : "n/a");
             }
             int index = MarketMath.FirstFitting(ratios, m.MaxSpreadToAtr);
             m.TfFits = index >= 0;
-            note = spreadLabel + " " + D(m, spread) + " / day ATR: " + sb + (index >= 0 ? "" : " - none fits " + F(m.MaxSpreadToAtr, 2) + ", slowest used");
+            note = spreadLabel + " " + D(m, spread) + (commission > 0 ? " + commission " + D(m, commission) : "") + " / day ATR: " + sb
+                   + (index >= 0 ? "" : " - none fits " + F(m.MaxSpreadToAtr, 2) + ", slowest used");
             return index >= 0 ? index : n - 1;
         }
 
@@ -848,21 +854,26 @@ namespace cAlgo.Robots
         /// </summary>
         private void CheckSpreadFitsStrategy(Market m, double typicalSpread)
         {
+            double commission = CommissionDistance(m);
+            string cost = "typical spread " + D(m, typicalSpread) + (commission > 0 ? " + commission " + D(m, commission) : "");
             if (m.TfFits)
             {
-                LogM(m, "SPREAD CHECK OK on " + m.SigTf.ShortName + ": typical spread " + D(m, typicalSpread) + " fits " + Pct(m.MaxSpreadToAtr) + " of the day ATR");
+                LogM(m, "SPREAD CHECK OK on " + m.SigTf.ShortName + ": " + cost + " fits " + Pct(m.MaxSpreadToAtr) + " of the day ATR");
                 return;
             }
             m.SpreadWarning = true;
             string hint;
             if (m.IsCrypto)
-                hint = "Raise 'Crypto Max Spread / ATR' or add a slower timeframe to 'Crypto TimeFrames' to trade it more often.";
+                hint = "Raise 'Crypto Max Cost / ATR' or add a slower timeframe to 'Crypto TimeFrames' to trade it more often.";
+            else if (commission > 0)
+                hint = "Spread plus commission are large for this symbol's moves: add a slower timeframe to 'Forex TimeFrames' or raise "
+                       + "'Forex Max Cost / ATR' to trade it more often.";
             else if (_isPepperstone)
                 hint = "This looks like a Pepperstone Standard account (1 pip mark-up); the strategy is built for a Razor account (raw spread + commission).";
             else
                 hint = "The strategy is built for a raw-spread (ECN) account with commission.";
-            LogM(m, "WARNING: typical spread " + D(m, typicalSpread) + " is above " + Pct(m.MaxSpreadToAtr) + " of the ATR on every listed timeframe, "
-                 + "so most signals will be skipped as 'Spread'. " + hint);
+            LogM(m, "WARNING: " + cost + " is above " + Pct(m.MaxSpreadToAtr) + " of the ATR on every listed timeframe, "
+                 + "so most signals will be skipped as 'Cost'. " + hint);
         }
 
         private void TrainFromHistory(Market m)
@@ -882,8 +893,10 @@ namespace cAlgo.Robots
                     m.Pending.Add(s);
             }
             m.AiWasReady = m.Ai.IsReady(AiMinSamplesPerClass);
+            double commission = CommissionDistance(m);
             LogM(m, "AI: " + bars + " " + m.SigTf.ShortName + " bars -> " + m.Ai.Count + " samples, base win-rate " + Pct(m.Ai.WinRate) + ", label spread "
-                 + D(m, spread) + " | " + AiStateText(m));
+                 + D(m, spread) + (commission > 0 ? ", break-even at entry +" + D(m, BreakevenOffset(m)) + " (commission " + D(m, commission) + ")" : "")
+                 + " | " + AiStateText(m));
         }
 
         private string AiStateText(Market m)
@@ -925,7 +938,7 @@ namespace cAlgo.Robots
             var s = new PendingSample();
             s.CloseTime = m.Sig.OpenTimes[c].AddSeconds(m.SigSec);
             s.EntryBid = close;
-            s.Spread = spread;
+            s.Spread = spread;   // the commission moves no stop or target; it moves the break-even stop (see BreakevenOffset)
             s.AtrRisk = atrS;
             s.LongX = AiFeatures.Build(tv, close - ema, atrS, rsiNow - rsiPrev, spread / atrS, 1);
             s.ShortX = AiFeatures.Build(tv, close - ema, atrS, rsiNow - rsiPrev, spread / atrS, -1);
@@ -952,7 +965,7 @@ namespace cAlgo.Robots
             double sl = SlAtrMultiplier * s.AtrRisk;
             double tp = Tp1AtrMultiplier * s.AtrRisk;
             double beTrigger = BeTriggerR > 0 ? BeTriggerR * sl : 0.0;
-            double beOffset = BeOffsetPips * m.BotPip;
+            double beOffset = BreakevenOffset(m);
             bool longWin = OutcomeSimulator.Tp1First(true, s.EntryBid, s.Spread, sl, tp, beTrigger, beOffset, m.HBuf, m.LBuf, AiHorizonBars);
             bool shortWin = OutcomeSimulator.Tp1First(false, s.EntryBid, s.Spread, sl, tp, beTrigger, beOffset, m.HBuf, m.LBuf, AiHorizonBars);
             m.Ai.Add(s.LongX, longWin);
@@ -1273,11 +1286,12 @@ namespace cAlgo.Robots
                 AddReason(reasons, codes, "CHASE", "Price already " + D(m, chase) + " past trigger > max " + D(m, maxChase) + " (" + F(MaxChaseAtr, 2) + " ATR)");
 
             double spread = m.Symbol.Spread;
-            double spreadRatio = atr > 0 ? spread / atr : double.PositiveInfinity;
-            if (!(spreadRatio <= m.MaxSpreadToAtr))
+            double commission = CommissionDistance(m);
+            double costRatio = atr > 0 ? (spread + commission) / atr : double.PositiveInfinity;
+            if (!(costRatio <= m.MaxSpreadToAtr))
             {
-                AddReason(reasons, codes, "SPREAD", "Spread " + D(m, spread) + " = " + (atr > 0 ? Pct(spreadRatio) : "n/a") + " of ATR " + D(m, atr)
-                          + " > " + Pct(m.MaxSpreadToAtr));
+                AddReason(reasons, codes, "SPREAD", "Spread " + D(m, spread) + (commission > 0 ? " + commission " + D(m, commission) : "") + " = "
+                          + (atr > 0 ? Pct(costRatio) : "n/a") + " of ATR " + D(m, atr) + " > " + Pct(m.MaxSpreadToAtr));
             }
 
             double burst = BurstRatio(m);
@@ -1547,10 +1561,7 @@ namespace cAlgo.Robots
             }
 
             if (p.VolumeInUnits > 0 && Math.Abs(p.Commissions) > 0)
-            {
-                m.CommissionPerUnit = 2.0 * Math.Abs(p.Commissions) / p.VolumeInUnits;
-                m.CommissionSource = "last fill";
-            }
+                LearnCommission(m, p);
 
             string tp1Text = plan.Splittable
                 ? F(plan.PartialVolume / st.InitialVolume * 100.0, 0) + "%"
@@ -1558,12 +1569,35 @@ namespace cAlgo.Robots
             _lastEvent = m.Name + " ENTRY " + tag + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice);
             LogM(m, "ENTRY " + tag + " #" + p.Id + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice) + " " + m.SigTf.ShortName + " | SL " + P(m, p.StopLoss)
                  + " (" + D(m, st.RiskDist) + ") | TP1 " + P(m, TargetPrice(p, st.Tp1Dist)) + " (" + D(m, st.Tp1Dist) + ") closes " + tp1Text
-                 + " | conf " + (double.IsNaN(conf) ? "n/a" : Pct(conf)) + " | TV " + F(burst, 2) + "x | positions "
+                 + " | conf " + (double.IsNaN(conf) ? "n/a" : Pct(conf)) + " | TV " + F(burst, 2) + "x | cost " + F(CostRatio(m), 2) + " ATR | positions "
                  + Positions.FindAll(BotLabel).Length + "/" + MaxOpenPositions);
             LogM(m, "  " + sizing + (aiInfo.Length > 0 ? " | AI " + aiInfo : ""));
             if (m.IsChart)
                 DrawEntry(m, p);
             return true;
+        }
+
+        /// <summary>
+        /// The commission the broker really charged replaces the symbol-info estimate. The first time it differs
+        /// materially, the timeframe and the AI are checked again with the real cost (after the position, if it changes).
+        /// </summary>
+        private void LearnCommission(Market m, Position p)
+        {
+            double before = CommissionDistance(m);
+            m.CommissionPerUnit = 2.0 * Math.Abs(p.Commissions) / p.VolumeInUnits;
+            m.CommissionSource = "last fill";
+            if (m.CommissionFromFill)
+                return;
+            m.CommissionFromFill = true;
+            double after = CommissionDistance(m);
+            bool material = Math.Abs(after - before) > CommissionRecheckShare * Math.Max(after, before);
+            LogM(m, "COMMISSION: the fill charged " + F(Math.Abs(p.Commissions), 2) + " " + _ccy + " per side = " + D(m, after) + " round turn; the symbol info gave "
+                 + D(m, before) + (material ? " -> timeframe and AI are checked again with the real cost" : ""));
+            if (material)
+            {
+                m.SpreadChecked = false;
+                m.TfCheckAfter = Server.Time;
+            }
         }
 
         private TradeResult SendMarketOrder(Market m, TradeType type, double volume, double slPips, double? tpPips, string comment)
@@ -1920,6 +1954,36 @@ namespace cAlgo.Robots
             }
         }
 
+        /// <summary>Round-turn commission as a price distance (0 when none is known), so it adds to the spread as one cost.</summary>
+        private static double CommissionDistance(Market m)
+        {
+            return MarketMath.CommissionDistance(m.CommissionPerUnit, m.Symbol.PipValue, m.Symbol.PipSize);
+        }
+
+        /// <summary>Spread plus round-turn commission against the ATR: the measure every cost limit uses.</summary>
+        private double CostRatio(Market m)
+        {
+            double atr = RiskAtr(m);
+            return atr > 0 ? (m.Symbol.Spread + CommissionDistance(m)) / atr : double.PositiveInfinity;
+        }
+
+        /// <summary>What the symbol info says about commission, raw, for the MARKET line.</summary>
+        private string CommissionInfo(Symbol sym, bool converted)
+        {
+            try
+            {
+                if (!(sym.Commission > 0))
+                    return "none reported";
+                string raw = "symbol info " + sym.Commission.ToString("0.####", Inv) + " " + sym.CommissionType
+                             + (sym.MinCommission > 0 ? ", min " + sym.MinCommission.ToString("0.####", Inv) + " " + sym.MinCommissionType : "");
+                return converted ? raw : raw + " - not convertible";
+            }
+            catch (Exception)
+            {
+                return converted ? "symbol info" : "none reported";
+            }
+        }
+
         private string CommissionText(Market m)
         {
             double pipValue = m.Symbol.PipValue;
@@ -2117,7 +2181,9 @@ namespace cAlgo.Robots
             {
                 st.BeDone = true;
                 st.Failures = 0;
-                LogM(m, "MICRO-BE #" + p.Id + " (" + why + "): SL -> " + P(m, target) + " (entry " + (isLong ? "+" : "-") + D(m, BeOffsetPips * m.BotPip) + ")");
+                double commission = CommissionDistance(m);
+                LogM(m, "MICRO-BE #" + p.Id + " (" + why + "): SL -> " + P(m, target) + " (entry " + (isLong ? "+" : "-") + D(m, BreakevenOffset(m))
+                     + (commission > 0 ? ": commission " + D(m, commission) + " + " + D(m, BeOffsetPips * m.BotPip) : "") + ")");
             }
             else
             {
@@ -2182,8 +2248,15 @@ namespace cAlgo.Robots
 
         private double BreakevenPrice(Market m, Position p)
         {
-            double offset = BeOffsetPips * m.BotPip;
+            double offset = BreakevenOffset(m);
             return p.TradeType == TradeType.Buy ? p.EntryPrice + offset : p.EntryPrice - offset;
+        }
+
+        /// <summary>The micro break-even stop sits this far beyond the entry: the offset plus the round-turn commission, so a
+        /// "break-even" exit does not lose the commission (on a Razor account 0.1 pip alone would net about -0.5 pip).</summary>
+        private double BreakevenOffset(Market m)
+        {
+            return BeOffsetPips * m.BotPip + CommissionDistance(m);
         }
 
         private static double TargetPrice(Position p, double distance)
@@ -2823,9 +2896,9 @@ namespace cAlgo.Robots
         {
             if (m.ManageOnly)
                 return " manage-only";
-            double atr = RiskAtr(m);
-            if (atr > 0 && m.Symbol.Spread > m.MaxSpreadToAtr * atr)
-                return " spread " + F(m.Symbol.Spread / atr, 2) + ">" + F(m.MaxSpreadToAtr, 2);
+            double cost = CostRatio(m);
+            if (!double.IsInfinity(cost) && cost > m.MaxSpreadToAtr)
+                return " cost " + F(cost, 2) + ">" + F(m.MaxSpreadToAtr, 2);
             if (UseAiFilter && AiTrainSpreadPips <= 0 && !m.SpreadCalibrated)
                 return " calibrating " + m.Spreads.Count + "/" + SpreadCalibrationTicks;
             if (UseAiFilter && !m.Ai.IsReady(AiMinSamplesPerClass))
@@ -2885,7 +2958,9 @@ namespace cAlgo.Robots
             else
                 ai = "AI ready";
             double seen = m.Calib.Factor(CalibrationMinBars);
-            return "spread " + (atr > 0 ? F(spread / atr, 2) : "n/a") + " ATR (max " + F(m.MaxSpreadToAtr, 2) + "), burst " + F(BurstRatio(m), 2)
+            double commission = CommissionDistance(m);
+            return "cost " + (atr > 0 ? F((spread + commission) / atr, 2) : "n/a") + " ATR" + (commission > 0 && atr > 0 ? " incl. commission " + F(commission / atr, 2) : "")
+                   + " (max " + F(m.MaxSpreadToAtr, 2) + "), burst " + F(BurstRatio(m), 2)
                    + "x (need " + F(TickVelocityMultiplier, 2) + (Math.Abs(seen - 1.0) >= 0.1 ? ", bot sees " + Pct(seen) + " of ticks" : "") + "), " + ai
                    + (InSessionFor(m, now) ? "" : ", out of session")
                    + (m.SpreadWarning ? ", SPREAD TOO WIDE" : "") + ", today " + m.TradesToday;
@@ -2895,7 +2970,7 @@ namespace cAlgo.Robots
         {
             switch (code)
             {
-                case "SPREAD": return "Spread";
+                case "SPREAD": return "Cost";
                 case "TV": return "Tick velocity";
                 case "AI": return "AI confidence";
                 case "AIWARM": return "AI warming up";
@@ -2997,7 +3072,7 @@ namespace cAlgo.Robots
                     }
                     double atr = RiskAtr(m);
                     sb.Append(m.SqzArmed ? "SQZ armed" : (m.BullSweep || m.BearSweep ? "SWP armed" : "no setup"))
-                      .Append(" | spread ").Append(atr > 0 ? F(m.Symbol.Spread / atr, 2) : "n/a").Append('/').Append(F(m.MaxSpreadToAtr, 2)).Append(" ATR")
+                      .Append(" | cost ").Append(atr > 0 ? F(CostRatio(m), 2) : "n/a").Append('/').Append(F(m.MaxSpreadToAtr, 2)).Append(" ATR")
                       .Append(" | burst ").Append(F(BurstRatio(m), 2)).Append('x')
                       .Append(" | AI ").Append(double.IsNaN(m.LastConf) ? "-" : Pct(m.LastConf));
                     foreach (Position p in Positions.FindAll(BotLabel, m.Name))
@@ -3046,9 +3121,9 @@ namespace cAlgo.Robots
             Log("PARAMS exits: SL " + F(SlAtrMultiplier, 2) + " x ATR(" + AtrPeriod + ") | TP1 " + F(Tp1AtrMultiplier, 2) + " x ATR closes " + F(Tp1ClosePercent, 0)
                 + "% (" + NoSplitMode + ") | runner TP " + (Tp2AtrMultiplier > 0 ? F(Tp2AtrMultiplier, 2) + " x ATR" : "none") + " | trail "
                 + (TrailAtrMultiplier > 0 ? F(TrailAtrMultiplier, 2) + " x ATR, step " + F(TrailStepPips, 1) + " pip / " + F(TrailStepAtr, 2) + " ATR" : "off")
-                + " | BE " + (BeTriggerR > 0 ? "+" + F(BeTriggerR, 2) + "R -> +" + F(BeOffsetPips, 1) + " pip" : "off") + " | time exit "
+                + " | BE " + (BeTriggerR > 0 ? "+" + F(BeTriggerR, 2) + "R -> +" + F(BeOffsetPips, 1) + " pip above the commission" : "off") + " | time exit "
                 + (TimeExitBars > 0 ? TimeExitBars + " bars" : "off"));
-            Log("PARAMS filters: spread/ATR forex <= " + F(MaxSpreadToAtr, 2) + ", crypto <= " + F(CryptoMaxSpreadToAtr, 2) + " | cooldown " + CooldownSeconds
+            Log("PARAMS filters: cost (spread + commission)/ATR forex <= " + F(MaxSpreadToAtr, 2) + ", crypto <= " + F(CryptoMaxSpreadToAtr, 2) + " | cooldown " + CooldownSeconds
                 + "s | chase <= " + F(MaxChaseAtr, 2) + " ATR | tick velocity " + OnOff(UseTickVelocity) + " " + F(TickVelocityMultiplier, 2) + "x/"
                 + F(TickWindowSeconds, 1) + "s vs " + TickBaselineBars + " bars (at most " + F(TickBaselineMaxHours, 0) + " h) | squeeze " + (UseSqueeze ? SqueezeBars + " bars" : "off") + " | sweep "
                 + (UseSweep ? SweepLookbackBars + " bars" : "off"));
@@ -3344,6 +3419,7 @@ namespace cAlgo.Robots
         public double BootstrapSpread;
         public double CommissionPerUnit;
         public string CommissionSource = "none";
+        public bool CommissionFromFill;
 
         public bool? WasOpen;
         public DateTime OpenedAt = DateTime.MinValue;
@@ -3988,6 +4064,17 @@ namespace cAlgo.Robots
             int minutes = unit == "m" ? n : unit == "h" ? n * 60 : n * 1440;
             int[] known = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 45, 60, 120, 180, 240, 360, 480, 720, 1440 };
             return Array.IndexOf(known, minutes) >= 0 ? minutes : 0;
+        }
+
+        /// <summary>
+        /// A per-unit commission in account currency as a price distance: pipValue is the account-currency value of one
+        /// pip per unit, so perUnit / pipValue pips. 0 when anything is unknown.
+        /// </summary>
+        public static double CommissionDistance(double perUnit, double pipValue, double pipSize)
+        {
+            if (!(perUnit > 0) || !(pipValue > 0) || !(pipSize > 0))
+                return 0.0;
+            return perUnit / pipValue * pipSize;
         }
 
         /// <summary>

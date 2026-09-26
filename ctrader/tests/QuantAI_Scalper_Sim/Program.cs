@@ -82,7 +82,8 @@ namespace Sim
         public string Base, Quote;
         public double TickRate;
         public double SigmaMinute;
-        public double CommissionPerMillion;
+        public double CommissionPerMillion;   // what the symbol info reports
+        public double ChargedPerMillion;      // what fills are charged; 0 = as reported
         public bool BrokerMarginWrong;
         public bool BrokerMarginNaN;
         public double TrueLeverage;      // 0 = Leverage; the margin the broker really blocks
@@ -491,6 +492,8 @@ namespace Sim
                     case "get_IsTradingEnabled": return true;
                     case "get_Commission": return s.CommissionPerMillion;
                     case "get_CommissionType": return SymbolCommissionType.UsdPerMillionUsdVolume;
+                    case "get_MinCommission": return 0.0;
+                    case "get_MinCommissionType": return SymbolMinCommissionType.QuoteAsset;
                     case "get_QuoteAsset": return quote;
                     case "get_BaseAsset": return bas;
                     case "get_MinStopLossDistance": return s.MinStopPips;
@@ -720,7 +723,7 @@ namespace Sim
             {
                 Id = NextId++, Sym = st, Label = label, Type = type, Vol = vol, InitialVol = vol, Entry = entry, EntryTime = Now, Comment = comment,
                 MarginPerUnit = margin / vol,
-                CommissionPerUnitSide = s.CommissionPerMillion > 0 ? s.CommissionPerMillion / 1e6 * (s.Base == "USD" ? 1.0 : st.Mid * (s.Quote == "USD" ? 1.0 : 1.0)) * QuoteToEur("USD") : 0.0
+                CommissionPerUnitSide = Charged(s) > 0 ? Charged(s) / 1e6 * (s.Base == "USD" ? 1.0 : st.Mid * (s.Quote == "USD" ? 1.0 : 1.0)) * QuoteToEur("USD") : 0.0
             };
             if (sl != null)
                 p.SL = st.Round(type == TradeType.Buy ? entry - sl.Distance * s.Pip : entry + sl.Distance * s.Pip);
@@ -1002,6 +1005,8 @@ namespace Sim
                 tfs[name] = ((TimeFrame)mt.GetField("SigTf").GetValue(m)).ShortName;
             }
         }
+
+        private static double Charged(Spec s) { return s.ChargedPerMillion > 0 ? s.ChargedPerMillion : s.CommissionPerMillion; }
 
         public double BotDouble(string member)
         {
@@ -1433,6 +1438,32 @@ namespace Sim
             if (kFactor < 0.5 || kFactor > 0.72) kw.Violations.Add("tick share not learnt: " + kFactor.ToString("F2"));
             if (kCryptoEntries == 0) kw.Violations.Add("no crypto entries on the quiet Saturday");
 
+            // 12. Forex where the symbol info understates the commission (4.4 USD per million, 0.1 pip) while every fill is
+            // charged the Razor rate (30 per million, about 0.6 pip on EURUSD): after the first fill the bot must learn the
+            // real cost, leave m1 and keep every later entry of that symbol within the cost limit.
+            World lw = Scenario("L: Forex, the symbol info understates the commission", 22, new DateTime(2026, 9, 28, 7, 0, 0, DateTimeKind.Utc), TimeSpan.FromHours(8),
+                     b => { b.CryptoSymbols = ""; }, 49092.50, Path.Combine(dir, "logL.txt"),
+                     specs => { foreach (Spec x in specs.Where(x => !x.Crypto)) { x.ChargedPerMillion = x.CommissionPerMillion; x.CommissionPerMillion = 4.4; } });
+            double CostOf(string line)
+            {
+                var mc = System.Text.RegularExpressions.Regex.Match(line, @"\| cost ([0-9.]+) ATR");
+                return mc.Success ? double.Parse(mc.Groups[1].Value, CultureInfo.InvariantCulture) : 0.0;
+            }
+            string SymOf(string line) { string[] parts = line.Split('|'); return parts.Length > 1 ? parts[1].Trim().Split(' ')[0] : ""; }
+            string lFirst = lw.Log.FirstOrDefault(x => x.Contains(" COMMISSION: "));
+            string lSym = lFirst != null ? SymOf(lFirst) : "";
+            int lAt = lFirst != null ? lw.Log.IndexOf(lFirst) : -1;
+            int lSwitch = lAt >= 0 ? lw.Log.FindIndex(lAt, x => SymOf(x) == lSym && x.Contains(" TIMEFRAME ")) : -1;
+            var lLater = lSwitch >= 0 ? lw.Log.Skip(lSwitch).Where(x => SymOf(x) == lSym && x.Contains(" ENTRY ")).ToList() : new List<string>();
+            double lMaxCost = lLater.Select(CostOf).DefaultIfEmpty(0.0).Max();
+            int lLearnt = lw.Log.Count(x => x.Contains(" COMMISSION: "));
+            Console.WriteLine("L commission lines " + lLearnt + " | first " + lSym + " | switch " + (lSwitch >= 0 ? lw.Log[lSwitch].Substring(0, Math.Min(140, lw.Log[lSwitch].Length)) : "none")
+                              + " | later entries " + lLater.Count + ", max cost " + lMaxCost.ToString("F2"));
+            if (lFirst == null) lw.Violations.Add("the real commission was never learnt");
+            else if (!lFirst.Contains("checked again")) lw.Violations.Add("a 7x commission did not trigger a re-check");
+            if (lFirst != null && lSwitch < 0) lw.Violations.Add("no timeframe change after the real commission on " + lSym);
+            if (lMaxCost > 0.25 + 1e-9) lw.Violations.Add("entry above the cost limit after learning the commission: " + lMaxCost.ToString("F2"));
+
             string[] checks =
             {
                 "Выходные, бюджет 50 EUR: только крипта, выбор таймфрейма, суточный и субботний перерывы",
@@ -1445,7 +1476,8 @@ namespace Sim
                 "Минимальный стоп брокера больше стопа бота: вход пропускается",
                 "Перезапуск сохраняет бюджет и начало дня",
                 "Старая позиция BTC на бюджете 50 EUR: ведётся вне бюджета, новых входов нет",
-                "Тихая суббота после активной недели, спреды как у Pepperstone, бот видит 60 % тиков"
+                "Тихая суббота после активной недели, спреды как у Pepperstone, бот видит 60 % тиков",
+                "Форекс: символ занижает комиссию в 7 раз — бот узнаёт настоящую по первой сделке и уходит с m1"
             };
             string[] notes =
             {
@@ -1459,12 +1491,14 @@ namespace Sim
                 "позиция закрыта ботом: " + (closedByBot ? "да" : "нет") + ", новых входов BTC: " + (newBtc ? "есть" : "нет"),
                 "тиковая активность к базе: в среднем " + kMeanBurst.ToString("F2", CultureInfo.InvariantCulture) + "×, ≥ 2× — "
                     + kShare2.ToString("F1", CultureInfo.InvariantCulture) + " % времени; доля тиков выучена: " + kFactor.ToString("F2", CultureInfo.InvariantCulture)
-                    + "; таймфреймы: " + string.Join(", ", kTfs.OrderBy(x => x.Key).Select(x => x.Key + " " + x.Value))
+                    + "; таймфреймы: " + string.Join(", ", kTfs.OrderBy(x => x.Key).Select(x => x.Key + " " + x.Value)),
+                "первая сделка " + (lSym.Length > 0 ? lSym : "—") + ", смена таймфрейма: " + (lSwitch >= 0 ? "да" : "нет") + ", входов после: " + lLater.Count
+                    + ", наибольшая стоимость входа " + lMaxCost.ToString("F2", CultureInfo.InvariantCulture) + " ATR (предел 0.25)"
             };
-            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw };
-            // Scenario order in Rows follows the calls: A B C D E F H G I J K.
-            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K" };
-            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K" };
+            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw };
+            // Scenario order in Rows follows the calls: A B C D E F H G I J K L.
+            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L" };
+            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L" };
             for (int k = 0; k < Rows.Count && k < order.Length; k++)
             {
                 int idx = Array.IndexOf(letters, order[k]);
@@ -1478,7 +1512,7 @@ namespace Sim
             Console.WriteLine();
             Console.WriteLine("Unknown API members used by the bot (not mocked):");
             foreach (var kv in Mk.Unknown.OrderByDescending(k => k.Value)) Console.WriteLine("  " + kv.Key + " x" + kv.Value);
-            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
+            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
             Console.WriteLine(ok ? "SIMULATION OK" : "SIMULATION FOUND PROBLEMS");
             return ok ? 0 : 1;
         }
