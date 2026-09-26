@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.3.0
+//  QuantAI_Scalper_24x7_V3  v3.3.1
 //  cTrader Automate cBot | multi-market micro-impulse scalper for small budgets, trading around the clock
 //    - crypto 24/7 (weekends included), Forex whenever its market is open
 //    - ONE instance trades every symbol of two lists (a demo account allows one cloud instance)
@@ -56,7 +56,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.3.0";
+        private const string BotVersion = "3.3.1";
 
         #region Parameters
 
@@ -83,7 +83,7 @@ namespace cAlgo.Robots
         [Parameter("Forex Max Cost / ATR (spread + commission)", Group = "0. Budget & Markets", DefaultValue = 0.25, MinValue = 0.0, Step = 0.01)]
         public double MaxSpreadToAtr { get; set; }
 
-        [Parameter("Crypto Max Cost / ATR (spread + commission)", Group = "0. Budget & Markets", DefaultValue = 0.25, MinValue = 0.0, Step = 0.01)]
+        [Parameter("Crypto Max Cost / ATR (spread + commission)", Group = "0. Budget & Markets", DefaultValue = 0.30, MinValue = 0.0, Step = 0.01)]
         public double CryptoMaxSpreadToAtr { get; set; }
 
         [Parameter("Crypto Trades 24/7 (ignore session)", Group = "0. Budget & Markets", DefaultValue = true)]

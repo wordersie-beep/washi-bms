@@ -1253,6 +1253,7 @@ namespace Sim
             w.Run(start, duration, onSecond);
             sw.Stop();
             System.IO.File.WriteAllLines(logFile, w.Log);
+            CheckEntryCosts(w, specs);
             Report(w, sw.Elapsed);
             Rows.Add(new ReportRow
             {
@@ -1264,6 +1265,36 @@ namespace Sim
                 Balance = w.StartBalance.ToString("F2", CultureInfo.InvariantCulture) + " → " + w.Balance.ToString("F2", CultureInfo.InvariantCulture)
             });
             return w;
+        }
+
+        /// <summary>
+        /// Every entry must cost (spread + commission) no more than its market's limit. The one exception is the fill that
+        /// taught the bot a higher commission: the gate used the symbol info, the ENTRY line already shows the real cost.
+        /// </summary>
+        private static void CheckEntryCosts(World w, List<Spec> specs)
+        {
+            var crypto = new HashSet<string>(specs.Where(x => x.Crypto).Select(x => x.Name));
+            foreach (string line in w.Log)
+            {
+                if (!line.Contains(" ENTRY "))
+                    continue;
+                string[] parts = line.Split('|');
+                if (parts.Length < 2)
+                    continue;
+                string sym = parts[1].Trim().Split(' ')[0];
+                var mc = System.Text.RegularExpressions.Regex.Match(line, @"\| cost ([0-9.]+) ATR");
+                if (!mc.Success)
+                {
+                    w.Violations.Add("ENTRY without a cost: " + line);
+                    continue;
+                }
+                double cost = double.Parse(mc.Groups[1].Value, CultureInfo.InvariantCulture);
+                double limit = crypto.Contains(sym) ? w.Bot.CryptoMaxSpreadToAtr : w.Bot.MaxSpreadToAtr;
+                string stamp = line.Substring(0, line.IndexOf('|'));
+                bool learnt = w.Log.Any(x => x.StartsWith(stamp) && x.Contains(sym + " COMMISSION: ") && x.Contains("checked again"));
+                if (cost > limit + 0.005 && !learnt)
+                    w.Violations.Add(sym + " entry cost " + cost.ToString("F2") + " ATR above the limit " + limit.ToString("F2") + ": " + stamp.Trim());
+            }
         }
 
         private static void WriteReport(string path)
@@ -1299,7 +1330,7 @@ namespace Sim
             }
             sb.Append("<p class=\"sub\">Правила, проверяемые каждую секунду: стоп у каждой позиции, не больше одной позиции на символ и 8 всего, "
                       + "залог бюджета ≤ 90 %, ни одной позиции в длинный перерыв рынка, после открытия рынка нет сетапов, "
-                      + "взведённых до длинного перерыва.</p></body></html>");
+                      + "взведённых до длинного перерыва; после прогона — ни одного входа дороже предела (спред + комиссия).</p></body></html>");
             System.IO.File.WriteAllText(path, sb.ToString());
         }
 
