@@ -255,6 +255,9 @@ namespace Sim
         public int BurstDir;
         public bool WasOpen;
         public DateTime OpenedAt = DateTime.MinValue;
+        public DateTime ClosedSince = DateTime.MinValue;   // MinValue: closed since before the run
+        public DateTime LongReopen = DateTime.MinValue;    // last reopening after a break longer than 15 minutes
+        public DateTime BotTickAt = DateTime.MinValue;     // last tick the bot received
         public double Round(double p) { return Math.Round(p, S.Digits); }
         public double Bid { get { return Round(Mid - SpreadNow / 2); } }
         public double Ask { get { return Round(Mid + SpreadNow / 2); } }
@@ -323,6 +326,20 @@ namespace Sim
         public int TotalHistoryBars = 4200;
         public double LoggedMaxLen;
         public string LongestLine = "";
+        public bool Activity;            // weekly activity cycle: busy weekday afternoons, quiet nights, very quiet weekends
+        public double Delivery = 1.0;    // share of the broker's ticks that reach the bot (a busy cloud may skip some)
+
+        /// <summary>Tick-rate multiplier at a time; volatility follows its square root (fewer ticks, smaller moves).</summary>
+        public double ActivityAt(DateTime t)
+        {
+            if (!Activity)
+                return 1.0;
+            int h = t.Hour;
+            bool us = h >= 13 && h < 21;
+            if (t.DayOfWeek == DayOfWeek.Saturday || t.DayOfWeek == DayOfWeek.Sunday)
+                return us ? 0.4 : 0.3;
+            return us ? 1.8 : h >= 7 && h < 13 ? 1.2 : 0.6;
+        }
 
         private static readonly ConstructorInfo TrCtor = typeof(TradeResult).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null,
             new[] { typeof(bool), typeof(ErrorCode?), typeof(Position), typeof(PendingOrder) }, null);
@@ -518,10 +535,12 @@ namespace Sim
                     cursor = cursor.AddSeconds(-sec);
                     continue;
                 }
-                double open = close - sigma * Gauss();
-                double hi = Math.Max(open, close) + Math.Abs(Gauss()) * sigma * 0.5;
-                double lo = Math.Min(open, close) - Math.Abs(Gauss()) * sigma * 0.5;
-                double vol = Math.Max(1, Math.Round(st.S.TickRate * sec * (0.5 + Rng.NextDouble()) * (Rng.NextDouble() < 0.05 ? 3 : 1)));
+                double act = ActivityAt(cursor);
+                double sig = Activity ? sigma * Math.Sqrt(act) : sigma;
+                double open = close - sig * Gauss();
+                double hi = Math.Max(open, close) + Math.Abs(Gauss()) * sig * 0.5;
+                double lo = Math.Min(open, close) - Math.Abs(Gauss()) * sig * 0.5;
+                double vol = Math.Max(1, Math.Round(st.S.TickRate * act * sec * (0.5 + Rng.NextDouble()) * (Rng.NextDouble() < 0.05 ? 3 : 1)));
                 if (list.Count == 0 && forming)
                 {
                     open = hi = lo = close;
@@ -959,6 +978,31 @@ namespace Sim
             }
         }
 
+        /// <summary>Burst ratio and tick-share factor of every open crypto market the bot trades, via reflection.</summary>
+        public void SampleTickFilter(List<double> bursts, List<double> factors, Dictionary<string, string> tfs)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            var markets = (System.Collections.IEnumerable)Bot.GetType().GetField("_markets", flags).GetValue(Bot);
+            MethodInfo burst = Bot.GetType().GetMethod("BurstRatio", flags);
+            foreach (object m in markets)
+            {
+                Type mt = m.GetType();
+                if (!(bool)mt.GetField("IsCrypto").GetValue(m))
+                    continue;
+                FieldInfo manage = mt.GetField("ManageOnly");
+                if (manage != null && (bool)manage.GetValue(m))
+                    continue;
+                string name = (string)mt.GetField("Name").GetValue(m);
+                SymState st;
+                if (!Syms.TryGetValue(name, out st) || !IsOpen(st.S, Now))
+                    continue;
+                bursts.Add((double)burst.Invoke(Bot, new[] { m }));
+                object calib = mt.GetField("Calib").GetValue(m);
+                factors.Add((double)calib.GetType().GetMethod("Factor").Invoke(calib, new object[] { 3 }));
+                tfs[name] = ((TimeFrame)mt.GetField("SigTf").GetValue(m)).ShortName;
+            }
+        }
+
         public double BotDouble(string member)
         {
             const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -1004,6 +1048,9 @@ namespace Sim
                     else if (p.TP.HasValue && st.Ask <= p.TP.Value) ClosePos(p, p.Vol, PositionCloseReason.TakeProfit);
                 }
             }
+            if (Delivery < 1.0 && Rng.NextDouble() >= Delivery)
+                return;
+            st.BotTickAt = Now;
             if (s.Name == ChartSymbol)
             {
                 Call("OnTick");
@@ -1037,14 +1084,22 @@ namespace Sim
                 {
                     Now = t;
                     bool open = IsOpen(st.S, t);
-                    if (open && !st.WasOpen) st.OpenedAt = t;
+                    if (open && !st.WasOpen)
+                    {
+                        st.OpenedAt = t;
+                        if (st.ClosedSince == DateTime.MinValue || (t - st.ClosedSince).TotalMinutes > 15)
+                            st.LongReopen = t;
+                    }
                     if (!open && st.WasOpen)
+                    {
                         CheckFlatAtClose(st, t);
+                        st.ClosedSince = t;
+                    }
                     st.WasOpen = open;
                     if (!open) continue;
                     if (st.BurstLeft > 0) st.BurstLeft--;
                     else if (Rng.NextDouble() < 1.0 / 400) { st.BurstLeft = 20 + Rng.Next(40); st.BurstDir = Rng.Next(2) == 0 ? -1 : 1; }
-                    double lambda = st.S.TickRate * (st.BurstLeft > 0 ? 4.0 : 1.0);
+                    double lambda = st.S.TickRate * ActivityAt(t) * (st.BurstLeft > 0 ? 4.0 : 1.0);
                     int k = Poisson(lambda);
                     for (int j = 0; j < k; j++)
                     {
@@ -1088,8 +1143,11 @@ namespace Sim
 
         private readonly Dictionary<int, DateTime> _noSlSince = new Dictionary<int, DateTime>();
 
+        private readonly HashSet<string> _staleReported = new HashSet<string>();
+
         private void CheckInvariants()
         {
+            CheckStaleSetups();
             var mine = Open.Where(p => p.Label == "QuantAI_M1").ToList();
             foreach (var g in mine.GroupBy(p => p.Sym.S.Name))
                 if (g.Count() > 1) Violations.Add(Now.ToString("ddd HH:mm") + " " + g.Count() + " positions on " + g.Key);
@@ -1111,6 +1169,31 @@ namespace Sim
                 double used = budgetPositions.Sum(p => p.MarginPerUnit * p.Vol);
                 if (used > budgetEquity * Bot.MaxTotalMarginPercent / 100.0 * 1.05 + 0.01)
                     Violations.Add(Now.ToString("ddd HH:mm") + " margin " + used.ToString("F2") + " > " + Bot.MaxTotalMarginPercent + "% of budget equity " + budgetEquity.ToString("F2"));
+            }
+        }
+
+        /// <summary>
+        /// After a break longer than 15 minutes no setup armed before it may be live once the bot has seen a tick of the
+        /// reopened market, until the first bar after the reopening closes.
+        /// </summary>
+        private void CheckStaleSetups()
+        {
+            if (!Syms.Values.Any(x => x.LongReopen != DateTime.MinValue && (Now - x.LongReopen).TotalHours < 5))
+                return;
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+            var markets = (System.Collections.IEnumerable)Bot.GetType().GetField("_markets", flags).GetValue(Bot);
+            foreach (object m in markets)
+            {
+                Type mt = m.GetType();
+                SymState st;
+                if (!Syms.TryGetValue((string)mt.GetField("Name").GetValue(m), out st) || st.LongReopen == DateTime.MinValue || st.BotTickAt < st.LongReopen)
+                    continue;
+                int sigSec = (int)(double)mt.GetField("SigSec").GetValue(m);
+                if (sigSec <= 0 || Now >= Floor(st.LongReopen, sigSec).AddSeconds(sigSec))
+                    continue;
+                bool armed = (bool)mt.GetField("SqzArmed").GetValue(m) || (bool)mt.GetField("BullSweep").GetValue(m) || (bool)mt.GetField("BearSweep").GetValue(m);
+                if (armed && _staleReported.Add(st.S.Name + st.LongReopen.Ticks))
+                    Violations.Add(Now.ToString("ddd HH:mm:ss") + " " + st.S.Name + " setup from before the market break still armed after the reopening");
             }
         }
     }
@@ -1210,7 +1293,8 @@ namespace Sim
                 sb.Append("</div>");
             }
             sb.Append("<p class=\"sub\">Правила, проверяемые каждую секунду: стоп у каждой позиции, не больше одной позиции на символ и 8 всего, "
-                      + "залог бюджета ≤ 90 %, ни одной позиции в длинный перерыв рынка.</p></body></html>");
+                      + "залог бюджета ≤ 90 %, ни одной позиции в длинный перерыв рынка, после открытия рынка нет сетапов, "
+                      + "взведённых до длинного перерыва.</p></body></html>");
             System.IO.File.WriteAllText(path, sb.ToString());
         }
 
@@ -1259,8 +1343,8 @@ namespace Sim
                      w => { if (!restarted && w.Open.Any(p => p.Label == "QuantAI_M1" && (w.Now - p.EntryTime).TotalSeconds > 20)) { restarted = true; w.Restart(null); } return true; });
             Console.WriteLine("restarted: " + restarted + " | RECOVERED lines " + e.Log.Count(l => l.Contains("RECOVERED #")));
             // 6. Daily loss limit and a broker minimum stop distance.
-            World f = Scenario("F: daily loss 0.5% of 50 EUR", 16, new DateTime(2026, 9, 28, 6, 30, 0, DateTimeKind.Utc), TimeSpan.FromHours(20),
-                     b => { b.DailyMaxLossPercent = 0.5; }, 49092.50, Path.Combine(dir, "logF.txt"));
+            World f = Scenario("F: daily loss 0.1% of 50 EUR", 16, new DateTime(2026, 9, 28, 6, 30, 0, DateTimeKind.Utc), TimeSpan.FromHours(20),
+                     b => { b.DailyMaxLossPercent = 0.1; }, 49092.50, Path.Combine(dir, "logF.txt"));
             int entriesAfterHalt = 0;
             bool halted = false;
             foreach (string l in f.Log)
@@ -1271,6 +1355,7 @@ namespace Sim
             }
             Console.WriteLine("HALT lines " + f.Log.Count(l => l.Contains("HALT:")) + " | entries while halted " + entriesAfterHalt);
             if (entriesAfterHalt > 0) f.Violations.Add("entries while halted");
+            if (!f.Log.Any(l => l.Contains("HALT:"))) f.Violations.Add("the daily loss limit was never reached - the scenario did not test it");
             World h = Scenario("H: weekend, ETH broker min stop $10,000", 18, new DateTime(2026, 9, 26, 6, 0, 0, DateTimeKind.Utc), TimeSpan.FromHours(30),
                      b => { }, 49092.50, Path.Combine(dir, "logH.txt"),
                      specs => specs.First(x => x.Name == "ETHUSD").MinStopPips = 1000000);
@@ -1319,6 +1404,35 @@ namespace Sim
             Console.WriteLine("BTC manage-only " + managed + " | closed " + closedByBot + " | new BTC entries " + newBtc);
             if (!managed || newBtc || !closedByBot) j.Violations.Add("old BTC position not handled as manage-only");
 
+            // 11. A quiet Saturday after a busy week, spreads as in the real Pepperstone log, the cloud delivering 60% of the
+            // ticks: the tick filter must compare with the last hours (not with the busy week) and learn the tick share fast.
+            var kBursts = new List<double>();
+            var kFactors = new List<double>();
+            var kTfs = new Dictionary<string, string>();
+            World kw = Scenario("K: quiet Saturday after a busy week, the bot sees 60% of ticks", 21, new DateTime(2026, 9, 26, 5, 0, 0, DateTimeKind.Utc), TimeSpan.FromHours(20),
+                     b => { }, 49092.50, Path.Combine(dir, "logK.txt"),
+                     specs =>
+                     {
+                         Spec eth = specs.First(x => x.Name == "ETHUSD"); eth.Spread = 2.00; eth.TickRate = 4.0; eth.SigmaMinute = 1.6;
+                         Spec xrp = specs.First(x => x.Name == "XRPUSD"); xrp.Price = 1.5481; xrp.Spread = 0.0050; xrp.TickRate = 3.0; xrp.SigmaMinute = 0.0018;
+                         Spec bch = specs.First(x => x.Name == "BCH/USD"); bch.Spread = 0.72; bch.TickRate = 3.0;
+                         Spec sol = specs.First(x => x.Name == "SOLUSD"); sol.Spread = 0.40; sol.TickRate = 3.0; sol.SigmaMinute = 0.124;
+                     },
+                     w => { if (w.Now.Second == 0 && w.Now >= new DateTime(2026, 9, 26, 5, 15, 0, DateTimeKind.Utc)) w.SampleTickFilter(kBursts, kFactors, kTfs); return true; },
+                     w => { w.Activity = true; w.Delivery = 0.6; });
+            double kMeanBurst = kBursts.Count > 0 ? kBursts.Average() : 0.0;
+            double kShare2 = kBursts.Count > 0 ? kBursts.Count(x => x >= 2.0) * 100.0 / kBursts.Count : 0.0;
+            var kSorted = kFactors.OrderBy(x => x).ToList();
+            double kFactor = kSorted.Count > 0 ? kSorted[kSorted.Count / 2] : 0.0;
+            string[] kCrypto = { "BTCUSD", "ETHUSD", "SOLUSD", "XRPUSD", "BCH/USD" };
+            int kCryptoEntries = kw.Log.Count(l => kCrypto.Any(n => l.Contains(n + " ENTRY")));
+            int kTvSkips = kw.Log.Count(l => l.Contains("Low Tick Velocity"));
+            Console.WriteLine("K samples " + kBursts.Count + " | mean burst " + kMeanBurst.ToString("F2") + " | >= 2x " + kShare2.ToString("F1") + "% | tick share "
+                              + kFactor.ToString("F2") + " | crypto entries " + kCryptoEntries + " | TV skip lines " + kTvSkips + " | TF " + string.Join(", ", kTfs.Select(x => x.Key + " " + x.Value)));
+            if (kMeanBurst < 0.6 || kMeanBurst > 1.6) kw.Violations.Add("tick burst baseline off: mean " + kMeanBurst.ToString("F2"));
+            if (kFactor < 0.5 || kFactor > 0.72) kw.Violations.Add("tick share not learnt: " + kFactor.ToString("F2"));
+            if (kCryptoEntries == 0) kw.Violations.Add("no crypto entries on the quiet Saturday");
+
             string[] checks =
             {
                 "Выходные, бюджет 50 EUR: только крипта, выбор таймфрейма, суточный и субботний перерывы",
@@ -1330,7 +1444,8 @@ namespace Sim
                 "Брокер требует залог 1:1 вместо 1:2: один отказ, без повторов",
                 "Минимальный стоп брокера больше стопа бота: вход пропускается",
                 "Перезапуск сохраняет бюджет и начало дня",
-                "Старая позиция BTC на бюджете 50 EUR: ведётся вне бюджета, новых входов нет"
+                "Старая позиция BTC на бюджете 50 EUR: ведётся вне бюджета, новых входов нет",
+                "Тихая суббота после активной недели, спреды как у Pepperstone, бот видит 60 % тиков"
             };
             string[] notes =
             {
@@ -1341,12 +1456,15 @@ namespace Sim
                 "пропусков по стопу брокера: " + h.Log.Count(l => l.Contains("closer than the broker minimum stop")),
                 "бюджет " + equityBefore.ToString("F2", CultureInfo.InvariantCulture) + " → " + equityAfter.ToString("F2", CultureInfo.InvariantCulture)
                     + ", начало дня " + dayBefore.ToString("F2", CultureInfo.InvariantCulture) + " → " + dayAfter.ToString("F2", CultureInfo.InvariantCulture),
-                "позиция закрыта ботом: " + (closedByBot ? "да" : "нет") + ", новых входов BTC: " + (newBtc ? "есть" : "нет")
+                "позиция закрыта ботом: " + (closedByBot ? "да" : "нет") + ", новых входов BTC: " + (newBtc ? "есть" : "нет"),
+                "тиковая активность к базе: в среднем " + kMeanBurst.ToString("F2", CultureInfo.InvariantCulture) + "×, ≥ 2× — "
+                    + kShare2.ToString("F1", CultureInfo.InvariantCulture) + " % времени; доля тиков выучена: " + kFactor.ToString("F2", CultureInfo.InvariantCulture)
+                    + "; таймфреймы: " + string.Join(", ", kTfs.OrderBy(x => x.Key).Select(x => x.Key + " " + x.Value))
             };
-            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j };
-            // Scenario order in Rows follows the calls: A B C D E F H G I J.
-            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J" };
-            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J" };
+            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw };
+            // Scenario order in Rows follows the calls: A B C D E F H G I J K.
+            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K" };
+            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K" };
             for (int k = 0; k < Rows.Count && k < order.Length; k++)
             {
                 int idx = Array.IndexOf(letters, order[k]);
@@ -1360,7 +1478,7 @@ namespace Sim
             Console.WriteLine();
             Console.WriteLine("Unknown API members used by the bot (not mocked):");
             foreach (var kv in Mk.Unknown.OrderByDescending(k => k.Value)) Console.WriteLine("  " + kv.Key + " x" + kv.Value);
-            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
+            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
             Console.WriteLine(ok ? "SIMULATION OK" : "SIMULATION FOUND PROBLEMS");
             return ok ? 0 : 1;
         }

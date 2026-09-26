@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.1.0
+//  QuantAI_Scalper_24x7_V3  v3.2.0
 //  cTrader Automate cBot | multi-market micro-impulse scalper for small budgets, trading around the clock
 //    - crypto 24/7 (weekends included), Forex whenever its market is open
 //    - ONE instance trades every symbol of two lists (a demo account allows one cloud instance)
@@ -12,9 +12,11 @@
 //   1. Timeframe             The fastest timeframe of the symbol's list whose typical spread fits Max Spread / ATR
 //                            (ATR averaged over the last 24 hours). Chosen at start, confirmed on the live spread.
 //   2. Tick Velocity Engine  Ticks in a sliding window (default 3 s) against the average tick rate of the
-//                            last 100 bars; a ratio of at least N marks an institutional inflow.
+//                            last 100 bars, but of no more than the last 2 hours; a ratio of at least N marks an
+//                            institutional inflow. Received ticks are matched with the broker's count on M1 bars.
 //   3. Volman 20 EMA Squeeze A tight box of recent bars hugging the 20 EMA, entered on the breaking tick.
 //   4. Liquidity Sweep       A false pierce of the 10-bar high/low, entered when price reclaims the EMA.
+//                            Setups armed before a long market break are dropped when the market reopens.
 //   5. AI classifier         Gaussian Naive Bayes over [Tick_Velocity, EMA20_Distance, RSI_Slope,
 //                            Spread_Ratio], trained per symbol on history, then online on every closed bar
 //                            with the outcome this bot's own exit rules would have produced.
@@ -54,7 +56,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.1.0";
+        private const string BotVersion = "3.2.0";
 
         #region Parameters
 
@@ -296,8 +298,11 @@ namespace cAlgo.Robots
 
         // Numerical plumbing only - none of these decides whether a trade is taken.
         private const int IndicatorWarmupFactor = 3;          // bars per indicator period before values are trusted
-        private const int CalibrationWindowBars = 30;         // bars used to match OnTick counts with broker tick volume
-        private const int CalibrationMinBars = 3;             // calibration is applied once this many full bars were seen
+        private const int CalibrationWindowBars = 30;         // M1 bars used to match OnTick counts with broker tick volume
+        private const int CalibrationMinBars = 3;             // calibration is applied once this many full M1 bars were seen
+        private const double TickBaselineMaxHours = 2.0;      // the tick baseline covers at most this much recent time...
+        private const int MinBaselineBars = 2;                // ...but never fewer bars than this
+        private const double StaleBarGapMinutes = 15.0;       // a bar that closes this long after its end spanned a market break
         private const int SpreadWindowTicks = 500;            // spreads kept for the rolling median
         private const int SpreadCalibrationTicks = 300;       // ticks before the timeframe and the AI are fitted to the live spread
         private const double SpreadSettleMinutes = 10.0;      // spreads right after a market (re)opens are not typical and are not sampled
@@ -578,6 +583,7 @@ namespace cAlgo.Robots
 
                 m.Ticks = new TickVelocityEngine(Math.Max(TickWindowSeconds, TickRateWindowCapSeconds) + 5.0);
                 m.Calib = new TickCalibrator(CalibrationWindowBars);
+                m.CalBars = MarketData.GetBars(TimeFrame.Minute, name);
                 m.Spreads = new SpreadTracker(SpreadWindowTicks);
                 m.EngineStart = Server.Time;
                 m.HBuf = new double[AiHorizonBars];
@@ -632,15 +638,12 @@ namespace cAlgo.Robots
 
             m.Ai = new GaussianNaiveBayes(AiFeatures.Dim, AiTrainingBars * 2);
             m.Pending.Clear();
-            m.CalBarOpen = DateTime.MinValue;
-            m.CalBarTicks = 0;
-            m.CalBarFull = false;
             m.SqzArmed = false;
             m.BullSweep = false;
             m.BearSweep = false;
 
             int lastClosed = m.Sig.Count - 2;
-            m.BaselineTicksPerBar = lastClosed >= 0 ? MeanTickVolume(m.Sig, lastClosed, TickBaselineBars) : 0.0;
+            m.BaselineTicksPerBar = lastClosed >= 0 ? MeanTickVolume(m.Sig, lastClosed, BaselineBars(m)) : 0.0;
 
             string minNote = m.MinVolumeMargin > 0 ? F(m.MinVolumeMargin, 2) + " " + _ccy : "n/a";
             Log("MARKET " + m.Name + ": " + (m.IsCrypto ? "crypto" : "forex") + " " + m.SigTf.ShortName + " (" + note + ") | spread/ATR <= "
@@ -912,9 +915,9 @@ namespace cAlgo.Robots
                 return null;
 
             // History has no intrabar tick timing, so the classifier's velocity feature is the bar's tick volume
-            // against the average of the previous N bars. Live, the same rate is measured over a rolling window
-            // (see BarTickVelocity), keeping training and inference aligned.
-            double baseline = MeanTickVolume(m.Sig, c - 1, TickBaselineBars);
+            // against the average of the previous bars of the baseline. Live, the same rate is measured over a rolling
+            // window (see BarTickVelocity), keeping training and inference aligned.
+            double baseline = MeanTickVolume(m.Sig, c - 1, BaselineBars(m));
             if (baseline <= 0)
                 return null;
             double tv = m.Sig.TickVolumes[c] / baseline;
@@ -1008,8 +1011,13 @@ namespace cAlgo.Robots
                 return;
 
             m.SkipKeys.Clear();
-            m.BaselineTicksPerBar = MeanTickVolume(m.Sig, c, TickBaselineBars);
-            EvaluateSetups(m, c);
+            m.BaselineTicksPerBar = MeanTickVolume(m.Sig, c, BaselineBars(m));
+            // A bar that closes only now, long after its end, was the last one before a market break (a weekend, the
+            // Saturday crypto break): its box or swept level says nothing about the price after the gap.
+            if ((Server.Time - m.Sig.OpenTimes[c].AddSeconds(m.SigSec)).TotalMinutes > StaleBarGapMinutes)
+                DropSetups(m);
+            else
+                EvaluateSetups(m, c);
             if (LogBarSummary)
                 LogBar(m, c, s);
             if (m.IsChart)
@@ -1142,6 +1150,20 @@ namespace cAlgo.Robots
                     m.SwpIdle = "no: pierce " + D(m, pierce) + " but the bar closed beyond the swept level";
             }
             m.SwpNote = SweepNote(m);
+        }
+
+        /// <summary>Disarms every setup after a market break; new ones arm from the first bar that closes after the reopening.</summary>
+        private void DropSetups(Market m)
+        {
+            bool had = m.SqzArmed || m.BullSweep || m.BearSweep;
+            m.SqzArmed = false;
+            m.BullSweep = false;
+            m.BearSweep = false;
+            m.SqzNote = "none since the market break";
+            m.SwpIdle = "none since the market break";
+            m.SwpNote = m.SwpIdle;
+            if (had)
+                LogM(m, "SETUPS DROPPED: armed before the market break - new ones arm from the first " + m.SigTf.ShortName + " bar after the reopening");
         }
 
         private string SweepNote(Market m)
@@ -2336,19 +2358,24 @@ namespace cAlgo.Robots
 
         #region Tick engine, spread, sessions, breaks, day guards
 
+        /// <summary>
+        /// Matches the ticks this bot receives with the broker's tick volume on M1 bars, whatever the signal timeframe:
+        /// the factor is known a few minutes after the start instead of after three h1 bars.
+        /// </summary>
         private void CountTickForCalibration(Market m)
         {
-            if (m.Risk.Count < 1)
+            Bars cal = m.CalBars;
+            if (cal == null || cal.Count < 1)
                 return;
-            DateTime open = m.Risk.OpenTimes[m.Risk.Count - 1];
+            DateTime open = cal.OpenTimes[cal.Count - 1];
             if (open != m.CalBarOpen)
             {
                 // The bar that just finished was watched from its first tick: compare our count with the broker's.
                 if (m.CalBarFull)
                 {
-                    int idx = IndexOfTime(m.Risk, m.CalBarOpen);
-                    if (idx >= 0 && idx <= m.Risk.Count - 2)
-                        m.Calib.AddBar(m.CalBarTicks, m.Risk.TickVolumes[idx]);
+                    int idx = IndexOfTime(cal, m.CalBarOpen);
+                    if (idx >= 0 && idx <= cal.Count - 2)
+                        m.Calib.AddBar(m.CalBarTicks, cal.TickVolumes[idx]);
                 }
                 m.CalBarFull = m.CalBarOpen != DateTime.MinValue;
                 m.CalBarOpen = open;
@@ -2362,7 +2389,17 @@ namespace cAlgo.Robots
             return m.Ticks.CountSince(Server.Time, seconds) / m.Calib.Factor(CalibrationMinBars);
         }
 
-        /// <summary>Tick density of the last few seconds relative to the N-bar average (the inflow detector).</summary>
+        /// <summary>
+        /// Bars of the signal timeframe in the tick baseline: Baseline Bars, but no more than the last two hours. The
+        /// baseline is the market's recent activity on every timeframe; 100 h1 bars would mix four days of busy and
+        /// quiet hours, and a quiet weekend would sit far below that average and never reach the multiplier.
+        /// </summary>
+        private int BaselineBars(Market m)
+        {
+            return MarketMath.BaselineBars(TickBaselineBars, m.SigSec, TickBaselineMaxHours * 3600.0, MinBaselineBars);
+        }
+
+        /// <summary>Tick density of the last few seconds relative to the recent average (the inflow detector).</summary>
         private double BurstRatio(Market m)
         {
             if (m.BaselineTicksPerBar <= 0 || m.SigSec <= 0)
@@ -2752,8 +2789,9 @@ namespace cAlgo.Robots
             foreach (Market m in _markets)
             {
                 bool open = m.Symbol.MarketHours.IsOpened();
-                bool busy = m.StatusSignals > 0 || m.StatusSqz > 0 || m.StatusSwp > 0 || Positions.FindAll(BotLabel, m.Name).Length > 0;
-                if (!open && !busy)
+                bool holds = Positions.FindAll(BotLabel, m.Name).Length > 0;
+                bool busy = holds || open && (m.StatusSignals > 0 || m.StatusSqz > 0 || m.StatusSwp > 0);
+                if (!open && !holds)
                     closed.Add(m.Name);
                 else if (busy)
                     active.Add(m);
@@ -2846,8 +2884,10 @@ namespace cAlgo.Robots
                 ai = "AI warming " + m.Ai.Wins + "/" + m.Ai.Losses;
             else
                 ai = "AI ready";
+            double seen = m.Calib.Factor(CalibrationMinBars);
             return "spread " + (atr > 0 ? F(spread / atr, 2) : "n/a") + " ATR (max " + F(m.MaxSpreadToAtr, 2) + "), burst " + F(BurstRatio(m), 2)
-                   + "x (need " + F(TickVelocityMultiplier, 2) + "), " + ai + (InSessionFor(m, now) ? "" : ", out of session")
+                   + "x (need " + F(TickVelocityMultiplier, 2) + (Math.Abs(seen - 1.0) >= 0.1 ? ", bot sees " + Pct(seen) + " of ticks" : "") + "), " + ai
+                   + (InSessionFor(m, now) ? "" : ", out of session")
                    + (m.SpreadWarning ? ", SPREAD TOO WIDE" : "") + ", today " + m.TradesToday;
         }
 
@@ -3010,7 +3050,7 @@ namespace cAlgo.Robots
                 + (TimeExitBars > 0 ? TimeExitBars + " bars" : "off"));
             Log("PARAMS filters: spread/ATR forex <= " + F(MaxSpreadToAtr, 2) + ", crypto <= " + F(CryptoMaxSpreadToAtr, 2) + " | cooldown " + CooldownSeconds
                 + "s | chase <= " + F(MaxChaseAtr, 2) + " ATR | tick velocity " + OnOff(UseTickVelocity) + " " + F(TickVelocityMultiplier, 2) + "x/"
-                + F(TickWindowSeconds, 1) + "s vs " + TickBaselineBars + " bars | squeeze " + (UseSqueeze ? SqueezeBars + " bars" : "off") + " | sweep "
+                + F(TickWindowSeconds, 1) + "s vs " + TickBaselineBars + " bars (at most " + F(TickBaselineMaxHours, 0) + " h) | squeeze " + (UseSqueeze ? SqueezeBars + " bars" : "off") + " | sweep "
                 + (UseSweep ? SweepLookbackBars + " bars" : "off"));
             Log("PARAMS AI: " + OnOff(UseAiFilter) + " | Min Confidence " + F(MinConfidence, 2) + " | window " + AiTrainingBars + " bars | min "
                 + AiMinSamplesPerClass + " per class | horizon " + AiHorizonBars + " bars | prior " + (AiUseEmpiricalPrior ? "empirical" : "balanced")
@@ -3261,6 +3301,7 @@ namespace cAlgo.Robots
         public TickCalibrator Calib;
         public SpreadTracker Spreads;
         public DateTime EngineStart;
+        public Bars CalBars;
         public DateTime CalBarOpen = DateTime.MinValue;
         public int CalBarTicks;
         public bool CalBarFull;
@@ -3947,6 +3988,20 @@ namespace cAlgo.Robots
             int minutes = unit == "m" ? n : unit == "h" ? n * 60 : n * 1440;
             int[] known = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 30, 45, 60, 120, 180, 240, 360, 480, 720, 1440 };
             return Array.IndexOf(known, minutes) >= 0 ? minutes : 0;
+        }
+
+        /// <summary>
+        /// Bars of a timeframe in a baseline of at most `bars` bars that covers no more than maxSeconds, but never
+        /// fewer than minBars (and never more than `bars`).
+        /// </summary>
+        public static int BaselineBars(int bars, double tfSeconds, double maxSeconds, int minBars)
+        {
+            if (bars < 1)
+                return 1;
+            if (!(tfSeconds > 0) || !(maxSeconds > 0))
+                return bars;
+            int cap = (int)Math.Ceiling(maxSeconds / tfSeconds - 1e-9);
+            return Math.Min(bars, Math.Max(minBars, cap));
         }
 
         /// <summary>

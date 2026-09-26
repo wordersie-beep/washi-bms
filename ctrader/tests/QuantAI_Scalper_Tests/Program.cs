@@ -144,6 +144,17 @@ namespace Harness
             Check(MarketMath.FirstFitting(new[] { 2.0, 1.2, double.PositiveInfinity }, 0.25) == -1, "ADA-like spread fits no timeframe");
             Check(MarketMath.FirstFitting(new[] { double.NaN, 0.2 }, 0.25) == 1, "unknown ATR never fits");
 
+            // Tick baseline: 100 bars, but at most the last 2 hours and never fewer than 2 bars.
+            Check(MarketMath.BaselineBars(100, 60, 7200, 2) == 100, "baseline m1: 100 bars as before");
+            Check(MarketMath.BaselineBars(100, 300, 7200, 2) == 24, "baseline m5: 24 bars = 2 h");
+            Check(MarketMath.BaselineBars(100, 900, 7200, 2) == 8, "baseline m15: 8 bars = 2 h");
+            Check(MarketMath.BaselineBars(100, 1800, 7200, 2) == 4, "baseline m30: 4 bars = 2 h");
+            Check(MarketMath.BaselineBars(100, 3600, 7200, 2) == 2, "baseline h1: 2 bars, not 100 (4 days)");
+            Check(MarketMath.BaselineBars(100, 14400, 7200, 2) == 2, "baseline h4: never fewer than 2 bars");
+            Check(MarketMath.BaselineBars(5, 60, 7200, 2) == 5, "baseline: a small setting is kept");
+            Check(MarketMath.BaselineBars(100, 0, 7200, 2) == 100, "baseline: unknown timeframe keeps the setting");
+            Check(MarketMath.BaselineBars(100, 1200, 7200, 2) == 6, "baseline m20: 6 bars = 2 h exactly");
+
             // Mean true range, including the gap from the previous close.
             double[] h = { 10, 12, 11, 15 };
             double[] l = { 9, 10, 10, 13 };
