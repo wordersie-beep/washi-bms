@@ -1621,7 +1621,7 @@ namespace Sim
             Rows.Sort((x, y) => string.CompareOrdinal(x.Title, y.Title));
             int ok = Rows.Count(r => r.Ok);
             sb.Append("<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-            sb.Append("<title>Проверка QuantAI Scalper</title><style>");
+            sb.Append("<title>Проверка QuantAI " + H((string)typeof(QuantAI_Scalper_24x7_V3).GetField("BotVersion", BindingFlags.Static | BindingFlags.NonPublic).GetRawConstantValue()) + "</title><style>");
             sb.Append(":root{--bg:#0f1115;--card:#171a21;--line:#262b35;--text:#e8eaf0;--muted:#9aa3b2;--ok:#3ecf8e;--bad:#ff6b6b}");
             sb.Append("*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;padding:16px}");
             sb.Append("h1{font-size:20px;margin:0 0 4px}p.sub{color:var(--muted);margin:0 0 14px}");
@@ -1629,7 +1629,8 @@ namespace Sim
             sb.Append(".pill b{display:block;font-size:20px}.row{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}");
             sb.Append(".t{display:flex;justify-content:space-between;gap:8px;font-weight:600}.ok{color:var(--ok)}.bad{color:var(--bad)}.c{color:var(--muted);margin-top:4px}");
             sb.Append(".m{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:13px;color:var(--muted)}.m span b{color:var(--text)}</style></head><body>");
-            sb.Append("<h1>QuantAI_Scalper_24x7_V3 — проверка перед выдачей</h1>");
+            string botVersion = (string)typeof(QuantAI_Scalper_24x7_V3).GetField("BotVersion", BindingFlags.Static | BindingFlags.NonPublic).GetRawConstantValue();
+            sb.Append("<h1>" + H(QuantAI_Scalper_24x7_V3.BotName) + " (v" + H(botVersion) + ") — проверка перед выдачей</h1>");
             sb.Append("<p class=\"sub\">Настоящий код бота на подменённой платформе cTrader, синтетический рынок. Проверяется механика, не прибыльность.</p>");
             sb.Append("<div class=\"sum\"><div class=\"pill\"><b class=\"" + (ok == Rows.Count ? "ok" : "bad") + "\">" + ok + " / " + Rows.Count + "</b>сценариев без ошибок</div>");
             sb.Append("<div class=\"pill\"><b>" + Rows.Sum(r => r.Entries) + "</b>сделок открыто</div>");

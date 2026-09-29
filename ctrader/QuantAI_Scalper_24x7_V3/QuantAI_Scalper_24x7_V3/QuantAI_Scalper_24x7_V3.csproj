@@ -1,6 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!--
-    Build outside cTrader:  dotnet build -c Release   ->  bin/Release/net6.0/QuantAI_Scalper_24x7_V3.algo
+    Build outside cTrader:  dotnet build -c Release   ->  bin/Release/net6.0/QuantAI_Scalper_24x7_V3.algo (development).
+    Releases come from ../build_release.sh: it lays the source out the way cTrader does (Name/Name/Name.csproj) under
+    the versioned name QuantAI_Scalper_24x7_V3_x_y_z, so the .algo file, its assembly and the cBot carry the version
+    and every version installs as its own cBot.
     The API is pinned to cTrader.Automate 1.0.9 (cTrader 5.0), the first release with Robot.DefaultSymbolName /
     DefaultTimeFrame, so the .algo opens in every cTrader 5 app (Windows, Mac, Web, Mobile) and in the cloud.
     cTrader itself keeps its own project file when the source is pasted into its editor.

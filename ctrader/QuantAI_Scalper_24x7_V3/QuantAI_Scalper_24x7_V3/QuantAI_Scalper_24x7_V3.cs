@@ -1,14 +1,17 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.4.1
-//  cTrader Automate cBot | multi-market micro-impulse scalper for small budgets, trading around the clock
-//    - crypto 24/7 (weekends included), Forex whenever its market is open
-//    - ONE instance trades every symbol of two lists (a demo account allows one cloud instance)
-//    - sized for a 20-200 EUR budget (200 by default): minimum volumes, margin checked by the largest of three estimates,
-//      markets the budget cannot carry are left out at start with the budget they would need
+//  QuantAI_Scalper_24x7_V3  v3.5.1   (installs in cTrader as QuantAI_Scalper_24x7_V3_5_1, see build_release.sh)
+//  cTrader Automate cBot | multi-market bot for small budgets (from 50 EUR), trading around the clock
+//    - Strategy = Trend (default): Turtle-style breakouts on daily crypto bars - entry beyond the 20-bar high/low,
+//      stop 2 x ATR sized to Risk Percent, exit on the 10-bar channel, no target, positions held through breaks.
+//      Checked on real quotes before release (README: "Проверка на реальных котировках").
+//    - Strategy = Scalper: the micro-impulse engine described below (crypto 24/7, Forex whenever open).
+//    - ONE instance trades every symbol of its lists (a demo account allows one cloud instance)
+//    - sized for a 50-200 EUR budget (200 by default): minimum volumes, margin checked by the largest of three estimates,
+//      a minimum volume that would risk more than Max Risk With Min Volume waits for a bigger budget
 //  Needs cTrader 5.0+ (Algo API 1.0.9+): Windows, Mac, Web and Mobile, local or cloud. C# 7.3 syntax only.
 //  Ready to run: every parameter below already holds its working value.
 // -----------------------------------------------------------------------------------------------------
-//  ENGINE (per symbol)
+//  SCALPER ENGINE (per symbol, Strategy = Scalper)
 //   1. Timeframe             The fastest timeframe of the symbol's list whose typical cost (spread + commission) fits Max Cost / ATR
 //                            (ATR averaged over the last 24 hours). Chosen at start, confirmed on the live spread.
 //   2. Tick Velocity Engine  Ticks in a sliding window (default 3 s) against the average tick rate of the
@@ -60,10 +63,16 @@ namespace cAlgo.Robots
         Trend
     }
 
-    [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
+    [Robot(QuantAI_Scalper_24x7_V3.BotName, TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.5.0";
+        private const string BotVersion = "3.5.1";
+
+        /// <summary>
+        /// The cBot's name in cTrader carries its version, the same as the assembly name in the .csproj: every version
+        /// installs as a separate cBot and never overwrites the one that is running. Raise both with every change.
+        /// </summary>
+        public const string BotName = "QuantAI_Scalper_24x7_V3_5_1";
 
         private bool TrendMode
         {
@@ -3496,7 +3505,7 @@ namespace cAlgo.Robots
         private void LogBanner()
         {
             double equity = BotEquity();
-            Log("=== QuantAI_Scalper_24x7_V3 v" + BotVersion + " | broker " + (string.IsNullOrEmpty(Account.BrokerName) ? "?" : Account.BrokerName)
+            Log("=== " + BotName + " v" + BotVersion + " | broker " + (string.IsNullOrEmpty(Account.BrokerName) ? "?" : Account.BrokerName)
                 + " " + (Account.IsLive ? "LIVE" : "DEMO") + " " + Account.AccountType + " | balance " + F(Account.Balance, 2) + " " + _ccy
                 + " | leverage 1:" + F(Account.PreciseLeverage, 0) + " | mode " + RunningMode + " ===");
             Log("PARAMS budget: " + (BotBudget > 0 ? F(BotBudget, 2) + " " + _ccy + " -> budget equity " + F(equity, 2) + " (" + _budgetNote

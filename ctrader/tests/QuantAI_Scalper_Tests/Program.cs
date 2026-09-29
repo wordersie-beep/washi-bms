@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using cAlgo.Robots;
 
 namespace Harness
@@ -31,6 +32,7 @@ namespace Harness
             SpreadTests();
             CommissionTests();
             TrendTests();
+            VersionTests();
             VolumeTests();
             SqueezeTests();
             SweepTests();
@@ -421,6 +423,82 @@ namespace Harness
             rt = CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerMillionUsd, 30, 0.85, 100000, 1.27, false, false, true);
             Near(rt, 2 * 30 / 1e6 * 0.85 * 1.27, 1e-15, "USD account: notional converted through the quote currency");
             Check(CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerLot, 0, eurusd, 100000, usdToEur, true, false, false) == 0, "no commission (Standard account)");
+        }
+
+        /// <summary>A file of the repository found by walking up from the test binaries (null when it is missing).</summary>
+        private static string RepoFile(string relative)
+        {
+            string dir = AppContext.BaseDirectory;
+            for (int i = 0; i < 10 && !string.IsNullOrEmpty(dir); i++, dir = System.IO.Path.GetDirectoryName(dir))
+            {
+                string candidate = System.IO.Path.Combine(dir, relative);
+                if (System.IO.File.Exists(candidate))
+                    return candidate;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Every change is a new version: the version in the code, the cBot name, the assembly name (cTrader names an
+        /// installed cBot after it), the newest changelog entry and the release file must all carry the same number.
+        /// </summary>
+        private static void VersionTests()
+        {
+            var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+            string version = (string)typeof(QuantAI_Scalper_24x7_V3).GetField("BotVersion", flags).GetRawConstantValue();
+            string expected = "QuantAI_Scalper_24x7_V" + version.Replace('.', '_');
+            Check(QuantAI_Scalper_24x7_V3.BotName == expected, "the cBot name carries the version " + version + " (" + QuantAI_Scalper_24x7_V3.BotName + ")");
+            var robot = (cAlgo.API.RobotAttribute)Attribute.GetCustomAttribute(typeof(QuantAI_Scalper_24x7_V3), typeof(cAlgo.API.RobotAttribute));
+            Check(robot != null && robot.Name == QuantAI_Scalper_24x7_V3.BotName, "the Robot attribute uses the versioned name");
+
+            string source = RepoFile("QuantAI_Scalper_24x7_V3/QuantAI_Scalper_24x7_V3/QuantAI_Scalper_24x7_V3.cs");
+            string header = source == null ? null : System.IO.File.ReadLines(source).Skip(1).FirstOrDefault();
+            Check(header != null && header.Contains(" v" + version + " "), "the source header names v" + version + " (" + header + ")");
+
+            string changelog = RepoFile("QuantAI_Scalper_24x7_V3/CHANGELOG.md");
+            string newest = null;
+            if (changelog != null)
+                foreach (string line in System.IO.File.ReadLines(changelog))
+                    if (line.StartsWith("## ")) { newest = line; break; }
+            Check(newest != null && newest.StartsWith("## " + version + " "), "the newest CHANGELOG entry is " + version + " (" + newest + ")");
+
+            // The release file: every name cTrader could show - file, assembly, type, friendly name - carries the version.
+            string release = RepoFile("QuantAI_Scalper_24x7_V3/release/" + expected + ".algo");
+            Check(release != null, "release/" + expected + ".algo exists");
+            string meta = release == null ? "" : AlgoMetadata(release);
+            Check(meta.Contains("\"AssemblyName\": \"" + expected + ",") || meta.Contains("\"AssemblyName\":\"" + expected + ","), "the release .algo is the assembly " + expected);
+            Check(meta.Contains("cAlgo.Robots." + expected + "\""), "the release .algo holds the type cAlgo.Robots." + expected);
+            Check(System.Text.RegularExpressions.Regex.IsMatch(meta, "\"FriendlyName\":\\s*\"" + expected + "\""), "the release .algo shows the name " + expected);
+            Check(System.Text.RegularExpressions.Regex.IsMatch(meta, "\"ApiVersion\":\\s*\"1\\.0\\.9\""), "the release .algo targets API 1.0.9 (every cTrader 5 app)");
+        }
+
+        /// <summary>The JSON metadata of an .algo file: the gzip stream after the header.</summary>
+        private static string AlgoMetadata(string path)
+        {
+            byte[] bytes = System.IO.File.ReadAllBytes(path);
+            int start = -1;
+            for (int i = 0; i + 1 < bytes.Length; i++)
+                if (bytes[i] == 0x1f && bytes[i + 1] == 0x8b) { start = i; break; }
+            if (start < 0)
+                return "";
+            using (var input = new System.IO.MemoryStream(bytes, start, bytes.Length - start))
+            using (var gz = new System.IO.Compression.GZipStream(input, System.IO.Compression.CompressionMode.Decompress))
+            using (var reader = new System.IO.StreamReader(gz, System.Text.Encoding.UTF8))
+            {
+                var sb = new System.Text.StringBuilder();
+                var buffer = new char[4096];
+                try
+                {
+                    int n;
+                    while ((n = reader.Read(buffer, 0, buffer.Length)) > 0)
+                        sb.Append(buffer, 0, n);
+                }
+                catch (System.IO.InvalidDataException)
+                {
+                    // the metadata is followed by the encrypted assembly; what was read is the JSON
+                }
+                return sb.ToString();
+            }
         }
 
         private static void TrendTests()
