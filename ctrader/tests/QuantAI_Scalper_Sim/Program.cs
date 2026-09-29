@@ -1529,6 +1529,37 @@ namespace Sim
         }
 
 
+        /// <summary>A Pepperstone coin for the all-coins scenario: price and spread as quoted in 2026, daily move in percent.</summary>
+        private static Spec Coin(string name, double price, double spread, double dailyMovePct, double pip, int digits, double vmin)
+        {
+            double sigmaMinute = price * dailyMovePct / 100.0 * 1.25 / Math.Sqrt(1440.0);
+            return new Spec { Name = name, Crypto = true, Price = price, Pip = pip, Digits = digits, Lot = 1, VMin = vmin, VStep = vmin, VMax = vmin * 1e6, Spread = spread,
+                              Leverage = 2, Base = name.Replace("USD", ""), Quote = "USD", TickRate = 0.4, SigmaMinute = sigmaMinute, BrokerMarginNaN = false,
+                              SwapLongPerYear = -0.20, SwapShortPerYear = -0.075 };
+        }
+
+        /// <summary>Every other Pepperstone coin (prices of May 2026 from CoinMetrics, spreads from the Pepperstone EU cost sheet or 0.5%).</summary>
+        private static void AllCoinSpecs(List<Spec> specs)
+        {
+            RealCryptoSpecs(specs);
+            specs.Add(Coin("ADAUSD", 0.2458, 0.007, 2.06, 0.0001, 5, 10));
+            specs.Add(Coin("LINKUSD", 9.556, 0.0373, 2.04, 0.001, 3, 1));
+            specs.Add(Coin("DOTUSD", 1.291, 0.0503, 2.07, 0.001, 3, 1));
+            specs.Add(Coin("DOGEUSD", 0.10298, 0.0013, 1.78, 0.00001, 5, 100));
+            specs.Add(Coin("XLMUSD", 0.14777, 0.0045, 2.0, 0.00001, 5, 100));
+            specs.Add(Coin("UNIUSD", 3.4576, 0.0817, 2.52, 0.001, 3, 1));
+            specs.Add(Coin("EOSUSD", 0.08078, 0.0004, 4.68, 0.00001, 5, 100));
+            specs.Add(Coin("XTZUSD", 0.3449, 0.0017, 2.23, 0.0001, 4, 10));
+            specs.Add(Coin("BNBUSD", 655.8, 3.3, 1.29, 0.01, 2, 0.01));
+            specs.Add(Coin("DASHUSD", 45.99, 0.23, 4.22, 0.01, 2, 0.1));
+            specs.Add(Coin("POLUSD", 0.20, 0.001, 3.0, 0.00001, 5, 100));
+            specs.Add(Coin("AVAXUSD", 18.0, 0.09, 3.0, 0.001, 3, 0.1));
+            specs.Add(Coin("TRXUSD", 0.3625, 0.0018, 0.68, 0.00001, 5, 100));
+            specs.Add(Coin("ATOMUSD", 4.0, 0.02, 3.0, 0.001, 3, 1));
+            specs.Add(Coin("PEPEUSD", 0.0000095, 0.0000000475, 4.0, 0.000000001, 10, 1000000));
+            specs.Add(Coin("BONKUSD", 0.000018, 0.00000009, 4.5, 0.000000001, 10, 1000000));
+        }
+
         /// <summary>An S&amp;P 500 CFD like Pepperstone's US500: 0.1 lot minimum, 1:20, spread 0.4; sigma sets how volatile the synthetic market is.</summary>
         private static Spec Us500(double sigmaMinute)
         {
@@ -2586,6 +2617,26 @@ namespace Sim
             if (!vOk) vw.Violations.Add("a recovered last-half-hour position was not closed at 15:59 New York");
             if (!wOk) ww.Violations.Add("a last-half-hour position from yesterday was not closed at once");
 
+            // 24. 'Add All Pepperstone Coins' on the real 197.95 EUR account: every coin starts or is skipped with its reason,
+            // the tiny-priced ones (PEPE, BONK) work, the wide spreads (ADA, DOT, XLM, UNI, DOGE: 1.3-3.9%) never trade,
+            // at most 8 positions, more trend entries than the default list (scenario S).
+            World xw = Scenario("X: all Pepperstone coins switched on, 197.95 EUR account", 29, sStart, TimeSpan.FromDays(7),
+                     b => { b.AddAllCoins = true; }, 197.95, Path.Combine(dir, "logX.txt"), AllCoinSpecs, chart: DefaultChart);
+            int xMarkets = xw.Log.Count(x => System.Text.RegularExpressions.Regex.IsMatch(x, @"MARKET \S+: crypto D1"));
+            int xEntries = xw.Log.Count(x => x.Contains(" ENTRY TRD "));
+            string[] xWide = { "ADAUSD", "DOTUSD", "XLMUSD", "UNIUSD", "DOGEUSD" };
+            var xWideTraded = xWide.Where(c => xw.Log.Any(x => x.Contains(c + " ENTRY"))).ToList();
+            bool xTiny = xw.Log.Any(x => x.Contains("MARKET PEPEUSD")) && xw.Log.Any(x => x.Contains("MARKET BONKUSD")) && !xw.Log.Any(x => x.Contains("could not start"));
+            int xMaxPos = xw.Log.Select(x => System.Text.RegularExpressions.Regex.Match(x, @"positions (\d+)/8")).Where(x => x.Success).Select(x => int.Parse(x.Groups[1].Value)).DefaultIfEmpty(0).Max();
+            var xTradedCoins = new HashSet<string>(xw.Log.Where(x => x.Contains(" ENTRY TRD ")).Select(x => x.Split('|')[1].Trim().Split(' ')[0]));
+            Console.WriteLine("X crypto markets " + xMarkets + " | entries " + xEntries + " (default list S: " + sEntries + ") on " + string.Join(", ", xTradedCoins.OrderBy(x => x))
+                              + " | wide-spread coins traded: " + (xWideTraded.Count > 0 ? string.Join(",", xWideTraded) : "none") + " | PEPE/BONK ok " + xTiny + " | max positions " + xMaxPos);
+            if (xMarkets < 12) xw.Violations.Add("only " + xMarkets + " crypto markets started with all coins on");
+            if (xWideTraded.Count > 0) xw.Violations.Add("a coin with a 1.3-3.9% spread traded: " + string.Join(",", xWideTraded));
+            if (!xTiny) xw.Violations.Add("PEPE/BONK did not start cleanly");
+            if (xMaxPos > 8) xw.Violations.Add(xMaxPos + " positions at once (max 8)");
+            if (xEntries <= sEntries) xw.Violations.Add("all coins made no more entries (" + xEntries + ") than the default list (" + sEntries + ")");
+
             string[] checks =
             {
                 "Выходные, бюджет 50 EUR: только крипта, выбор таймфрейма, суточный и субботний перерывы",
@@ -2610,7 +2661,8 @@ namespace Sim
                 "То же, но все настройки групп «Scalper Only» изменены: сделки тренда совпадают до цента",
                 "Как установлено + US500 на волатильной неделе: последние полчаса рядом с трендом, вход 15:30, выход 15:59 Нью-Йорка",
                 "Перезапуск с позицией последнего получаса: подхвачена и закрыта в 15:59 Нью-Йорка",
-                "Позиция последнего получаса со вчерашнего дня: закрыта сразу"
+                "Позиция последнего получаса со вчерашнего дня: закрыта сразу",
+                "Все монеты Pepperstone (переключатель): монеты с широким спредом не торгуются, PEPE/BONK работают, не больше 8 позиций"
             };
             string[] notes =
             {
@@ -2644,12 +2696,14 @@ namespace Sim
                 "сделок US500: " + uEntries.Count + ", стоп сужен под бюджет: " + uTight + ", наибольший риск " + (uRisk.Count > 0 ? uRisk.Max().ToString("F2", CultureInfo.InvariantCulture) : "—")
                     + " %, входов тренда: " + uTrend,
                 "закрыта в " + (vClose != null ? vClose.Time.ToString("HH:mm", CultureInfo.InvariantCulture) : "—") + " UTC (15:59 Нью-Йорка = 19:59 UTC)",
-                "закрыта в " + (wClose != null ? wClose.Time.ToString("HH:mm", CultureInfo.InvariantCulture) : "—") + " UTC, при старте в 14:00"
+                "закрыта в " + (wClose != null ? wClose.Time.ToString("HH:mm", CultureInfo.InvariantCulture) : "—") + " UTC, при старте в 14:00",
+                "рынков крипты: " + xMarkets + ", входов за неделю: " + xEntries + " (со списком по умолчанию " + sEntries + "), наибольшее число позиций: " + xMaxPos
+                    + ", монеты с широким спредом: " + (xWideTraded.Count > 0 ? "торговались" : "не торговались")
             };
-            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw, uw, vw, ww };
-            // Scenario order in Rows follows the calls: A B C D E F H G I J K L M N O P Q R S T U V W.
-            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W" };
-            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W" };
+            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw, uw, vw, ww, xw };
+            // Scenario order in Rows follows the calls: A B C D E F H G I J K L M N O P Q R S T U V W X.
+            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X" };
+            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X" };
             for (int k = 0; k < Rows.Count && k < order.Length; k++)
             {
                 int idx = Array.IndexOf(letters, order[k]);
@@ -2663,7 +2717,7 @@ namespace Sim
             Console.WriteLine();
             Console.WriteLine("Unknown API members used by the bot (not mocked):");
             foreach (var kv in Mk.Unknown.OrderByDescending(k => k.Value)) Console.WriteLine("  " + kv.Key + " x" + kv.Value);
-            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw, uw, vw, ww }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
+            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw, uw, vw, ww, xw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
             Console.WriteLine(ok ? "SIMULATION OK" : "SIMULATION FOUND PROBLEMS");
             return ok ? 0 : 1;
         }

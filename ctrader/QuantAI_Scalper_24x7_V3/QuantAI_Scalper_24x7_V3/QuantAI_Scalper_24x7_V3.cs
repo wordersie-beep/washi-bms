@@ -1,9 +1,11 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.7.0   (installs in cTrader as QuantAI_TrendIntraday_24x7_V3_7_0, see build_release.sh)
+//  QuantAI_Scalper_24x7_V3  v3.8.0   (installs in cTrader as QuantAI_TrendIntraday_24x7_V3_8_0, see build_release.sh)
 //  cTrader Automate cBot | small budgets (from 50 EUR): daily trend on crypto 24/7 + the last half hour of the US session
 //    - Strategy = Trend (default): Turtle System 1 on daily bars - entry beyond the 20-bar high/low, stop 2 x ATR
 //      sized to Risk Percent, exit on the 10-bar channel, no target, positions held through market breaks.
 //      Checked on real quotes before release (README: "Проверка на реальных котировках"). Settings: groups 1-2, 4-6.
+//      'Add All Pepperstone Coins' (off by default) adds every other Pepperstone coin: about twice the trades, but on real
+//      2022-2026 prices the wider list lost where the default one broke even (README: "Все монеты").
 //    - Last half hour (US500, on by default, group 3): at 15:30 New York the bot trades in the direction of the move
 //      since the previous 16:00 close when the market is volatile (20-day volatility >= 15%) and the move is large
 //      (>= 0.5 daily sd), and closes at 15:59 - dealers hedging options push the close the same way (Baltussen et al.
@@ -72,14 +74,14 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "XRPUSD", DefaultTimeFrame = "D1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.7.0";
+        private const string BotVersion = "3.8.0";
 
         /// <summary>
         /// The cBot's name in cTrader, with its version: build_release.sh gives the class and the assembly this name (the
         /// Robot attribute's name constructor is obsolete - cTrader names a cBot after its assembly and class), so every
         /// version installs as a separate cBot and never overwrites the one that is running. Raise it with every change.
         /// </summary>
-        public const string BotName = "QuantAI_TrendIntraday_24x7_V3_7_0";
+        public const string BotName = "QuantAI_TrendIntraday_24x7_V3_8_0";
 
         private bool TrendMode
         {
@@ -98,6 +100,9 @@ namespace cAlgo.Robots
 
         [Parameter("Crypto Symbols (24/7)", Group = "1. Main", DefaultValue = "BTCUSD,ETHUSD,SOLUSD,XRPUSD,LTCUSD,BCHUSD")]
         public string CryptoSymbols { get; set; }
+
+        [Parameter("Add All Pepperstone Coins (2x trades, see README)", Group = "1. Main", DefaultValue = false)]
+        public bool AddAllCoins { get; set; }
 
         [Parameter("Max Open Positions", Group = "1. Main", DefaultValue = 8, MinValue = 1)]
         public int MaxOpenPositions { get; set; }
@@ -380,6 +385,10 @@ namespace cAlgo.Robots
         private const int TrendHistoryBars = 300;             // bars a trend market loads (channel and ATR need far fewer than the AI)
         private const string TrendSetup = "TRD";
         private const string IndexSetup = "LHH";                // last half hour of the New York session
+        // Every other coin Pepperstone lists as a crypto CFD (2026) with the names it may carry; what an account lacks is skipped,
+        // and a coin whose spread is too wide for its daily range never passes the cost check (ADA, DOT, XLM, UNI: 2-4% spreads).
+        private const string AllPepperstoneCoins = "ADAUSD,LINKUSD|LNKUSD,DOTUSD,DOGEUSD,XLMUSD,UNIUSD,EOSUSD,XTZUSD,BNBUSD,DASHUSD|DSHUSD,"
+                                                   + "POLUSD|MATICUSD,AVAXUSD,TRXUSD,ATOMUSD,PEPEUSD|1000PEPEUSD,BONKUSD|1000BONKUSD";
         private const int IndexEntryMinuteNy = 15 * 60 + 30;    // 15:30 New York: the signal is read and the trade opens
         private const int IndexExitMinuteNy = 15 * 60 + 59;     // 15:59 New York: the trade closes, before the 16:00 close
         private const int IndexCloses = 21;                     // daily 16:00 closes: 20 returns for the volatility
@@ -477,7 +486,7 @@ namespace cAlgo.Robots
             RestoreToday(Server.Time);
             LogBanner();
 
-            List<string> crypto = MarketMath.ParseSymbols(CryptoSymbols);
+            List<string> crypto = CryptoListInUse();
             var cryptoKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (string item in crypto)
             {
@@ -575,6 +584,27 @@ namespace cAlgo.Robots
             }
         }
 
+        /// <summary>The crypto list this run trades: Crypto Symbols, plus every other Pepperstone coin when 'Add All Pepperstone Coins' is on.</summary>
+        private List<string> CryptoListInUse()
+        {
+            List<string> list = MarketMath.ParseSymbols(CryptoSymbols);
+            if (!AddAllCoins)
+                return list;
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (string item in list)
+                foreach (string alt in MarketMath.Alternatives(item))
+                    keys.Add(MarketMath.SymbolKey(alt));
+            foreach (string item in MarketMath.ParseSymbols(AllPepperstoneCoins))
+            {
+                bool known = false;
+                foreach (string alt in MarketMath.Alternatives(item))
+                    known |= keys.Contains(MarketMath.SymbolKey(alt));
+                if (!known)
+                    list.Add(item);
+            }
+            return list;
+        }
+
         /// <summary>The Forex list this run trades: the trend mode leaves Forex out unless told otherwise (no edge was found there).</summary>
         private List<string> FxListInUse()
         {
@@ -588,7 +618,7 @@ namespace cAlgo.Robots
             if (string.IsNullOrWhiteSpace(BotLabel))
                 return "Position Label is empty";
             bool hasFx = FxListInUse().Count > 0;
-            bool hasCrypto = MarketMath.ParseSymbols(CryptoSymbols).Count > 0;
+            bool hasCrypto = CryptoListInUse().Count > 0;
             bool hasIndex = IndexEnabled && MarketMath.ParseSymbols(IndexSymbols).Count > 0;
             if (IndexEnabled && IndexMinStopSd > IndexStopSd)
                 return "'Tightest Stop To Fit The Budget' (" + F(IndexMinStopSd, 1) + ") is wider than the last-half-hour 'Stop' (" + F(IndexStopSd, 1) + ")";
@@ -3336,7 +3366,7 @@ namespace cAlgo.Robots
         private bool LooksLikeCrypto(string symbolName)
         {
             string key = MarketMath.SymbolKey(symbolName);
-            foreach (string item in MarketMath.ParseSymbols(CryptoSymbols))
+            foreach (string item in CryptoListInUse())
             {
                 foreach (string alt in MarketMath.Alternatives(item))
                 {
@@ -3881,7 +3911,7 @@ namespace cAlgo.Robots
                 + F(equity * MaxTotalMarginPercent / 100.0, 2) + " " + _ccy + ") | margin leverage forex " + (LeverageOverride > 0 ? "1:" + F(LeverageOverride, 0) : "broker")
                 + ", crypto " + (CryptoLeverageOverride > 0 ? "1:" + F(CryptoLeverageOverride, 0) : "broker"));
             Log("PARAMS markets: " + (TrendMode
-                    ? "crypto [" + CryptoSymbols + "]" + (TrendIncludeForex ? " + forex [" + FxSymbols + "]" : ", forex off (no trend edge found there)") + " on " + TrendTimeFrames
+                    ? "crypto [" + CryptoSymbols + "]" + (AddAllCoins ? " + all Pepperstone coins (" + (CryptoListInUse().Count - MarketMath.ParseSymbols(CryptoSymbols).Count) + " more)" : "") + (TrendIncludeForex ? " + forex [" + FxSymbols + "]" : ", forex off (no trend edge found there)") + " on " + TrendTimeFrames
                     : "forex [" + FxSymbols + "] on " + FxTimeFrames + (UseSessionFilter ? ", session " + SessionStartHour + "-" + SessionEndHour + " UTC" : ", whenever open")
                       + " | crypto [" + CryptoSymbols + "] on " + CryptoTimeFrames + (CryptoIgnoresSession ? " 24/7" : " in session"))
                 + " | max " + MaxOpenPositions + " positions | flat before breaks > " + (FlatBeforeBreakMinutes > 0 ? FlatBeforeBreakMinutes + " min" : "off")
