@@ -53,14 +53,29 @@ namespace cAlgo.Robots
         TrailWholePosition
     }
 
+    /// <summary>Scalper: the original micro-impulse rules. Trend: channel breakouts in the manner of the Turtle traders.</summary>
+    public enum StrategyMode
+    {
+        Scalper,
+        Trend
+    }
+
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "EURUSD", DefaultTimeFrame = "M1")]
     public class QuantAI_Scalper_24x7_V3 : Robot
     {
-        private const string BotVersion = "3.4.1";
+        private const string BotVersion = "3.5.0";
+
+        private bool TrendMode
+        {
+            get { return Strategy == StrategyMode.Trend; }
+        }
 
         #region Parameters
 
         // ---- 0. Budget and markets ---------------------------------------------------------------------
+
+        [Parameter("Strategy", Group = "0. Budget & Markets", DefaultValue = StrategyMode.Trend)]
+        public StrategyMode Strategy { get; set; }
 
         [Parameter("Bot Budget (account ccy, 0 = whole account)", Group = "0. Budget & Markets", DefaultValue = 200.0, MinValue = 0.0, Step = 10.0)]
         public double BotBudget { get; set; }
@@ -108,6 +123,9 @@ namespace cAlgo.Robots
 
         [Parameter("Use Min Volume If Size Is Smaller", Group = "1. Risk & Money", DefaultValue = true)]
         public bool AllowMinLotOverride { get; set; }
+
+        [Parameter("Max Risk With Min Volume (% of budget)", Group = "1. Risk & Money", DefaultValue = 3.0, MinValue = 0.1, Step = 0.5)]
+        public double MaxMinVolumeRiskPercent { get; set; }
 
         [Parameter("Margin Per Trade (% of free budget)", Group = "1. Risk & Money", DefaultValue = 30.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
         public double MarginPerTradePercent { get; set; }
@@ -274,6 +292,27 @@ namespace cAlgo.Robots
 
         // ---- 7. Log and display ------------------------------------------------------------------------
 
+        [Parameter("Trend TimeFrames (fastest first)", Group = "8. Trend Following", DefaultValue = "d1")]
+        public string TrendTimeFrames { get; set; }
+
+        [Parameter("Trade Forex Too (not validated)", Group = "8. Trend Following", DefaultValue = false)]
+        public bool TrendIncludeForex { get; set; }
+
+        [Parameter("Trend Max Cost / ATR (spread + commission)", Group = "8. Trend Following", DefaultValue = 0.15, MinValue = 0.0, Step = 0.01)]
+        public double TrendMaxCostToAtr { get; set; }
+
+        [Parameter("Breakout Bars (entry channel)", Group = "8. Trend Following", DefaultValue = 20, MinValue = 2)]
+        public int TrendEntryBars { get; set; }
+
+        [Parameter("Exit Bars (trailing channel)", Group = "8. Trend Following", DefaultValue = 10, MinValue = 2)]
+        public int TrendExitBars { get; set; }
+
+        [Parameter("Stop (x ATR)", Group = "8. Trend Following", DefaultValue = 2.0, MinValue = 0.1, Step = 0.1)]
+        public double TrendStopAtr { get; set; }
+
+        [Parameter("Hold Through Market Breaks", Group = "8. Trend Following", DefaultValue = true)]
+        public bool TrendHoldThroughBreaks { get; set; }
+
         [Parameter("Position Label", Group = "7. Log & Display", DefaultValue = "QuantAI_M1")]
         public string BotLabel { get; set; }
 
@@ -306,6 +345,8 @@ namespace cAlgo.Robots
         private const double CommissionRecheckShare = 0.25;   // a fill commission this far from the estimate re-checks timeframe and AI
         private const double ScratchBand = 0.01;              // a closed trade within this much of zero (account ccy) is a scratch in RESULTS
         private const int VerdictMinTrades = 100;             // RESULTS judge the strategy only after this many closed trades
+        private const int TrendHistoryBars = 300;             // bars a trend market loads (channel and ATR need far fewer than the AI)
+        private const string TrendSetup = "TRD";
         private const int SpreadWindowTicks = 500;            // spreads kept for the rolling median
         private const int SpreadCalibrationTicks = 300;       // ticks before the timeframe and the AI are fitted to the live spread
         private const double SpreadSettleMinutes = 10.0;      // spreads right after a market (re)opens are not typical and are not sampled
@@ -403,7 +444,7 @@ namespace cAlgo.Robots
                 foreach (string alt in MarketMath.Alternatives(item))
                     cryptoKeys.Add(MarketMath.SymbolKey(alt));
             }
-            foreach (string item in MarketMath.ParseSymbols(FxSymbols))
+            foreach (string item in FxListInUse())
             {
                 bool listedAsCrypto = false;
                 foreach (string alt in MarketMath.Alternatives(item))
@@ -486,16 +527,24 @@ namespace cAlgo.Robots
             }
         }
 
+        /// <summary>The Forex list this run trades: the trend mode leaves Forex out unless told otherwise (no edge was found there).</summary>
+        private List<string> FxListInUse()
+        {
+            return TrendMode && !TrendIncludeForex ? new List<string>() : MarketMath.ParseSymbols(FxSymbols);
+        }
+
         private string ValidateParameters()
         {
             if (MinLots > 0 && MinLots > MaxLots)
                 return "Min Lots (" + F(MinLots, 2) + ") is greater than Max Lots (" + F(MaxLots, 2) + ")";
             if (string.IsNullOrWhiteSpace(BotLabel))
                 return "Position Label is empty";
-            bool hasFx = MarketMath.ParseSymbols(FxSymbols).Count > 0;
+            bool hasFx = FxListInUse().Count > 0;
             bool hasCrypto = MarketMath.ParseSymbols(CryptoSymbols).Count > 0;
             if (!hasFx && !hasCrypto)
-                return "both symbol lists are empty";
+                return TrendMode && !TrendIncludeForex ? "'Crypto Symbols' is empty (the trend mode trades Forex only with 'Trade Forex Too')" : "both symbol lists are empty";
+            if (TrendMode)
+                return TimeFrameList(TrendTimeFrames).Count == 0 ? "'Trend TimeFrames' has no valid timeframe (use h1, h4, d1)" : null;
             if (hasFx && TimeFrameList(FxTimeFrames).Count == 0)
                 return "'Forex TimeFrames' has no valid timeframe (use m1, m5, m15, m30, h1, h4)";
             if (hasCrypto && TimeFrameList(CryptoTimeFrames).Count == 0)
@@ -555,8 +604,8 @@ namespace cAlgo.Robots
                 m.IsCrypto = isCrypto;
                 m.ManageOnly = manageOnly;
                 m.IsChart = string.Equals(name, SymbolName, StringComparison.OrdinalIgnoreCase);
-                m.MaxSpreadToAtr = isCrypto ? CryptoMaxSpreadToAtr : MaxSpreadToAtr;
-                m.Candidates = TimeFrameList(isCrypto ? CryptoTimeFrames : FxTimeFrames);
+                m.MaxSpreadToAtr = TrendMode ? TrendMaxCostToAtr : (isCrypto ? CryptoMaxSpreadToAtr : MaxSpreadToAtr);
+                m.Candidates = TimeFrameList(TrendMode ? TrendTimeFrames : (isCrypto ? CryptoTimeFrames : FxTimeFrames));
 
                 Bars probe = MarketData.GetBars(m.Candidates[0], name);
                 m.LastPrice = sym.Bid > 0 ? sym.Bid : (probe.Count > 0 ? probe.ClosePrices[probe.Count - 1] : 0.0);
@@ -588,7 +637,7 @@ namespace cAlgo.Robots
 
                 m.Ticks = new TickVelocityEngine(Math.Max(TickWindowSeconds, TickRateWindowCapSeconds) + 5.0);
                 m.Calib = new TickCalibrator(CalibrationWindowBars);
-                m.CalBars = MarketData.GetBars(TimeFrame.Minute, name);
+                m.CalBars = TrendMode ? null : MarketData.GetBars(TimeFrame.Minute, name);   // only the tick filter needs M1
                 m.Spreads = new SpreadTracker(SpreadWindowTicks);
                 m.EngineStart = Server.Time;
                 m.HBuf = new double[AiHorizonBars];
@@ -655,11 +704,13 @@ namespace cAlgo.Robots
                 : m.BotPip > m.Symbol.PipSize ? "1 pip = 0.5 bp = " + P(m, m.BotPip) : "1 pip = broker pip " + P(m, m.BotPip);
             Log("MARKET " + m.Name + ": " + (m.IsCrypto ? "crypto" : "forex") + " " + m.SigTf.ShortName + " (" + note + ") | cost/ATR <= "
                 + F(m.MaxSpreadToAtr, 2) + " | " + pipText
-                + " | min " + Lots(m, MinTradableVolume(m)) + ", margin " + minNote + " | commission " + CommissionText(m));
+                + " | min " + Lots(m, MinTradableVolume(m)) + ", margin " + minNote + " | commission " + CommissionText(m) + " | " + SwapText(m.Symbol)
+                + (TrendMode ? MinVolumeRiskNote(m) : ""));
             if (m.BaselineTicksPerBar <= 0)
                 LogM(m, "WARNING: no tick volume in the history, the tick filter cannot pass");
 
-            TrainFromHistory(m);
+            if (!TrendMode)
+                TrainFromHistory(m);
             if (lastClosed >= 0)
             {
                 m.LastSigClosed = m.Sig.OpenTimes[lastClosed];
@@ -767,7 +818,7 @@ namespace cAlgo.Robots
         {
             // MarketData.GetBars returns only what the platform already holds - for a symbol whose chart is not open
             // that can be a handful of bars - so history is requested explicitly until there is enough.
-            EnsureBars(m.Sig, AiTrainingBars + WarmupBars() + 2, m.Name + " " + m.SigTf.ShortName);
+            EnsureBars(m.Sig, (TrendMode ? TrendHistoryBars : AiTrainingBars) + WarmupBars() + 2, m.Name + " " + m.SigTf.ShortName);
         }
 
         /// <summary>Loads history until the series has the bars; what is null logs nothing (timeframe probes).</summary>
@@ -842,6 +893,11 @@ namespace cAlgo.Robots
             }
             m.SpreadChecked = true;
             CheckSpreadFitsStrategy(m, live);
+            if (TrendMode)
+            {
+                m.SpreadCalibrated = true;   // no classifier to retrain
+                return;
+            }
             if (AiTrainSpreadPips > 0)
                 return;
             m.SpreadCalibrated = true;
@@ -1021,7 +1077,7 @@ namespace cAlgo.Robots
 
         private void OnSignalBarClosed(Market m, int c, bool latest)
         {
-            PendingSample s = BuildSample(m, c, TrainingSpread(m));
+            PendingSample s = TrendMode ? null : BuildSample(m, c, TrainingSpread(m));
             if (s != null && !TryResolveSample(m, s))
                 m.Pending.Add(s);
             if (!latest)
@@ -1044,6 +1100,11 @@ namespace cAlgo.Robots
         /// <summary>Arms or disarms the squeeze and sweep setups from the bar that just closed.</summary>
         private void EvaluateSetups(Market m, int c)
         {
+            if (TrendMode)
+            {
+                EvaluateTrendChannel(m, c);
+                return;
+            }
             double atrS = m.AtrSig.Result[c];
             double ema = m.Ema.Result[c];
             double buffer = BreakoutBufferPips * m.BotPip;
@@ -1169,10 +1230,41 @@ namespace cAlgo.Robots
             m.SwpNote = SweepNote(m);
         }
 
+        /// <summary>
+        /// Turtle entry channel: the highest high and lowest low of the last Breakout Bars closed bars. A tick beyond it is the
+        /// entry (EvaluateEntries); it stays armed until a trade is taken, then re-arms on the next closed bar.
+        /// </summary>
+        private void EvaluateTrendChannel(Market m, int c)
+        {
+            double atrS = m.AtrSig.Result[c];
+            m.SetupAtr = atrS;
+            m.ReclaimEma = m.Ema.Result[c];
+            m.SqzArmed = false;
+            m.BullSweep = false;
+            m.BearSweep = false;
+            int first = c - TrendEntryBars + 1;
+            if (first < 0 || !Valid(atrS) || atrS <= 0)
+            {
+                m.TrendArmed = false;
+                m.SqzNote = "channel warming up";
+                m.SwpNote = "-";
+                return;
+            }
+            double hi, lo;
+            MarketMath.Channel(i => m.Sig.HighPrices[i], i => m.Sig.LowPrices[i], first, c, out hi, out lo);
+            m.TrendHigh = hi;
+            m.TrendLow = lo;
+            m.TrendArmed = true;
+            double buffer = BreakoutBufferPips * m.BotPip;
+            m.SqzNote = "channel " + P(m, lo) + " - " + P(m, hi) + " (" + TrendEntryBars + " bars): BUY>" + P(m, hi + buffer) + " SELL<" + P(m, lo - buffer);
+            m.SwpNote = "-";
+        }
+
         /// <summary>Disarms every setup after a market break; new ones arm from the first bar that closes after the reopening.</summary>
         private void DropSetups(Market m)
         {
-            bool had = m.SqzArmed || m.BullSweep || m.BearSweep;
+            bool had = m.SqzArmed || m.BullSweep || m.BearSweep || m.TrendArmed;
+            m.TrendArmed = false;
             m.SqzArmed = false;
             m.BullSweep = false;
             m.BearSweep = false;
@@ -1200,7 +1292,7 @@ namespace cAlgo.Robots
         {
             double atr = RiskAtr(m);
             double spread = m.Symbol.Spread;
-            bool armed = m.SqzArmed || m.BullSweep || m.BearSweep;
+            bool armed = TrendMode ? m.TrendArmed : m.SqzArmed || m.BullSweep || m.BearSweep;
             var sb = new StringBuilder(256);
             sb.Append("BAR ").Append(m.Sig.OpenTimes[c].ToString("HH:mm", Inv)).Append(' ').Append(m.SigTf.ShortName).Append(armed ? " ARMED" : " no setup");
             sb.Append(" | C ").Append(P(m, m.Sig.ClosePrices[c])).Append(" EMA ").Append(P(m, m.Ema.Result[c]));
@@ -1215,7 +1307,7 @@ namespace cAlgo.Robots
             }
             LogM(m, sb.ToString());
             if (armed)
-                LogM(m, "  SQZ " + m.SqzNote + " | SWP " + m.SwpNote);
+                LogM(m, TrendMode ? "  TRD " + m.SqzNote : "  SQZ " + m.SqzNote + " | SWP " + m.SwpNote);
         }
 
         #endregion
@@ -1224,7 +1316,21 @@ namespace cAlgo.Robots
 
         private void EvaluateEntries(Market m)
         {
-            if (m.ManageOnly || (!m.SqzArmed && !m.BullSweep && !m.BearSweep))
+            if (m.ManageOnly)
+                return;
+            if (TrendMode)
+            {
+                if (!m.TrendArmed)
+                    return;
+                double buf = BreakoutBufferPips * m.BotPip;
+                double px = m.Symbol.Bid;
+                if (px > m.TrendHigh + buf)
+                    ConsiderEntry(m, TrendSetup, TradeType.Buy, m.TrendHigh + buf, px - (m.TrendHigh + buf));
+                else if (px < m.TrendLow - buf)
+                    ConsiderEntry(m, TrendSetup, TradeType.Sell, m.TrendLow - buf, (m.TrendLow - buf) - px);
+                return;
+            }
+            if (!m.SqzArmed && !m.BullSweep && !m.BearSweep)
                 return;
             int f = m.Sig.Count - 1;
             if (f < 1)
@@ -1286,7 +1392,7 @@ namespace cAlgo.Robots
 
             double atr = RiskAtr(m);
             double maxChase = MaxChaseAtr * m.SetupAtr;
-            if (chase > maxChase)
+            if (chase > maxChase && !TrendMode)   // a trend entry is taken even after a gap: its stop is set from the fill
                 AddReason(reasons, codes, "CHASE", "Price already " + D(m, chase) + " past trigger > max " + D(m, maxChase) + " (" + F(MaxChaseAtr, 2) + " ATR)");
 
             double spread = m.Symbol.Spread;
@@ -1299,12 +1405,12 @@ namespace cAlgo.Robots
             }
 
             double burst = BurstRatio(m);
-            if (UseTickVelocity && burst < TickVelocityMultiplier)
+            if (UseTickVelocity && !TrendMode && burst < TickVelocityMultiplier)
                 AddReason(reasons, codes, "TV", "Low Tick Velocity (" + F(burst, 2) + "x < " + F(TickVelocityMultiplier, 2) + "x in " + F(TickWindowSeconds, 1) + "s)");
 
             double conf = double.NaN;
             string aiInfo = "";
-            if (UseAiFilter)
+            if (UseAiFilter && !TrendMode)
             {
                 if (AiTrainSpreadPips <= 0 && !m.SpreadCalibrated)
                 {
@@ -1376,9 +1482,10 @@ namespace cAlgo.Robots
                 AddReason(reasons, codes, "CLOSED", "Market closed");
             else if (m.Symbol.TradingMode != SymbolTradingMode.FullAccess)
                 AddReason(reasons, codes, "TMODE", "Broker trading mode " + m.Symbol.TradingMode);
-            double horizon = (TimeExitBars > 0 ? TimeExitBars * m.RiskSec : 0.0) + FlatLeadSeconds;
+            // A trend position has no time exit: without holding through breaks only a break right ahead blocks the entry.
+            double horizon = (TimeExitBars > 0 && !TrendMode ? TimeExitBars * m.RiskSec : 0.0) + FlatLeadSeconds;
             DateTime breakAt;
-            if (LongBreakWithin(m, horizon, out breakAt))
+            if (!(TrendMode && TrendHoldThroughBreaks) && LongBreakWithin(m, horizon, out breakAt))
             {
                 AddReason(reasons, codes, "BREAK", "Market break at " + breakAt.ToString("HH:mm", Inv) + " UTC longer than " + FlatBeforeBreakMinutes
                           + " min is due before the time exit");
@@ -1391,6 +1498,8 @@ namespace cAlgo.Robots
 
         private double RequiredWarmupSeconds(Market m)
         {
+            if (TrendMode)
+                return 0.0;   // neither the tick filter nor the classifier is used
             if (UseAiFilter)
                 return Math.Max(TickWindowSeconds, LiveRateWindow(m));
             return UseTickVelocity ? TickWindowSeconds : 0.0;
@@ -1447,9 +1556,10 @@ namespace cAlgo.Robots
             Symbol sym = m.Symbol;
             double pip = sym.PipSize;
             double atr = RiskAtr(m);
-            double slPips = Math.Round(SlAtrMultiplier * atr / pip, 1);
-            double tp1Pips = Math.Round(Tp1AtrMultiplier * atr / pip, 1);
-            if (slPips <= 0 || tp1Pips <= 0)
+            bool trend = setup == TrendSetup;
+            double slPips = Math.Round((trend ? TrendStopAtr : SlAtrMultiplier) * atr / pip, 1);
+            double tp1Pips = trend ? 0.0 : Math.Round(Tp1AtrMultiplier * atr / pip, 1);
+            if (slPips <= 0 || (!trend && tp1Pips <= 0))
             {
                 RecordSignal(m, SignalKey(m, tag), "DIST");
                 LogSkip(m, tag, level, "DIST", new List<string> { "SL/TP distance rounds to zero (ATR " + D(m, atr) + ")" });
@@ -1479,10 +1589,12 @@ namespace cAlgo.Robots
             bool closeAllAtTp1 = false;
             for (int attempt = 0; ; attempt++)
             {
-                plan = VolumeMath.PlanSplit(volume, Tp1ClosePercent, sym.VolumeInUnitsMin, sym.VolumeInUnitsStep);
-                closeAllAtTp1 = !plan.Splittable && (Tp1ClosePercent >= 100.0 || NoSplitMode == NoSplitAction.CloseAllAtTp1);
+                plan = trend ? new SplitPlan() : VolumeMath.PlanSplit(volume, Tp1ClosePercent, sym.VolumeInUnitsMin, sym.VolumeInUnitsStep);
+                closeAllAtTp1 = !trend && !plan.Splittable && (Tp1ClosePercent >= 100.0 || NoSplitMode == NoSplitAction.CloseAllAtTp1);
                 double? tpPips = null;
-                if (closeAllAtTp1)
+                if (trend)
+                    tpPips = null;   // trend following sets no target: the channel stop takes the exit
+                else if (closeAllAtTp1)
                     tpPips = tp1Pips;
                 else if (Tp2AtrMultiplier > 0)
                     tpPips = Math.Round(Tp2AtrMultiplier * atr / pip, 1);
@@ -1571,9 +1683,12 @@ namespace cAlgo.Robots
                 ? F(plan.PartialVolume / st.InitialVolume * 100.0, 0) + "%"
                 : (closeAllAtTp1 ? "100% (not splittable)" : "0%, all trails (not splittable)");
             _lastEvent = m.Name + " ENTRY " + tag + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice);
+            string exitText = trend
+                ? " | no target, the stop trails the " + TrendExitBars + "-bar channel"
+                : " | TP1 " + P(m, TargetPrice(p, st.Tp1Dist)) + " (" + D(m, st.Tp1Dist) + ") closes " + tp1Text
+                  + " | conf " + (double.IsNaN(conf) ? "n/a" : Pct(conf)) + " | TV " + F(burst, 2) + "x";
             LogM(m, "ENTRY " + tag + " #" + p.Id + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice) + " " + m.SigTf.ShortName + " | SL " + P(m, p.StopLoss)
-                 + " (" + D(m, st.RiskDist) + ") | TP1 " + P(m, TargetPrice(p, st.Tp1Dist)) + " (" + D(m, st.Tp1Dist) + ") closes " + tp1Text
-                 + " | conf " + (double.IsNaN(conf) ? "n/a" : Pct(conf)) + " | TV " + F(burst, 2) + "x | cost " + F(CostRatio(m), 2) + " ATR | positions "
+                 + " (" + D(m, st.RiskDist) + ")" + exitText + " | cost " + F(CostRatio(m), 2) + " ATR | positions "
                  + Positions.FindAll(BotLabel).Length + "/" + MaxOpenPositions);
             LogM(m, "  " + sizing + (aiInfo.Length > 0 ? " | AI " + aiInfo : ""));
             LogM(m, "  " + TradePlan(m, p, st));
@@ -1597,6 +1712,15 @@ namespace cAlgo.Robots
             var sb = new StringBuilder(200);
             sb.Append("PLAN #").Append(p.Id).Append(": stop ").Append(P(m, st.IsLong ? p.EntryPrice - st.RiskDist : p.EntryPrice + st.RiskDist))
               .Append(" = -").Append(F(loss, 2)).Append(' ').Append(_ccy);
+            if (st.Setup == TrendSetup)
+            {
+                sb.Append(" | no target: the stop follows the ").Append(TrendExitBars).Append("-bar ").Append(st.IsLong ? "low" : "high")
+                  .Append(" as bars close").Append(TrendHoldThroughBreaks ? " | held through market breaks" : "");
+                string financing = FinancingPerDay(m, p);
+                if (financing != null)
+                    sb.Append(" | ").Append(financing);
+                return sb.ToString();
+            }
             if (tp1Units > 0)
             {
                 sb.Append(" | TP1 ").Append(P(m, TargetPrice(p, st.Tp1Dist))).Append(" = +").Append(F(gain, 2)).Append(' ').Append(_ccy);
@@ -1650,6 +1774,12 @@ namespace cAlgo.Robots
 
         private void ConsumeSetup(Market m, string setup, TradeType type)
         {
+            if (setup == TrendSetup)
+            {
+                m.TrendArmed = false;
+                m.SqzNote = "used - the channel re-arms on the next closed bar";
+                return;
+            }
             if (setup == "SQZ")
             {
                 m.SqzArmed = false;
@@ -1782,6 +1912,14 @@ namespace cAlgo.Robots
                 if (!AllowMinLotOverride)
                 {
                     note = sb.Append(" -> below the minimum ").Append(Lots(m, floor)).Append(" and 'Use Min Volume' is OFF").ToString();
+                    return 0.0;
+                }
+                // The minimum volume may risk far more than Risk Percent (a wide stop, a small budget): allowed up to a limit.
+                double minRisk = floor * lossPerUnit;
+                if (FixedLots <= 0 && minRisk > capital * MaxMinVolumeRiskPercent / 100.0 + 1e-9)
+                {
+                    note = sb.Append(" -> the minimum ").Append(Lots(m, floor)).Append(" would risk ").Append(F(minRisk, 2)).Append(' ').Append(_ccy).Append(" (")
+                             .Append(F(minRisk / capital * 100.0, 1)).Append("% of the budget > max ").Append(F(MaxMinVolumeRiskPercent, 1)).Append("%)").ToString();
                     return 0.0;
                 }
                 units = floor;
@@ -2025,6 +2163,42 @@ namespace cAlgo.Robots
             }
         }
 
+        /// <summary>The broker's overnight financing as the symbol reports it (a percentage type is a yearly rate).</summary>
+        private static string SwapText(Symbol sym)
+        {
+            try
+            {
+                SymbolSwapCalculationType type = sym.SwapCalculationType;
+                string unit = type == SymbolSwapCalculationType.Percentage ? "% a year" : type == SymbolSwapCalculationType.Pips ? " pips a day" : " (" + type + ")";
+                return "swap long " + sym.SwapLong.ToString("0.##", Inv) + unit + ", short " + sym.SwapShort.ToString("0.##", Inv) + unit;
+            }
+            catch (Exception)
+            {
+                return "swap n/a";
+            }
+        }
+
+        /// <summary>Financing of a position per day when the broker quotes it as a yearly percentage; null otherwise.</summary>
+        private string FinancingPerDay(Market m, Position p)
+        {
+            try
+            {
+                Symbol sym = m.Symbol;
+                if (sym.SwapCalculationType != SymbolSwapCalculationType.Percentage || !(sym.PipSize > 0))
+                    return null;
+                double rate = p.TradeType == TradeType.Buy ? sym.SwapLong : sym.SwapShort;
+                double notional = p.VolumeInUnits * p.EntryPrice * sym.PipValue / sym.PipSize;
+                if (!(notional > 0) || double.IsNaN(rate) || rate == 0)
+                    return null;
+                double perDay = notional * rate / 100.0 / 360.0;
+                return "financing " + (Math.Abs(perDay) < 0.01 ? "under 0.01" : "about " + Signed(perDay, 2)) + " " + _ccy + " a day (swap " + F(rate, 2) + "% a year)";
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         private string CommissionText(Market m)
         {
             double pipValue = m.Symbol.PipValue;
@@ -2074,6 +2248,13 @@ namespace cAlgo.Robots
                 double fav = isLong ? px - p.EntryPrice : p.EntryPrice - px;
                 if (fav > st.MaxFavorable)
                     st.MaxFavorable = fav;
+
+                // Trend positions: no target, no break-even, no time exit - the stop follows the opposite channel.
+                if (st.Setup == TrendSetup && !(breakNear && !TrendHoldThroughBreaks))
+                {
+                    TrailTrend(m, p, st, px);
+                    continue;
+                }
 
                 // 0. Flat before a long market break: a stop cannot protect against the gap at the reopen.
                 if (breakNear)
@@ -2233,6 +2414,58 @@ namespace cAlgo.Robots
             }
         }
 
+        /// <summary>
+        /// Turtle exit: the stop sits beyond the lowest low (long) or highest high (short) of the last Exit Bars closed bars and
+        /// only ever tightens; it stays on the losing side of the price, so a stop order always remains valid.
+        /// </summary>
+        private void TrailTrend(Market m, Position p, TradeState st, double px)
+        {
+            DateTime now = Server.Time;
+            if ((now - st.LastTrail).TotalSeconds < TrailMinIntervalSeconds)
+                return;
+            int c = m.Sig.Count - 2;
+            int first = c - TrendExitBars + 1;
+            if (first < 0 || c <= st.TrailBar)
+                return;
+            bool isLong = p.TradeType == TradeType.Buy;
+            double hi, lo, target;
+            MarketMath.Channel(i => m.Sig.HighPrices[i], i => m.Sig.LowPrices[i], first, c, out hi, out lo);
+            double level = isLong ? lo : hi;
+            ChannelStopAction action = MarketMath.ChannelStop(isLong, level, BreakoutBufferPips * m.BotPip, p.StopLoss, px, m.Symbol.Digits, out target);
+            st.TrailBar = c;   // the channel only changes when a bar closes
+            if (action == ChannelStopAction.Keep)
+                return;
+            st.LastTrail = now;
+            if (action == ChannelStopAction.Exit)
+            {
+                st.CloseReason = "CHANNEL EXIT";
+                LogM(m, "CHANNEL EXIT #" + p.Id + ": price " + P(m, px) + " is already beyond the " + TrendExitBars + "-bar " + (isLong ? "low " : "high ") + P(m, level)
+                     + " - closing at market");
+                TradeResult rc = ClosePosition(p);
+                if (!rc.IsSuccessful)
+                {
+                    st.CloseReason = null;
+                    st.TrailBar = c - 1;
+                    Backoff(st, now);
+                    LogM(m, "CHANNEL EXIT failed #" + p.Id + ": " + rc.Error);
+                }
+                return;
+            }
+            TradeResult r = p.ModifyStopLossPrice(target);
+            if (r.IsSuccessful)
+            {
+                st.TrailMoves++;
+                st.Failures = 0;
+                LogM(m, "CHANNEL STOP #" + p.Id + ": stop -> " + P(m, target) + " (" + TrendExitBars + "-bar " + (isLong ? "low" : "high") + ")");
+            }
+            else
+            {
+                st.TrailBar = c - 1;
+                Backoff(st, now);
+                LogM(m, "CHANNEL STOP failed #" + p.Id + ": " + r.Error);
+            }
+        }
+
         private void Trail(Market m, Position p, TradeState st, double px)
         {
             double atr = RiskAtr(m);
@@ -2387,6 +2620,7 @@ namespace cAlgo.Robots
                 int expectedFills = st != null && st.Tp1Done && st.Splittable ? 2 : 1;
                 double net = 0.0;
                 double gross = 0.0;
+                double swap = 0.0;
                 int fills = 0;
                 foreach (HistoricalTrade h in History.FindAll(BotLabel, p.SymbolName))
                 {
@@ -2394,12 +2628,14 @@ namespace cAlgo.Robots
                         continue;
                     net += h.NetProfit;
                     gross += h.GrossProfit;
+                    swap += h.Swap;
                     fills++;
                 }
                 if (fills < expectedFills)
                 {
                     net += p.NetProfit;
                     gross += p.GrossProfit;
+                    swap += p.Swap;
                     fills++;
                 }
 
@@ -2434,11 +2670,12 @@ namespace cAlgo.Robots
                     _statTp1++;   // server-side TP1 of an unsplittable position
                 _lastEvent = p.SymbolName + " CLOSED by " + why + " " + Signed(net, 2) + " " + _ccy;
                 Log(p.SymbolName + " CLOSED #" + p.Id + " " + (st != null ? st.Setup : "?") + " " + (p.TradeType == TradeType.Buy ? "BUY" : "SELL") + " by " + why
-                    + ": net " + Signed(net, 2) + " " + _ccy + " (gross " + Signed(gross, 2) + ", " + fills + " fill(s)"
+                    + ": net " + Signed(net, 2) + " " + _ccy + " (gross " + Signed(gross, 2) + (Math.Abs(swap) >= 0.005 ? ", swap " + Signed(swap, 2) : "") + ", " + fills + " fill(s)"
                     + (st != null && st.TrailMoves > 0 ? ", trailed " + st.TrailMoves + "x" : "") + ") | day " + Signed(BotEquity() - _dayStartEquity, 2)
                     + " " + _ccy + " | budget equity " + F(BotEquity(), 2) + " | loss streak " + (m != null ? m.ConsecLosses : 0));
 
-                if (m != null && MaxConsecutiveLosses > 0 && m.ConsecLosses >= MaxConsecutiveLosses)
+                // Trend following lives on the rare big winner that follows a run of small losses: it takes every signal.
+                if (m != null && MaxConsecutiveLosses > 0 && !TrendMode && m.ConsecLosses >= MaxConsecutiveLosses)
                 {
                     m.PauseUntil = Server.Time.AddMinutes(LossStreakPauseMinutes);
                     m.ConsecLosses = 0;
@@ -2457,6 +2694,8 @@ namespace cAlgo.Robots
                 return st.CloseReason;
             if (reason == PositionCloseReason.StopLoss)
             {
+                if (st != null && st.Setup == TrendSetup)
+                    return st.TrailMoves > 0 ? "CHANNEL STOP" : "STOP LOSS";
                 if (st != null && st.Tp1Done)
                     return "TRAIL STOP";
                 return st != null && st.BeDone ? "BREAK-EVEN STOP" : "STOP LOSS";
@@ -2970,10 +3209,19 @@ namespace cAlgo.Robots
                 + (_statTrades > 0 ? " | run " + _statTrades + " trades " + _statWins + "W/" + _statLosses + "L/" + _statScratch + "S " + Signed(_statNet, 2) : "")
                 + (_dailyHalt ? " | HALTED (daily loss)" : "") + (_skipLinesSuppressed > 0 ? " | " + _skipLinesSuppressed + " SKIP lines not printed (limit "
                 + MaxSkipLinesPerHour + "/h)" : ""));
-            foreach (Market m in active)
-                Log(m.Name + " " + m.SigTf.ShortName + " | " + StatusCounts(m) + " | now " + StatusNow(m, now));
-            if (quiet.Count > 0)
-                Log("quiet (no setup): " + string.Join(", ", quiet));
+            if (TrendMode)
+            {
+                foreach (Market m in _markets)
+                    if (!closed.Contains(m.Name))
+                        Log(m.Name + " " + m.SigTf.ShortName + " | " + TrendStatus(m));
+            }
+            else
+            {
+                foreach (Market m in active)
+                    Log(m.Name + " " + m.SigTf.ShortName + " | " + StatusCounts(m) + " | now " + StatusNow(m, now));
+                if (quiet.Count > 0)
+                    Log("quiet (no setup): " + string.Join(", ", quiet));
+            }
             if (closed.Count > 0)
                 Log("market closed: " + string.Join(", ", closed));
 
@@ -2981,6 +3229,55 @@ namespace cAlgo.Robots
                 ResetStatusCounters(m);
             _skipLinesSuppressed = 0;
             _statusSince = now;
+        }
+
+        /// <summary>A trend market in one line: the open position and its stop, or the two prices that would open one.</summary>
+        private string TrendStatus(Market m)
+        {
+            Position[] held = Positions.FindAll(BotLabel, m.Name);
+            if (held.Length > 0)
+            {
+                Position p = held[0];
+                return (p.TradeType == TradeType.Buy ? "LONG" : "SHORT") + " #" + p.Id + " since " + p.EntryTime.ToString("dd.MM HH:mm", Inv) + " @" + P(m, p.EntryPrice)
+                       + ", stop " + P(m, p.StopLoss) + ", now " + Signed(p.NetProfit, 2) + " " + _ccy;
+            }
+            if (m.ManageOnly)
+                return "manage-only, no new entries";
+            if (!m.TrendArmed)
+                return "channel re-arms when the next " + m.SigTf.ShortName + " bar closes";
+            double buf = BreakoutBufferPips * m.BotPip;
+            double px = m.Symbol.Bid;
+            double up = m.TrendHigh + buf, down = m.TrendLow - buf;
+            double atr = RiskAtr(m);
+            return "waiting: BUY above " + P(m, up) + " (" + Away(up, px) + ") or SELL below " + P(m, down) + " (" + Away(down, px) + ") | cost "
+                   + (atr > 0 ? F((m.Symbol.Spread + CommissionDistance(m)) / atr, 2) : "n/a") + " ATR (max " + F(m.MaxSpreadToAtr, 2) + ")" + MinVolumeRiskNote(m);
+        }
+
+        /// <summary>
+        /// What the minimum volume risks at the trend stop when that is more than Risk Percent: allowed up to Max Risk With
+        /// Min Volume, above it the market waits for a bigger budget - the note says which. Empty when the size is normal.
+        /// </summary>
+        private string MinVolumeRiskNote(Market m)
+        {
+            double atr = RiskAtr(m);
+            double pipValue = m.Symbol.PipValue;
+            double capital = BotEquity();
+            if (FixedLots > 0 || !(atr > 0) || !(pipValue > 0) || !(m.Symbol.PipSize > 0) || !(capital > 0))
+                return "";
+            double risk = MinTradableVolume(m) * (TrendStopAtr * atr / m.Symbol.PipSize * pipValue + m.CommissionPerUnit);
+            double pct = risk / capital * 100.0;
+            if (!(pct > RiskPercent))
+                return "";
+            if (!AllowMinLotOverride || pct > MaxMinVolumeRiskPercent)
+                return " | min " + Lots(m, MinTradableVolume(m)) + " would risk " + F(risk, 2) + " " + _ccy + " (" + F(pct, 1) + "%) - no entries until the budget is about "
+                       + F(risk * 100.0 / (AllowMinLotOverride ? MaxMinVolumeRiskPercent : RiskPercent), 0) + " " + _ccy;
+            return " | min " + Lots(m, MinTradableVolume(m)) + " risks " + F(risk, 2) + " " + _ccy + " (" + F(pct, 1) + "% of the budget, allowed up to "
+                   + F(MaxMinVolumeRiskPercent, 1) + "%)";
+        }
+
+        private static string Away(double level, double price)
+        {
+            return price > 0 ? ((level / price - 1.0) * 100.0).ToString("+0.0;-0.0", Inv) + "%" : "n/a";
         }
 
         private string QuietNote(Market m, DateTime now)
@@ -2999,9 +3296,15 @@ namespace cAlgo.Robots
             return "";
         }
 
+        /// <summary>The trend mode reports at most every 4 hours: its daily channels change once a day.</summary>
+        private int StatusMinutes()
+        {
+            return TrendMode ? Math.Max(StatusEveryMinutes, 240) : Math.Max(1, StatusEveryMinutes);
+        }
+
         private DateTime NextStatusTime(DateTime now)
         {
-            long period = TimeSpan.FromMinutes(Math.Max(1, StatusEveryMinutes)).Ticks;
+            long period = TimeSpan.FromMinutes(StatusMinutes()).Ticks;
             return new DateTime((now.Ticks / period + 1) * period, now.Kind);
         }
 
@@ -3201,14 +3504,24 @@ namespace cAlgo.Robots
                 + " | margin per trade " + F(MarginPerTradePercent, 0) + "% of free, all positions <= " + F(MaxTotalMarginPercent, 0) + "% ("
                 + F(equity * MaxTotalMarginPercent / 100.0, 2) + " " + _ccy + ") | margin leverage forex " + (LeverageOverride > 0 ? "1:" + F(LeverageOverride, 0) : "broker")
                 + ", crypto " + (CryptoLeverageOverride > 0 ? "1:" + F(CryptoLeverageOverride, 0) : "broker"));
-            Log("PARAMS markets: forex [" + FxSymbols + "] on " + FxTimeFrames + (UseSessionFilter ? ", session " + SessionStartHour + "-" + SessionEndHour + " UTC" : ", whenever open")
-                + " | crypto [" + CryptoSymbols + "] on " + CryptoTimeFrames + (CryptoIgnoresSession ? " 24/7" : " in session") + " | max " + MaxOpenPositions
-                + " positions | flat before breaks > " + (FlatBeforeBreakMinutes > 0 ? FlatBeforeBreakMinutes + " min" : "off"));
+            Log("PARAMS markets: " + (TrendMode
+                    ? "crypto [" + CryptoSymbols + "]" + (TrendIncludeForex ? " + forex [" + FxSymbols + "]" : ", forex off (no trend edge found there)") + " on " + TrendTimeFrames
+                    : "forex [" + FxSymbols + "] on " + FxTimeFrames + (UseSessionFilter ? ", session " + SessionStartHour + "-" + SessionEndHour + " UTC" : ", whenever open")
+                      + " | crypto [" + CryptoSymbols + "] on " + CryptoTimeFrames + (CryptoIgnoresSession ? " 24/7" : " in session"))
+                + " | max " + MaxOpenPositions + " positions | flat before breaks > " + (FlatBeforeBreakMinutes > 0 ? FlatBeforeBreakMinutes + " min" : "off")
+                + (TrendMode && TrendHoldThroughBreaks ? " (trend positions are held)" : ""));
             Log("PARAMS risk: " + (FixedLots > 0 ? "fixed " + F(FixedLots, 2) + " lot" : F(RiskPercent, 2) + "% of budget") + " per trade | lots "
-                + (MinLots > 0 ? F(MinLots, 2) : "broker min") + "-" + F(MaxLots, 2) + " (min volume if smaller " + OnOff(AllowMinLotOverride) + ") | slippage "
+                + (MinLots > 0 ? F(MinLots, 2) : "broker min") + "-" + F(MaxLots, 2) + " (min volume if smaller " + OnOff(AllowMinLotOverride) + (AllowMinLotOverride ? ", up to " + F(MaxMinVolumeRiskPercent, 1) + "% risk" : "") + ") | slippage "
                 + (MaxSlippagePips > 0 ? F(MaxSlippagePips, 1) + " pip (>= spread)" : "market") + " | daily loss " + (DailyMaxLossPercent > 0 ? F(DailyMaxLossPercent, 1) + "%" : "off")
-                + " | loss streak " + (MaxConsecutiveLosses > 0 ? MaxConsecutiveLosses + " -> pause " + LossStreakPauseMinutes + "m" : "off")
+                + " | loss streak " + (TrendMode ? "no pause (the trend mode takes every signal)" : MaxConsecutiveLosses > 0 ? MaxConsecutiveLosses + " -> pause " + LossStreakPauseMinutes + "m" : "off")
                 + " | max trades/day " + (MaxTradesPerDay > 0 ? MaxTradesPerDay.ToString(Inv) : "off"));
+            Log("PARAMS strategy: " + (TrendMode
+                ? "TREND - breakout of " + TrendEntryBars + " bars, stop " + F(TrendStopAtr, 1) + " x ATR, exit on the " + TrendExitBars
+                  + "-bar channel, timeframes " + TrendTimeFrames + " (cost/ATR <= " + F(TrendMaxCostToAtr, 2) + "), " + (TrendHoldThroughBreaks ? "held through breaks" : "flat before breaks")
+                  + "; AI, tick filter, TP1, break-even and time exit are not used | status every " + StatusMinutes() + " min"
+                : "SCALPER - micro-impulse setups (settings below)"));
+            if (TrendMode)
+                return;
             Log("PARAMS exits: SL " + F(SlAtrMultiplier, 2) + " x ATR(" + AtrPeriod + ") | TP1 " + F(Tp1AtrMultiplier, 2) + " x ATR closes " + F(Tp1ClosePercent, 0)
                 + "% (" + NoSplitMode + ") | runner TP " + (Tp2AtrMultiplier > 0 ? F(Tp2AtrMultiplier, 2) + " x ATR" : "none") + " | trail "
                 + (TrailAtrMultiplier > 0 ? F(TrailAtrMultiplier, 2) + " x ATR, step " + F(TrailStepPips, 1) + " pip / " + F(TrailStepAtr, 2) + " ATR" : "off")
@@ -3460,6 +3773,9 @@ namespace cAlgo.Robots
         public double SigSec;
         public double RiskSec;
         public ExponentialMovingAverage Ema;
+        public bool TrendArmed;
+        public double TrendHigh;
+        public double TrendLow;
         public AverageTrueRange AtrSig;
         public AverageTrueRange AtrRisk;
         public RelativeStrengthIndex Rsi;
@@ -3573,6 +3889,7 @@ namespace cAlgo.Robots
         public DateTime RetryAfter;
         public DateTime LastTrail;
         public int TrailMoves;
+        public int TrailBar = -1;   // last closed bar the trend channel stop was computed from
         public int Failures;
         public string CloseReason;
         public double MarginAtEntry;
@@ -4096,9 +4413,45 @@ namespace cAlgo.Robots
     }
 
     /// <summary>Symbol lists, the price unit of pip parameters and the margin rules, independent of any broker API.</summary>
+    internal enum ChannelStopAction
+    {
+        Keep,
+        Move,
+        Exit
+    }
+
     internal static class MarketMath
     {
         private const double Eps = 1e-6;
+
+        /// <summary>Highest high and lowest low of the bars first..last (inclusive); false when the range is empty.</summary>
+        public static bool Channel(Func<int, double> high, Func<int, double> low, int first, int last, out double hi, out double lo)
+        {
+            hi = double.MinValue;
+            lo = double.MaxValue;
+            if (first < 0 || last < first)
+                return false;
+            for (int i = first; i <= last; i++)
+            {
+                hi = Math.Max(hi, high(i));
+                lo = Math.Min(lo, low(i));
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Turtle exit of a position: its stop sits just beyond the opposite channel (the lowest low for a long) and only
+        /// ever tightens. When the price is already beyond that level (a gap) the exit is due at once: no stop can go there.
+        /// </summary>
+        public static ChannelStopAction ChannelStop(bool isLong, double channel, double buffer, double? stop, double price, int digits, out double target)
+        {
+            target = Math.Round(isLong ? channel - buffer : channel + buffer, digits);
+            if (isLong ? target >= price : target <= price)
+                return ChannelStopAction.Exit;
+            if (stop.HasValue && (isLong ? target <= stop.Value : target >= stop.Value))
+                return ChannelStopAction.Keep;
+            return ChannelStopAction.Move;
+        }
 
         /// <summary>
         /// Items separated by commas, semicolons or spaces; duplicates (any case) are dropped. An item may list

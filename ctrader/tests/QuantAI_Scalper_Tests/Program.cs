@@ -30,6 +30,7 @@ namespace Harness
             CalibratorTests();
             SpreadTests();
             CommissionTests();
+            TrendTests();
             VolumeTests();
             SqueezeTests();
             SweepTests();
@@ -420,6 +421,29 @@ namespace Harness
             rt = CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerMillionUsd, 30, 0.85, 100000, 1.27, false, false, true);
             Near(rt, 2 * 30 / 1e6 * 0.85 * 1.27, 1e-15, "USD account: notional converted through the quote currency");
             Check(CommissionMath.RoundTurnPerUnit(CommissionBasis.UsdPerLot, 0, eurusd, 100000, usdToEur, true, false, false) == 0, "no commission (Standard account)");
+        }
+
+        private static void TrendTests()
+        {
+            double[] highs = { 1.0, 3.0, 2.0, 5.0, 4.0 }, lows = { 0.0, 1.0, 1.5, 2.0, 3.0 };
+            double hi, lo;
+            Check(MarketMath.Channel(i => highs[i], i => lows[i], 1, 3, out hi, out lo) && hi == 5.0 && lo == 1.0, "channel of bars 1..3: high 5, low 1");
+            Check(MarketMath.Channel(i => highs[i], i => lows[i], 4, 4, out hi, out lo) && hi == 4.0 && lo == 3.0, "channel of one bar");
+            Check(!MarketMath.Channel(i => highs[i], i => lows[i], -1, 3, out hi, out lo), "a channel before the first bar is empty");
+            Check(!MarketMath.Channel(i => highs[i], i => lows[i], 3, 2, out hi, out lo), "an inverted range is empty");
+
+            double t;
+            // Long: the stop goes 1 point under the 10-bar low and only up; a price already under that level is an exit.
+            Check(MarketMath.ChannelStop(true, 1.1000, 0.0001, 1.0950, 1.1050, 5, out t) == ChannelStopAction.Move && Math.Abs(t - 1.0999) < 1e-9, "long: stop moves up to the channel");
+            Check(MarketMath.ChannelStop(true, 1.1000, 0.0001, 1.1005, 1.1050, 5, out t) == ChannelStopAction.Keep, "long: a lower channel never loosens the stop");
+            Check(MarketMath.ChannelStop(true, 1.1000, 0.0001, 1.0999, 1.1050, 5, out t) == ChannelStopAction.Keep, "long: the same level is no move");
+            Check(MarketMath.ChannelStop(true, 1.1000, 0.0001, 1.0950, 1.0990, 5, out t) == ChannelStopAction.Exit, "long: a gap under the channel exits at once");
+            Check(MarketMath.ChannelStop(true, 1.1000, 0.0001, null, 1.1050, 5, out t) == ChannelStopAction.Move, "long without a stop gets one");
+            // Short: mirror image.
+            Check(MarketMath.ChannelStop(false, 1.2000, 0.0001, 1.2050, 1.1950, 5, out t) == ChannelStopAction.Move && Math.Abs(t - 1.2001) < 1e-9, "short: stop moves down to the channel");
+            Check(MarketMath.ChannelStop(false, 1.2000, 0.0001, 1.1990, 1.1950, 5, out t) == ChannelStopAction.Keep, "short: a higher channel never loosens the stop");
+            Check(MarketMath.ChannelStop(false, 1.2000, 0.0001, 1.2050, 1.2010, 5, out t) == ChannelStopAction.Exit, "short: a gap over the channel exits at once");
+            Check(MarketMath.ChannelStop(true, 101.237, 0.02, 95.0, 110.0, 2, out t) == ChannelStopAction.Move && Math.Abs(t - 101.22) < 1e-9, "the stop is rounded to the symbol's digits");
         }
 
         private static void VolumeTests()
