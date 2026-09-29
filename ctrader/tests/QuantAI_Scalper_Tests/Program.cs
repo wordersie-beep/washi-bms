@@ -446,10 +446,17 @@ namespace Harness
         {
             var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
             string version = (string)typeof(QuantAI_Scalper_24x7_V3).GetField("BotVersion", flags).GetRawConstantValue();
-            string expected = "QuantAI_Scalper_24x7_V" + version.Replace('.', '_');
+            string expected = "QuantAI_Trend_24x7_V" + version.Replace('.', '_');
             Check(QuantAI_Scalper_24x7_V3.BotName == expected, "the cBot name carries the version " + version + " (" + QuantAI_Scalper_24x7_V3.BotName + ")");
             var robot = (cAlgo.API.RobotAttribute)Attribute.GetCustomAttribute(typeof(QuantAI_Scalper_24x7_V3), typeof(cAlgo.API.RobotAttribute));
-            Check(robot != null && robot.Name == QuantAI_Scalper_24x7_V3.BotName, "the Robot attribute uses the versioned name");
+            // The name comes from the class and the assembly (see the release checks below); the attribute's name constructor is obsolete.
+            Check(robot != null && robot.Name == null, "the Robot attribute does not use the obsolete name constructor");
+            // A new instance opens where the strategy trades: a daily chart of a coin every budget can hold (the chart only carries the HUD).
+            cAlgo.API.TimeFrame chartTf;
+            Check(robot != null && robot.DefaultSymbolName == "XRPUSD", "a new instance opens on XRPUSD (" + (robot == null ? "-" : robot.DefaultSymbolName) + ")");
+            Check(robot != null && cAlgo.API.TimeFrame.TryParse(robot.DefaultTimeFrame, out chartTf) && chartTf == cAlgo.API.TimeFrame.Daily,
+                  "the default chart timeframe parses to Daily (" + (robot == null ? "-" : robot.DefaultTimeFrame) + ")");
+            ParameterGroupTests();
 
             string source = RepoFile("QuantAI_Scalper_24x7_V3/QuantAI_Scalper_24x7_V3/QuantAI_Scalper_24x7_V3.cs");
             string header = source == null ? null : System.IO.File.ReadLines(source).Skip(1).FirstOrDefault();
@@ -470,6 +477,36 @@ namespace Harness
             Check(meta.Contains("cAlgo.Robots." + expected + "\""), "the release .algo holds the type cAlgo.Robots." + expected);
             Check(System.Text.RegularExpressions.Regex.IsMatch(meta, "\"FriendlyName\":\\s*\"" + expected + "\""), "the release .algo shows the name " + expected);
             Check(System.Text.RegularExpressions.Regex.IsMatch(meta, "\"ApiVersion\":\\s*\"1\\.0\\.9\""), "the release .algo targets API 1.0.9 (every cTrader 5 app)");
+        }
+
+        /// <summary>
+        /// The parameter panel: groups appear in order (1-5 for the trend, S1-S5 for the scalper, whether cTrader keeps the
+        /// declaration order or sorts by name), every trend setting sits in the trend group and nothing the trend reads is
+        /// in a "Scalper Only" group (scenario T of the simulator checks the trades themselves).
+        /// </summary>
+        private static void ParameterGroupTests()
+        {
+            var groups = new List<string>();
+            var byName = new Dictionary<string, string>();
+            foreach (var pi in typeof(QuantAI_Scalper_24x7_V3).GetProperties())
+            {
+                var attr = (cAlgo.API.ParameterAttribute)Attribute.GetCustomAttribute(pi, typeof(cAlgo.API.ParameterAttribute));
+                if (attr == null)
+                    continue;
+                byName[pi.Name] = attr.Group;
+                if (groups.Count == 0 || groups[groups.Count - 1] != attr.Group)
+                    groups.Add(attr.Group);
+            }
+            Check(groups.Distinct().Count() == groups.Count, "each parameter group is declared in one block (" + string.Join(" | ", groups) + ")");
+            var sorted = groups.OrderBy(g => g, StringComparer.Ordinal).ToList();
+            Check(groups.SequenceEqual(sorted), "the groups read the same in declaration and name order");
+            Check(groups.Count > 0 && groups[0] == "1. Main" && byName["Strategy"] == "1. Main" && byName["BotBudget"] == "1. Main", "Strategy and Bot Budget open the panel");
+            string[] trend = { "TrendTimeFrames", "TrendEntryBars", "TrendExitBars", "TrendStopAtr", "AtrPeriod", "BreakoutBufferPips", "TrendMaxCostToAtr", "TrendHoldThroughBreaks", "TrendIncludeForex" };
+            Check(trend.All(n => byName[n] == "2. Trend (Daily Breakout)"), "every setting the trend's rules read is in group 2");
+            string[] shared = { "CryptoSymbols", "FxSymbols", "MaxOpenPositions", "RiskPercent", "FixedLots", "MaxMinVolumeRiskPercent", "DailyMaxLossPercent",
+                                "MaxSlippagePips", "CryptoIgnoresSession", "UseSessionFilter", "SessionStartHour", "SessionEndHour", "CooldownSeconds", "BotLabel" };
+            Check(shared.Concat(trend).All(n => !byName[n].StartsWith("S")), "no setting the trend reads is in a Scalper Only group");
+            Check(byName.Values.Where(g => g.StartsWith("S")).All(g => g.StartsWith("S") && g.Contains("Scalper Only")), "the S groups say Scalper Only");
         }
 
         /// <summary>The JSON metadata of an .algo file: the gzip stream after the header.</summary>

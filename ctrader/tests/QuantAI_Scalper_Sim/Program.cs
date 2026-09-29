@@ -476,6 +476,8 @@ namespace Sim
         public int StorageWrites;
         public QuantAI_Scalper_24x7_V3 Bot;
         public string ChartSymbol = "EURUSD";
+        public TimeFrame ChartTimeFrame = TimeFrame.Minute;
+        public bool KeepDefaults;   // the bot keeps its own default budget and strategy (scenarios S, T)
         public int InitialVisibleBars = 250;
         public int TotalHistoryBars = 4200;
         public double LoggedMaxLen;
@@ -1151,7 +1153,7 @@ namespace Sim
                 pi.GetSetMethod(true).Invoke(bot, new[] { value });
             }
             Set(algo, "SymbolName", ChartSymbol);
-            Set(algo, "TimeFrame", TimeFrame.Minute);
+            Set(algo, "TimeFrame", ChartTimeFrame);
             Set(algo, "RunningMode", RunningMode.RealTime);
             Set(algo, "Server", server);
             Set(algo, "Indicators", Indicators());
@@ -1501,12 +1503,80 @@ namespace Sim
             };
         }
 
+        /// <summary>The chart a new instance is added to: the Robot attribute's default symbol and timeframe.</summary>
+        private static void DefaultChart(World w)
+        {
+            var ra = typeof(QuantAI_Scalper_24x7_V3).GetCustomAttribute<RobotAttribute>();
+            TimeFrame tf;
+            if (ra == null || !TimeFrame.TryParse(ra.DefaultTimeFrame, out tf))
+                throw new InvalidOperationException("the Robot attribute has no parsable DefaultTimeFrame");
+            w.ChartSymbol = ra.DefaultSymbolName;
+            w.ChartTimeFrame = tf;
+            w.KeepDefaults = true;
+        }
+
+        /// <summary>Prices, spreads and minimum volumes of the real account (September 2026 logs), with Pepperstone's crypto financing.</summary>
+        private static void RealCryptoSpecs(List<Spec> specs)
+        {
+            foreach (Spec x in specs.Where(x => x.Crypto)) { x.SwapLongPerYear = -0.20; x.SwapShortPerYear = -0.075; }
+            Spec eth = specs.First(x => x.Name == "ETHUSD"); eth.Price = 2750; eth.SigmaMinute = 2.9; eth.Spread = 2.0;
+            Spec sol = specs.First(x => x.Name == "SOLUSD"); sol.Price = 124; sol.SigmaMinute = 0.16; sol.Spread = 0.40;
+            Spec xrp = specs.First(x => x.Name == "XRPUSD"); xrp.Price = 1.55; xrp.SigmaMinute = 0.0021; xrp.Spread = 0.005; xrp.VMin = 0.1; xrp.VStep = 0.1; xrp.BrokerMarginNaN = false;
+            Spec bch = specs.First(x => x.Name == "BCH/USD"); bch.Price = 339; bch.SigmaMinute = 0.40; bch.Spread = 0.72; bch.VMin = 0.1; bch.VStep = 0.1;
+            specs.Add(new Spec { Name = "LTCUSD", Crypto = true, Price = 75, Pip = 0.01, Digits = 2, Lot = 1, VMin = 0.01, VStep = 0.01, VMax = 1e5, Spread = 0.25, Leverage = 2,
+                                 Base = "LTC", Quote = "USD", TickRate = 0.6, SigmaMinute = 0.089, SwapLongPerYear = -0.20, SwapShortPerYear = -0.075 });
+        }
+
+        /// <summary>
+        /// Moves every parameter of the "Scalper Only" groups (S1-S5) to another valid value and returns what changed:
+        /// the trend mode must trade exactly the same with them (scenario T).
+        /// </summary>
+        private static List<string> ScrambleScalperOnly(QuantAI_Scalper_24x7_V3 b)
+        {
+            var changed = new List<string>();
+            foreach (PropertyInfo pi in typeof(QuantAI_Scalper_24x7_V3).GetProperties())
+            {
+                var attr = pi.GetCustomAttribute<ParameterAttribute>();
+                if (attr == null || attr.Group == null || !attr.Group.StartsWith("S"))
+                    continue;
+                object v = pi.GetValue(b);
+                object nv;
+                double max = attr.MaxValue == null ? double.MaxValue : Convert.ToDouble(attr.MaxValue, CultureInfo.InvariantCulture);
+                double min = attr.MinValue == null ? double.MinValue : Convert.ToDouble(attr.MinValue, CultureInfo.InvariantCulture);
+                if (pi.PropertyType == typeof(bool)) nv = !(bool)v;
+                else if (pi.PropertyType == typeof(int)) { int x = (int)v * 2 + 1; if (x > max) x = Math.Max((int)min, (int)v / 2); nv = x; }
+                else if (pi.PropertyType == typeof(double)) { double x = (double)v * 2 + 0.1; if (x > max) x = Math.Max(min, (double)v / 2); nv = x; }
+                else if (pi.PropertyType == typeof(string)) nv = "h1,h4";
+                else if (pi.PropertyType.IsEnum) { Array all = Enum.GetValues(pi.PropertyType); nv = all.GetValue((Array.IndexOf(all, v) + 1) % all.Length); }
+                else throw new InvalidOperationException("no scramble for " + pi.PropertyType.Name);
+                if (Equals(v, nv))
+                    throw new InvalidOperationException(pi.Name + " could not be changed");
+                pi.SetValue(b, nv);
+                changed.Add(pi.Name + " " + Convert.ToString(v, CultureInfo.InvariantCulture) + "->" + Convert.ToString(nv, CultureInfo.InvariantCulture));
+            }
+            return changed;
+        }
+
+        /// <summary>Every trade of the bot as one comparable line: symbol, side, times, volume, prices, net.</summary>
+        private static List<string> TradeRecord(World w)
+        {
+            var closed = w.Hist.Where(h => h.Label == "QuantAI_M1").OrderBy(h => h.Time).ThenBy(h => h.PositionId)
+                          .Select(h => "closed " + h.Sym + " " + h.EntryTime.ToString("MM-dd HH:mm:ss") + " -> " + h.Time.ToString("MM-dd HH:mm:ss")
+                                       + " net " + h.Net.ToString("F4", CultureInfo.InvariantCulture));
+            var open = w.Open.Where(p => p.Label == "QuantAI_M1").OrderBy(p => p.EntryTime)
+                         .Select(p => "open " + p.Sym.S.Name + " " + p.EntryTime.ToString("MM-dd HH:mm:ss") + " vol " + p.Vol.ToString("R", CultureInfo.InvariantCulture)
+                                      + " sl " + (p.SL.HasValue ? p.SL.Value.ToString("R", CultureInfo.InvariantCulture) : "-"));
+            return closed.Concat(open).Concat(new[] { "balance " + w.Balance.ToString("F4", CultureInfo.InvariantCulture) }).ToList();
+        }
+
         private static World Scenario(string title, int seed, DateTime start, TimeSpan duration, Action<QuantAI_Scalper_24x7_V3> configure, double balance, string logFile,
-                                      Action<List<Spec>> tweak = null, Func<World, bool> onSecond = null, Action<World> beforeStart = null)
+                                      Action<List<Spec>> tweak = null, Func<World, bool> onSecond = null, Action<World> beforeStart = null,
+                                      Action<World> chart = null)
         {
             Console.WriteLine();
             Console.WriteLine("################ " + title);
             var w = new World(seed);
+            chart?.Invoke(w);
             List<Spec> specs = Specs();
             tweak?.Invoke(specs);
             foreach (Spec s in specs) w.AddSymbol(s);
@@ -1515,7 +1585,7 @@ namespace Sim
             var bot = new QuantAI_Scalper_24x7_V3();
             w.Wire(bot);
             // The scenarios below were written for the 50 EUR budget; the bot's own default (200) is exercised by scenario N.
-            w.Configure = b => { b.BotBudget = 50; b.Strategy = StrategyMode.Scalper; configure?.Invoke(b); };
+            w.Configure = b => { if (!w.KeepDefaults) { b.BotBudget = 50; b.Strategy = StrategyMode.Scalper; } configure?.Invoke(b); };
             w.Configure(bot);
             beforeStart?.Invoke(w);
             var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -2302,17 +2372,7 @@ namespace Sim
             // 18. A 50 EUR budget with the defaults and the minimum volumes of the real account (September 2026 logs): the coins
             // whose minimum fits trade at a risk of at most 3 % of the budget, the others are skipped with the reason.
             World rw = Scenario("R: defaults with a 50 EUR budget, real minimum volumes", 28, new DateTime(2026, 9, 28, 6, 0, 0, DateTimeKind.Utc), TimeSpan.FromDays(7),
-                     b => { b.Strategy = StrategyMode.Trend; b.BotBudget = 50; }, 49092.50, Path.Combine(dir, "logR.txt"),
-                     specs =>
-                     {
-                         foreach (Spec x in specs.Where(x => x.Crypto)) { x.SwapLongPerYear = -0.20; x.SwapShortPerYear = -0.075; }
-                         Spec eth = specs.First(x => x.Name == "ETHUSD"); eth.Price = 2750; eth.SigmaMinute = 2.9; eth.Spread = 2.0;
-                         Spec sol = specs.First(x => x.Name == "SOLUSD"); sol.Price = 124; sol.SigmaMinute = 0.16; sol.Spread = 0.40;
-                         Spec xrp = specs.First(x => x.Name == "XRPUSD"); xrp.Price = 1.55; xrp.SigmaMinute = 0.0021; xrp.Spread = 0.005; xrp.VMin = 0.1; xrp.VStep = 0.1; xrp.BrokerMarginNaN = false;
-                         Spec bch = specs.First(x => x.Name == "BCH/USD"); bch.Price = 339; bch.SigmaMinute = 0.40; bch.Spread = 0.72; bch.VMin = 0.1; bch.VStep = 0.1;
-                         specs.Add(new Spec { Name = "LTCUSD", Crypto = true, Price = 75, Pip = 0.01, Digits = 2, Lot = 1, VMin = 0.01, VStep = 0.01, VMax = 1e5, Spread = 0.25, Leverage = 2,
-                                              Base = "LTC", Quote = "USD", TickRate = 0.6, SigmaMinute = 0.089, SwapLongPerYear = -0.20, SwapShortPerYear = -0.075 });
-                     });
+                     b => { b.Strategy = StrategyMode.Trend; b.BotBudget = 50; }, 49092.50, Path.Combine(dir, "logR.txt"), RealCryptoSpecs);
             var rRisks = rw.Log.Select(x => System.Text.RegularExpressions.Regex.Match(x, @"(\S+)\s+size: .*risk ([0-9.]+) EUR \(([0-9.]+)%\)"))
                            .Where(x => x.Success).Select(x => (Sym: x.Groups[1].Value, Pct: double.Parse(x.Groups[3].Value, CultureInfo.InvariantCulture))).ToList();
             var rTraded = new HashSet<string>(rw.Log.Where(x => x.Contains(" ENTRY TRD ")).Select(x => x.Split('|')[1].Trim().Split(' ')[0]));
@@ -2323,6 +2383,44 @@ namespace Sim
             if (rTraded.Count < 2) rw.Violations.Add("a 50 EUR budget traded only " + rTraded.Count + " coin(s) in a week");
             if (rRisks.Any(x => x.Pct > 3.0 + 1e-9)) rw.Violations.Add("an entry risked more than 3% of the 50 EUR budget");
             if (rTraded.Contains("BTCUSD") || rTraded.Contains("BCH/USD")) rw.Violations.Add("a coin whose minimum volume is too big for 50 EUR was traded");
+
+            // 19. What the user gets on the real demo account: the instance added with nothing changed - the chart the Robot
+            // attribute names, every parameter at its default, 197.95 EUR on the account, the real minimum volumes.
+            string sName = QuantAI_Scalper_24x7_V3.BotName;
+            DateTime sStart = new DateTime(2026, 9, 28, 6, 0, 0, DateTimeKind.Utc);
+            World sw = Scenario("S: installed as is - " + sName + ", 197.95 EUR account", 29, sStart, TimeSpan.FromDays(7),
+                     null, 197.95, Path.Combine(dir, "logS.txt"), RealCryptoSpecs, chart: DefaultChart);
+            var sBySymbol = (Dictionary<string, Market>)typeof(QuantAI_Scalper_24x7_V3).GetField("_bySymbol", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(sw.Bot);
+            Market sXrp;
+            DateTime sXrpBar = sBySymbol.TryGetValue("XRPUSD", out sXrp) ? sXrp.LastSigClosed : DateTime.MinValue;
+            int sEntries = sw.Log.Count(x => x.Contains(" ENTRY TRD "));
+            var sRisks = sw.Log.Select(x => System.Text.RegularExpressions.Regex.Match(x, @"size: .*risk ([0-9.]+) EUR \(([0-9.]+)%\)"))
+                           .Where(x => x.Success).Select(x => double.Parse(x.Groups[2].Value, CultureInfo.InvariantCulture)).ToList();
+            bool sBanner = sw.Log.Take(3).Any(x => x.Contains("=== " + sName + " v"));
+            bool sBudget = sw.Log.Any(x => x.Contains("PARAMS budget: 200.00 EUR -> budget equity 197.95"));
+            Console.WriteLine("S chart " + sw.ChartSymbol + " " + sw.ChartTimeFrame.ShortName + " | banner " + sBanner + " | budget line " + sBudget + " | XRP last d1 bar "
+                              + sXrpBar.ToString("yyyy-MM-dd") + " | entries " + sEntries + " | max risk " + (sRisks.Count > 0 ? sRisks.Max().ToString("F2") : "n/a") + "%");
+            if (sw.ChartSymbol != "XRPUSD" || !sw.ChartTimeFrame.Equals(TimeFrame.Daily)) sw.Violations.Add("a new instance does not open on XRPUSD D1");
+            if (!sBanner) sw.Violations.Add("the first log lines do not name " + sName);
+            if (!sBudget) sw.Violations.Add("the budget is not 200 EUR capped at the 197.95 EUR account");
+            if (sXrpBar < sStart.AddDays(6).Date) sw.Violations.Add("the daily bars of the chart symbol stopped at " + sXrpBar.ToString("yyyy-MM-dd"));
+            if (sEntries < 1) sw.Violations.Add("the defaults opened no trade in a week");
+            if (sRisks.Any(x => x > 3.0 + 1e-9)) sw.Violations.Add("an entry risked more than 3% of the budget");
+
+            // 20. The same week with every "Scalper Only" setting (groups S1-S5) moved to another value: the trend must trade
+            // exactly the same - otherwise those groups are not what their names say.
+            List<string> tChanged = null;
+            World tw = Scenario("T: as S, every Scalper Only setting changed", 29, sStart, TimeSpan.FromDays(7),
+                     b => { tChanged = ScrambleScalperOnly(b); }, 197.95, Path.Combine(dir, "logT.txt"), RealCryptoSpecs, chart: DefaultChart);
+            List<string> sTrades = TradeRecord(sw), tTrades = TradeRecord(tw);
+            int tFirstDiff = Enumerable.Range(0, Math.Max(sTrades.Count, tTrades.Count))
+                                       .FirstOrDefault(k => k >= sTrades.Count || k >= tTrades.Count || sTrades[k] != tTrades[k]) ;
+            bool tSame = sTrades.SequenceEqual(tTrades);
+            Console.WriteLine("T settings changed " + tChanged.Count + " | trades S " + (sTrades.Count - 1) + ", T " + (tTrades.Count - 1) + " | identical " + tSame
+                              + (tSame ? "" : " | first difference: S " + (tFirstDiff < sTrades.Count ? sTrades[tFirstDiff] : "-") + " / T " + (tFirstDiff < tTrades.Count ? tTrades[tFirstDiff] : "-")));
+            if (tChanged.Count < 40) tw.Violations.Add("only " + tChanged.Count + " Scalper Only settings were changed");
+            if (!tSame) tw.Violations.Add("a Scalper Only setting changed the trend's trades");
+            if (sTrades.Count < 2) tw.Violations.Add("scenario S made no trade to compare");
 
             string[] checks =
             {
@@ -2343,7 +2441,9 @@ namespace Sim
                 "Тренд на h1, выходные крипты: входы без фильтров скальпера, стоп только подтягивается, без цели, перезапуск",
                 "Настройки по умолчанию (тренд d1, бюджет 200): форекс не торгуется, BTC не по бюджету, в журнале уровни входа и swap",
                 "Тренд на форексе (включён вручную): позиции держатся через выходные, swap списывается",
-                "Бюджет 50 EUR, реальные минимальные лоты: торгуются монеты с мелким лотом, риск сделки не больше 3 %"
+                "Бюджет 50 EUR, реальные минимальные лоты: торгуются монеты с мелким лотом, риск сделки не больше 3 %",
+                "Установка как есть: график XRPUSD D1, все настройки по умолчанию, счёт 197.95 EUR, реальные минимальные лоты",
+                "То же, но все настройки групп «Scalper Only» изменены: сделки тренда совпадают до цента"
             };
             string[] notes =
             {
@@ -2370,12 +2470,15 @@ namespace Sim
                 "рынков крипты на d1: " + pMarkets + ", форекс выключен: " + (pForexOut ? "да" : "нет") + ", строки «waiting: BUY above»: " + pw.Log.Count(x => x.Contains("| waiting: BUY above ")),
                 "входов: " + qEntries + ", позиция через выходные: " + (qHeld ? "да" : "нет") + ", swap списан: " + qw.SwapTotal.ToString("F2", CultureInfo.InvariantCulture) + " EUR",
                 "входов: " + rw.Log.Count(x => x.Contains(" ENTRY TRD ")) + " на " + string.Join(", ", rTraded.OrderBy(x => x)) + ", наибольший риск сделки "
-                    + (rRisks.Count > 0 ? rRisks.Max(x => x.Pct).ToString("F2", CultureInfo.InvariantCulture) : "—") + " %, пропусков из-за крупного минимального лота: " + rTooRisky
+                    + (rRisks.Count > 0 ? rRisks.Max(x => x.Pct).ToString("F2", CultureInfo.InvariantCulture) : "—") + " %, пропусков из-за крупного минимального лота: " + rTooRisky,
+                "график " + sw.ChartSymbol + " " + sw.ChartTimeFrame.ShortName + ", бюджет 200 → 197.95 EUR, входов: " + sEntries + ", наибольший риск сделки "
+                    + (sRisks.Count > 0 ? sRisks.Max().ToString("F2", CultureInfo.InvariantCulture) : "—") + " %, последняя дневная свеча XRP " + sXrpBar.ToString("dd.MM", CultureInfo.InvariantCulture),
+                "изменено настроек: " + tChanged.Count + ", сделок S/T: " + (sTrades.Count - 1) + "/" + (tTrades.Count - 1) + ", совпадают: " + (tSame ? "да" : "нет")
             };
-            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw, mw, nw, ow, pw, qw, rw };
-            // Scenario order in Rows follows the calls: A B C D E F H G I J K L M N O P Q R.
-            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R" };
-            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R" };
+            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw };
+            // Scenario order in Rows follows the calls: A B C D E F H G I J K L M N O P Q R S T.
+            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T" };
+            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T" };
             for (int k = 0; k < Rows.Count && k < order.Length; k++)
             {
                 int idx = Array.IndexOf(letters, order[k]);
@@ -2389,7 +2492,7 @@ namespace Sim
             Console.WriteLine();
             Console.WriteLine("Unknown API members used by the bot (not mocked):");
             foreach (var kv in Mk.Unknown.OrderByDescending(k => k.Value)) Console.WriteLine("  " + kv.Key + " x" + kv.Value);
-            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw, mw, nw, ow, pw, qw, rw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
+            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
             Console.WriteLine(ok ? "SIMULATION OK" : "SIMULATION FOUND PROBLEMS");
             return ok ? 0 : 1;
         }

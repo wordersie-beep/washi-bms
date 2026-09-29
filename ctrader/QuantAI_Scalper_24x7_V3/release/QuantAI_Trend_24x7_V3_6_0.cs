@@ -1,5 +1,5 @@
 // =====================================================================================================
-//  QuantAI_Scalper_24x7_V3  v3.6.0   (installs in cTrader as QuantAI_Trend_24x7_V3_6_0, see build_release.sh)
+//  QuantAI_Trend_24x7_V3_6_0  v3.6.0   (installs in cTrader as QuantAI_Trend_24x7_V3_6_0, see build_release.sh)
 //  cTrader Automate cBot | daily trend following for small budgets (from 50 EUR), crypto around the clock
 //    - Strategy = Trend (default): Turtle System 1 on daily bars - entry beyond the 20-bar high/low, stop 2 x ATR
 //      sized to Risk Percent, exit on the 10-bar channel, no target, positions held through market breaks.
@@ -66,7 +66,7 @@ namespace cAlgo.Robots
     }
 
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "XRPUSD", DefaultTimeFrame = "D1")]
-    public class QuantAI_Scalper_24x7_V3 : Robot
+    public class QuantAI_Trend_24x7_V3_6_0 : Robot
     {
         private const string BotVersion = "3.6.0";
 
