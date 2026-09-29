@@ -1,9 +1,13 @@
 // =====================================================================================================
-//  QuantAI_Trend_24x7_V3_6_0  v3.6.0   (installs in cTrader as QuantAI_Trend_24x7_V3_6_0, see build_release.sh)
-//  cTrader Automate cBot | daily trend following for small budgets (from 50 EUR), crypto around the clock
+//  QuantAI_TrendIntraday_24x7_V3_7_0  v3.7.0   (installs in cTrader as QuantAI_TrendIntraday_24x7_V3_7_0, see build_release.sh)
+//  cTrader Automate cBot | small budgets (from 50 EUR): daily trend on crypto 24/7 + the last half hour of the US session
 //    - Strategy = Trend (default): Turtle System 1 on daily bars - entry beyond the 20-bar high/low, stop 2 x ATR
 //      sized to Risk Percent, exit on the 10-bar channel, no target, positions held through market breaks.
-//      Checked on real quotes before release (README: "Проверка на реальных котировках"). Settings: groups 1-5.
+//      Checked on real quotes before release (README: "Проверка на реальных котировках"). Settings: groups 1-2, 4-6.
+//    - Last half hour (US500, on by default, group 3): at 15:30 New York the bot trades in the direction of the move
+//      since the previous 16:00 close when the market is volatile (20-day volatility >= 15%) and the move is large
+//      (>= 0.5 daily sd), and closes at 15:59 - dealers hedging options push the close the same way (Baltussen et al.
+//      2021, Gao et al. 2018, Journal of Financial Economics). Replayed on real S&P 500 minutes 2005-2020: PF 1.5-1.6.
 //    - Strategy = Scalper: the micro-impulse engine described below, settings in groups S1-S5. On real EURUSD ticks
 //      2019-2022 no scalping rule tested beat spread + commission (README), so it stays for reference only.
 //    - ONE instance trades every symbol of its lists (a demo account allows one cloud instance); the chart it is
@@ -66,16 +70,16 @@ namespace cAlgo.Robots
     }
 
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None, DefaultSymbolName = "XRPUSD", DefaultTimeFrame = "D1")]
-    public class QuantAI_Trend_24x7_V3_6_0 : Robot
+    public class QuantAI_TrendIntraday_24x7_V3_7_0 : Robot
     {
-        private const string BotVersion = "3.6.0";
+        private const string BotVersion = "3.7.0";
 
         /// <summary>
         /// The cBot's name in cTrader, with its version: build_release.sh gives the class and the assembly this name (the
         /// Robot attribute's name constructor is obsolete - cTrader names a cBot after its assembly and class), so every
         /// version installs as a separate cBot and never overwrites the one that is running. Raise it with every change.
         /// </summary>
-        public const string BotName = "QuantAI_Trend_24x7_V3_6_0";
+        public const string BotName = "QuantAI_TrendIntraday_24x7_V3_7_0";
 
         private bool TrendMode
         {
@@ -130,85 +134,105 @@ namespace cAlgo.Robots
         [Parameter("Trade Forex Too (not validated)", Group = "2. Trend (Daily Breakout)", DefaultValue = false)]
         public bool TrendIncludeForex { get; set; }
 
-        // ---- 3. Risk and money ------------------------------------------------------------------------------
+        // ---- 3. US500 last half hour (15:30 -> 15:59 New York) -----------------------------------------------
 
-        [Parameter("Fixed Lots Per Trade (0 = Risk %)", Group = "3. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 0.01)]
+        [Parameter("Trade The Last Half Hour", Group = "3. US500 Last Half Hour", DefaultValue = true)]
+        public bool IndexEnabled { get; set; }
+
+        [Parameter("Index Symbols (A|B = alternatives)", Group = "3. US500 Last Half Hour", DefaultValue = "US500|SPX500|US500.cash")]
+        public string IndexSymbols { get; set; }
+
+        [Parameter("Min Volatility (% a year, last 20 days)", Group = "3. US500 Last Half Hour", DefaultValue = 15.0, MinValue = 0.0, Step = 1.0)]
+        public double IndexMinVolatility { get; set; }
+
+        [Parameter("Min Move Since Yesterday's Close (x daily sd)", Group = "3. US500 Last Half Hour", DefaultValue = 0.5, MinValue = 0.0, Step = 0.1)]
+        public double IndexMinMoveSd { get; set; }
+
+        [Parameter("Stop (x half-hour sd)", Group = "3. US500 Last Half Hour", DefaultValue = 2.5, MinValue = 0.5, Step = 0.1)]
+        public double IndexStopSd { get; set; }
+
+        [Parameter("Tightest Stop To Fit The Budget (x half-hour sd)", Group = "3. US500 Last Half Hour", DefaultValue = 1.5, MinValue = 0.5, Step = 0.1)]
+        public double IndexMinStopSd { get; set; }
+
+        // ---- 4. Risk and money ------------------------------------------------------------------------------
+
+        [Parameter("Fixed Lots Per Trade (0 = Risk %)", Group = "4. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 0.01)]
         public double FixedLots { get; set; }
 
-        [Parameter("Risk Percent (% of budget)", Group = "3. Risk & Money", DefaultValue = 1.0, MinValue = 0.01, MaxValue = 100.0, Step = 0.05)]
+        [Parameter("Risk Percent (% of budget)", Group = "4. Risk & Money", DefaultValue = 1.0, MinValue = 0.01, MaxValue = 100.0, Step = 0.05)]
         public double RiskPercent { get; set; }
 
-        [Parameter("Min Lots (0 = broker minimum)", Group = "3. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 0.01)]
+        [Parameter("Min Lots (0 = broker minimum)", Group = "4. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 0.01)]
         public double MinLots { get; set; }
 
-        [Parameter("Max Lots (cap)", Group = "3. Risk & Money", DefaultValue = 10.0, MinValue = 0.01, Step = 0.01)]
+        [Parameter("Max Lots (cap)", Group = "4. Risk & Money", DefaultValue = 10.0, MinValue = 0.01, Step = 0.01)]
         public double MaxLots { get; set; }
 
-        [Parameter("Use Min Volume If Size Is Smaller", Group = "3. Risk & Money", DefaultValue = true)]
+        [Parameter("Use Min Volume If Size Is Smaller", Group = "4. Risk & Money", DefaultValue = true)]
         public bool AllowMinLotOverride { get; set; }
 
-        [Parameter("Max Risk With Min Volume (% of budget)", Group = "3. Risk & Money", DefaultValue = 3.0, MinValue = 0.1, Step = 0.5)]
+        [Parameter("Max Risk With Min Volume (% of budget)", Group = "4. Risk & Money", DefaultValue = 3.0, MinValue = 0.1, Step = 0.5)]
         public double MaxMinVolumeRiskPercent { get; set; }
 
-        [Parameter("Margin Per Trade (% of free budget)", Group = "3. Risk & Money", DefaultValue = 30.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
+        [Parameter("Margin Per Trade (% of free budget)", Group = "4. Risk & Money", DefaultValue = 30.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
         public double MarginPerTradePercent { get; set; }
 
-        [Parameter("Max Total Margin (% of budget)", Group = "3. Risk & Money", DefaultValue = 90.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
+        [Parameter("Max Total Margin (% of budget)", Group = "4. Risk & Money", DefaultValue = 90.0, MinValue = 1.0, MaxValue = 100.0, Step = 5.0)]
         public double MaxTotalMarginPercent { get; set; }
 
-        [Parameter("Forex Leverage For Margin (0 = broker)", Group = "3. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 1.0)]
+        [Parameter("Forex Leverage For Margin (0 = broker)", Group = "4. Risk & Money", DefaultValue = 0.0, MinValue = 0.0, Step = 1.0)]
         public double LeverageOverride { get; set; }
 
-        [Parameter("Crypto Leverage For Margin (0 = broker)", Group = "3. Risk & Money", DefaultValue = 2.0, MinValue = 0.0, Step = 1.0)]
+        [Parameter("Crypto Leverage For Margin (0 = broker)", Group = "4. Risk & Money", DefaultValue = 2.0, MinValue = 0.0, Step = 1.0)]
         public double CryptoLeverageOverride { get; set; }
 
-        [Parameter("Max Slippage Pips (0 = market)", Group = "3. Risk & Money", DefaultValue = 0.5, MinValue = 0.0, Step = 0.1)]
+        [Parameter("Max Slippage Pips (0 = market)", Group = "4. Risk & Money", DefaultValue = 0.5, MinValue = 0.0, Step = 0.1)]
         public double MaxSlippagePips { get; set; }
 
-        [Parameter("Daily Max Loss % of budget (0 = off)", Group = "3. Risk & Money", DefaultValue = 10.0, MinValue = 0.0, Step = 0.5)]
+        [Parameter("Daily Max Loss % of budget (0 = off)", Group = "4. Risk & Money", DefaultValue = 10.0, MinValue = 0.0, Step = 0.5)]
         public double DailyMaxLossPercent { get; set; }
 
-        [Parameter("Max Trades Per Day (0 = off)", Group = "3. Risk & Money", DefaultValue = 0, MinValue = 0)]
+        [Parameter("Max Trades Per Day (0 = off)", Group = "4. Risk & Money", DefaultValue = 0, MinValue = 0)]
         public int MaxTradesPerDay { get; set; }
 
-        // ---- 4. Sessions and market breaks ------------------------------------------------------------------
+        // ---- 5. Sessions and market breaks ------------------------------------------------------------------
 
-        [Parameter("Crypto Trades 24/7 (ignore session)", Group = "4. Sessions & Breaks", DefaultValue = true)]
+        [Parameter("Crypto Trades 24/7 (ignore session)", Group = "5. Sessions & Breaks", DefaultValue = true)]
         public bool CryptoIgnoresSession { get; set; }
 
-        [Parameter("Forex Session Filter", Group = "4. Sessions & Breaks", DefaultValue = false)]
+        [Parameter("Forex Session Filter", Group = "5. Sessions & Breaks", DefaultValue = false)]
         public bool UseSessionFilter { get; set; }
 
-        [Parameter("Session Start Hour (UTC)", Group = "4. Sessions & Breaks", DefaultValue = 6, MinValue = 0, MaxValue = 23)]
+        [Parameter("Session Start Hour (UTC)", Group = "5. Sessions & Breaks", DefaultValue = 6, MinValue = 0, MaxValue = 23)]
         public int SessionStartHour { get; set; }
 
-        [Parameter("Session End Hour (UTC)", Group = "4. Sessions & Breaks", DefaultValue = 20, MinValue = 0, MaxValue = 24)]
+        [Parameter("Session End Hour (UTC)", Group = "5. Sessions & Breaks", DefaultValue = 20, MinValue = 0, MaxValue = 24)]
         public int SessionEndHour { get; set; }
 
-        [Parameter("Flat Before Breaks Longer Than (min, 0 = off)", Group = "4. Sessions & Breaks", DefaultValue = 15, MinValue = 0)]
+        [Parameter("Flat Before Breaks Longer Than (min, 0 = off)", Group = "5. Sessions & Breaks", DefaultValue = 15, MinValue = 0)]
         public int FlatBeforeBreakMinutes { get; set; }
 
-        [Parameter("Cooldown After Close (sec, per symbol)", Group = "4. Sessions & Breaks", DefaultValue = 30, MinValue = 0)]
+        [Parameter("Cooldown After Close (sec, per symbol)", Group = "5. Sessions & Breaks", DefaultValue = 30, MinValue = 0)]
         public int CooldownSeconds { get; set; }
 
-        // ---- 5. Log and display -----------------------------------------------------------------------------
+        // ---- 6. Log and display -----------------------------------------------------------------------------
 
-        [Parameter("Position Label", Group = "5. Log & Display", DefaultValue = "QuantAI_M1")]
+        [Parameter("Position Label", Group = "6. Log & Display", DefaultValue = "QuantAI_M1")]
         public string BotLabel { get; set; }
 
-        [Parameter("Log Every Bar (all symbols)", Group = "5. Log & Display", DefaultValue = false)]
+        [Parameter("Log Every Bar (all symbols)", Group = "6. Log & Display", DefaultValue = false)]
         public bool LogBarSummary { get; set; }
 
-        [Parameter("Log Skip Reasons", Group = "5. Log & Display", DefaultValue = true)]
+        [Parameter("Log Skip Reasons", Group = "6. Log & Display", DefaultValue = true)]
         public bool LogSkipReasons { get; set; }
 
-        [Parameter("Max Skip Lines Per Hour (0 = no limit)", Group = "5. Log & Display", DefaultValue = 60, MinValue = 0)]
+        [Parameter("Max Skip Lines Per Hour (0 = no limit)", Group = "6. Log & Display", DefaultValue = 60, MinValue = 0)]
         public int MaxSkipLinesPerHour { get; set; }
 
-        [Parameter("Show Chart HUD", Group = "5. Log & Display", DefaultValue = true)]
+        [Parameter("Show Chart HUD", Group = "6. Log & Display", DefaultValue = true)]
         public bool ShowHud { get; set; }
 
-        [Parameter("Status Summary Every (min, 0 = off)", Group = "5. Log & Display", DefaultValue = 15, MinValue = 0)]
+        [Parameter("Status Summary Every (min, 0 = off)", Group = "6. Log & Display", DefaultValue = 15, MinValue = 0)]
         public int StatusEveryMinutes { get; set; }
 
         // ---- S1-S5: Strategy = Scalper only - the trend mode does not read these ----------------------------
@@ -355,6 +379,12 @@ namespace cAlgo.Robots
         private const int VerdictMinTrades = 100;             // RESULTS judge the strategy only after this many closed trades
         private const int TrendHistoryBars = 300;             // bars a trend market loads (channel and ATR need far fewer than the AI)
         private const string TrendSetup = "TRD";
+        private const string IndexSetup = "LHH";                // last half hour of the New York session
+        private const int IndexEntryMinuteNy = 15 * 60 + 30;    // 15:30 New York: the signal is read and the trade opens
+        private const int IndexExitMinuteNy = 15 * 60 + 59;     // 15:59 New York: the trade closes, before the 16:00 close
+        private const int IndexCloses = 21;                     // daily 16:00 closes: 20 returns for the volatility
+        private const int IndexHistoryBars = 600;               // hourly bars that hold 21 trading days
+        private const double IndexMaxCostSd = 0.2;              // spread above 0.2 half-hour sd (a news spike) skips the day
         private const int SpreadWindowTicks = 500;            // spreads kept for the rolling median
         private const int SpreadCalibrationTicks = 300;       // ticks before the timeframe and the AI are fitted to the live spread
         private const double SpreadSettleMinutes = 10.0;      // spreads right after a market (re)opens are not typical and are not sampled
@@ -384,6 +414,8 @@ namespace cAlgo.Robots
         private readonly List<Market> _markets = new List<Market>();
         private readonly Dictionary<string, Market> _bySymbol = new Dictionary<string, Market>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<int, TradeState> _trades = new Dictionary<int, TradeState>();
+        private readonly List<Market> _indexMarkets = new List<Market>();   // the last half hour of US indices, outside the trend/scalper pipeline
+        private readonly Dictionary<string, Market> _indexBySymbol = new Dictionary<string, Market>(StringComparer.OrdinalIgnoreCase);
         private readonly List<string> _budgetSkipped = new List<string>();
         private readonly List<string> _notOffered = new List<string>();
 
@@ -462,10 +494,15 @@ namespace cAlgo.Robots
             }
             foreach (string item in crypto)
                 AddMarket(item, true);
+            if (IndexEnabled)
+            {
+                foreach (string item in MarketMath.ParseSymbols(IndexSymbols))
+                    AddIndexMarket(item, false);
+            }
 
             LogBudgetSummary();
             LogResults();
-            if (_markets.Count == 0)
+            if (_markets.Count == 0 && _indexMarkets.Count == 0)
             {
                 Log("FATAL: no listed symbol can be traded with this account and budget (see the MARKET lines above). "
                     + "Raise 'Bot Budget' or add cheaper symbols. The cBot stops.");
@@ -481,7 +518,9 @@ namespace cAlgo.Robots
             var names = new List<string>();
             foreach (Market m in _markets)
                 names.Add(m.Name + " " + m.SigTf.ShortName);
-            Log("READY: " + _markets.Count + " markets - " + string.Join(", ", names) + " | max " + MaxOpenPositions + " open positions");
+            foreach (Market m in _indexMarkets)
+                names.Add(m.Name + " last half hour");
+            Log("READY: " + (_markets.Count + _indexMarkets.Count) + " markets - " + string.Join(", ", names) + " | max " + MaxOpenPositions + " open positions");
             UpdateHud();
         }
 
@@ -501,6 +540,7 @@ namespace cAlgo.Robots
                 CheckDailyLoss();
                 foreach (Market m in _markets)
                     ManageMarketPositions(m);
+                ManageIndexMarkets(now);
                 ObserveMargins();
                 CheckMarketTransitions(now);
                 CheckSessionTransition(now);
@@ -549,8 +589,13 @@ namespace cAlgo.Robots
                 return "Position Label is empty";
             bool hasFx = FxListInUse().Count > 0;
             bool hasCrypto = MarketMath.ParseSymbols(CryptoSymbols).Count > 0;
-            if (!hasFx && !hasCrypto)
+            bool hasIndex = IndexEnabled && MarketMath.ParseSymbols(IndexSymbols).Count > 0;
+            if (IndexEnabled && IndexMinStopSd > IndexStopSd)
+                return "'Tightest Stop To Fit The Budget' (" + F(IndexMinStopSd, 1) + ") is wider than the last-half-hour 'Stop' (" + F(IndexStopSd, 1) + ")";
+            if (!hasFx && !hasCrypto && !hasIndex)
                 return TrendMode && !TrendIncludeForex ? "'Crypto Symbols' is empty (the trend mode trades Forex only with 'Trade Forex Too')" : "both symbol lists are empty";
+            if (!hasFx && !hasCrypto)
+                return null;   // only the last half hour trades
             if (TrendMode)
                 return TimeFrameList(TrendTimeFrames).Count == 0 ? "'Trend TimeFrames' has no valid timeframe (use h1, h4, d1)" : null;
             if (hasFx && TimeFrameList(FxTimeFrames).Count == 0)
@@ -1808,6 +1853,319 @@ namespace cAlgo.Robots
 
         #endregion
 
+        #region Last half hour (US index CFDs)
+
+        // Baltussen, Da, Lammers, Martens (2021, Journal of Financial Economics) and Gao, Han, Li, Zhou (2018, JFE): the last half
+        // hour of the New York session tends to continue the day's move (dealers hedging options buy into rises and sell into
+        // falls), most of all when the market is volatile and the day's move is large. Checked on real 1-minute S&P 500 and
+        // Nasdaq 100 CFD quotes 2005-2020 and 2026 before release (README). One trade a day at most, never held past 15:59.
+
+        /// <summary>The market record of a symbol: the trend/scalper markets, then the last-half-hour ones; null when neither.</summary>
+        private Market FindMarket(string symbolName)
+        {
+            Market m;
+            if (_bySymbol.TryGetValue(symbolName, out m))
+                return m;
+            return _indexBySymbol.TryGetValue(symbolName, out m) ? m : null;
+        }
+
+        private bool IsIndexPosition(Position p)
+        {
+            return _indexBySymbol.ContainsKey(p.SymbolName) || (p.Comment != null && p.Comment.StartsWith("QAI|" + IndexSetup + "|", StringComparison.Ordinal));
+        }
+
+        /// <summary>Adds a US index for the last half hour: resolves the name, checks the budget carries its minimum volume, loads hourly history.</summary>
+        private Market AddIndexMarket(string item, bool manageOnly)
+        {
+            string name = item;
+            try
+            {
+                name = ResolveSymbolName(item);
+                if (name == null)
+                {
+                    _notOffered.Add(item);
+                    Log("MARKET " + item + ": not offered on this account - skipped");
+                    return null;
+                }
+                Market existing;
+                if (_indexBySymbol.TryGetValue(name, out existing))
+                    return existing;
+                if (_bySymbol.ContainsKey(name))
+                {
+                    Log("MARKET " + name + ": listed for the trend/scalper too - the last half hour leaves it to them");
+                    return null;
+                }
+                Symbol sym = Symbols.GetSymbol(name);
+                if (sym == null)
+                {
+                    Log("MARKET " + name + ": symbol could not be loaded - skipped");
+                    return null;
+                }
+                var m = new Market();
+                m.Name = name;
+                m.Symbol = sym;
+                m.IsIndex = true;
+                m.ManageOnly = manageOnly;
+                m.Hourly = MarketData.GetBars(TimeFrame.Hour, name);
+                m.LastPrice = sym.Bid > 0 ? sym.Bid : (m.Hourly.Count > 0 ? m.Hourly.ClosePrices[m.Hourly.Count - 1] : 0.0);
+                m.FxLike = false;
+                m.BotPip = MarketMath.BotPip(sym.PipSize, m.LastPrice, false, NonFxPipRatio);
+                m.CommissionPerUnit = CommissionEstimatePerUnit(m);
+                m.CommissionSource = CommissionInfo(sym, m.CommissionPerUnit > 0);
+                double minVolume = MinTradableVolume(m);
+                string how;
+                m.MinVolumeMargin = EstimateMargin(m, TradeType.Buy, minVolume, out how);
+                double allowed = BotEquity() * MaxTotalMarginPercent / 100.0;
+                if (!manageOnly && m.MinVolumeMargin > allowed + VolumeEpsilon)
+                {
+                    double needed = m.MinVolumeMargin * 100.0 / MaxTotalMarginPercent;
+                    _budgetSkipped.Add(name + " " + F(needed, 0));
+                    Log("MARKET " + name + ": minimum " + Lots(m, minVolume) + " needs " + F(m.MinVolumeMargin, 2) + " " + _ccy + " margin (" + how
+                        + "), the budget allows " + F(allowed, 2) + " - skipped (needs a budget of about " + F(needed, 0) + " " + _ccy + ")");
+                    return null;
+                }
+                EnsureBars(m.Hourly, IndexHistoryBars, name + " h1");
+                sym.Tick += args => { if (args.Symbol.Bid > 0) m.LastPrice = args.Symbol.Bid; };   // keeps the quotes streaming
+                _indexMarkets.Add(m);
+                _indexBySymbol[name] = m;
+                Log("MARKET " + name + ": index, last half hour 15:30 -> 15:59 New York" + (manageOnly ? " (manage-only: closes the position of an earlier run)" : "")
+                    + " | min " + Lots(m, minVolume) + ", margin " + F(m.MinVolumeMargin, 2) + " " + _ccy + " (" + how + ") | spread now "
+                    + sym.Spread.ToString("G5", Inv) + " | " + IndexStatus(m, Server.Time));
+                return m;
+            }
+            catch (Exception ex)
+            {
+                Log("MARKET " + name + ": could not start the last half hour (" + ex.GetType().Name + ": " + ex.Message + ") - skipped");
+                return null;
+            }
+        }
+
+        /// <summary>A position of the last half hour found at start: it is only ever closed (15:59 New York, or at once on a later day).</summary>
+        private void RecoverIndexPosition(Position p)
+        {
+            Market m;
+            if (!_indexBySymbol.TryGetValue(p.SymbolName, out m))
+                m = AddIndexMarket(p.SymbolName, true);
+            if (!_trades.ContainsKey(p.Id))
+            {
+                var st = new TradeState();
+                st.PositionId = p.Id;
+                st.SymbolName = p.SymbolName;
+                st.Setup = IndexSetup;
+                st.IsLong = p.TradeType == TradeType.Buy;
+                st.EntryTime = p.EntryTime;
+                st.RiskDist = p.StopLoss.HasValue ? Math.Abs(p.EntryPrice - p.StopLoss.Value) : 0.0;
+                st.InitialVolume = p.VolumeInUnits;
+                _trades[p.Id] = st;
+            }
+            Log("RECOVER: #" + p.Id + " " + p.SymbolName + " last-half-hour position" + (m == null ? " - symbol unavailable, it keeps its server-side stop"
+                : " - it closes at 15:59 New York (at once if that has passed)"));
+        }
+
+        /// <summary>Every second: closes what is due, then reads the signal once at 15:30 New York on each trading day.</summary>
+        private void ManageIndexMarkets(DateTime now)
+        {
+            if (_indexMarkets.Count == 0)
+                return;
+            DateTime ny = NewYorkTime.FromUtc(now);
+            int minute = ny.Hour * 60 + ny.Minute;
+            foreach (Market m in _indexMarkets)
+            {
+                foreach (Position p in Positions.FindAll(BotLabel, m.Name))
+                {
+                    DateTime entryNy = NewYorkTime.FromUtc(p.EntryTime);
+                    if (ny.Date == entryNy.Date && minute < IndexExitMinuteNy)
+                        continue;
+                    if (m.IdxLastExitTry != DateTime.MinValue && (now - m.IdxLastExitTry).TotalSeconds < 30)
+                        continue;   // a closed market rejects the close: retry every 30 s, not every second
+                    m.IdxLastExitTry = now;
+                    TradeState st;
+                    if (_trades.TryGetValue(p.Id, out st))
+                        st.CloseReason = ny.Date == entryNy.Date ? "15:59 NEW YORK" : "LATE EXIT (held past 15:59 New York)";
+                    TradeResult r = ClosePosition(p);
+                    if (!r.IsSuccessful)
+                        LogM(m, "LHH EXIT #" + p.Id + " failed (" + r.Error + ") - retrying in 30 s");
+                }
+                if (m.ManageOnly || !IndexEnabled)
+                    continue;
+                if (ny.DayOfWeek == DayOfWeek.Saturday || ny.DayOfWeek == DayOfWeek.Sunday)
+                    continue;
+                if (minute != IndexEntryMinuteNy || m.IdxCheckedDay == ny.Date)
+                    continue;
+                m.IdxCheckedDay = ny.Date;
+                TryIndexEntry(m, now, ny);
+            }
+        }
+
+        /// <summary>The signal of the day: the 16:00 closes of the previous 21 trading days and the price now (15:30 New York).</summary>
+        private int IndexSignal(Market m, DateTime nyDate, double price, out double vol, out double move, out double moveSd, out string why)
+        {
+            vol = 0.0; move = 0.0; moveSd = 0.0;
+            Bars h = m.Hourly;
+            List<double> closes = LastHalfHour.DailyCloses(i => h.OpenTimes[i], i => h.ClosePrices[i], h.Count, 60, nyDate, IndexCloses);
+            if (closes.Count < IndexCloses)
+            {
+                why = "history too short (" + closes.Count + "/" + IndexCloses + " daily closes at 16:00 New York)";
+                return 0;
+            }
+            int side = LastHalfHour.Signal(closes, price, IndexMinVolatility / 100.0, IndexMinMoveSd, out vol, out move, out moveSd);
+            string state = "volatility " + F(vol * 100.0, 1) + "% a year (needs " + F(IndexMinVolatility, 0) + "%), since yesterday's close "
+                           + Signed(move * 100.0, 2) + "% = " + F(moveSd, 2) + " sd (needs " + F(IndexMinMoveSd, 1) + ")";
+            why = side == 0 ? "no trade: " + state : state;
+            return side;
+        }
+
+        private void TryIndexEntry(Market m, DateTime now, DateTime ny)
+        {
+            Symbol sym = m.Symbol;
+            if (!sym.MarketHours.IsOpened() || !(sym.Bid > 0) || !(sym.Ask > 0))
+            {
+                m.IdxNote = "market closed at 15:30 New York " + ny.ToString("dd.MM", Inv);
+                LogM(m, "LHH SKIP: " + m.IdxNote);
+                return;
+            }
+            double mid = (sym.Bid + sym.Ask) / 2.0;
+            double vol, move, moveSd;
+            string why;
+            int side = IndexSignal(m, ny.Date, mid, out vol, out move, out moveSd, out why);
+            m.IdxNote = ny.ToString("dd.MM", Inv) + " " + why;
+            if (side == 0)
+            {
+                LogM(m, "LHH SKIP: " + why);
+                return;
+            }
+            string gate = null;
+            if (_dailyHalt)
+                gate = "daily loss limit reached";
+            else if (MaxTradesPerDay > 0 && _tradesToday >= MaxTradesPerDay)
+                gate = "max trades per day reached";
+            else if (Positions.FindAll(BotLabel, m.Name).Length > 0)
+                gate = "a position is already open on " + m.Name;
+            else if (Positions.FindAll(BotLabel).Length >= MaxOpenPositions)
+                gate = "max open positions reached";
+            else if (sym.TradingMode != SymbolTradingMode.FullAccess)
+                gate = "broker trading mode " + sym.TradingMode;
+            if (gate != null)
+            {
+                m.IdxNote += " | signal " + (side > 0 ? "BUY" : "SELL") + " skipped: " + gate;
+                LogM(m, "LHH SKIP: signal " + (side > 0 ? "BUY" : "SELL") + " (" + why + ") - " + gate);
+                return;
+            }
+
+            TradeType type = side > 0 ? TradeType.Buy : TradeType.Sell;
+            double price = side > 0 ? sym.Ask : sym.Bid;
+            double halfHourSd = LastHalfHour.HalfHourSd(vol);
+            double costSd = halfHourSd > 0 ? (sym.Ask - sym.Bid + m.CommissionPerUnit / Math.Max(sym.PipValue / sym.PipSize, 1e-12)) / (halfHourSd * mid) : double.MaxValue;
+            if (costSd > IndexMaxCostSd)
+            {
+                m.IdxNote += " | signal " + (side > 0 ? "BUY" : "SELL") + " skipped: spread " + F(costSd, 2) + " half-hour sd (max " + F(IndexMaxCostSd, 2) + ")";
+                LogM(m, "LHH SKIP: signal " + (side > 0 ? "BUY" : "SELL") + " (" + why + ") - spread + commission " + F(costSd, 2) + " half-hour sd > " + F(IndexMaxCostSd, 2));
+                return;
+            }
+            double dist = IndexStopSd * halfHourSd * price;
+            string stopNote = F(IndexStopSd, 1) + " half-hour sd";
+            // The minimum volume on a small budget can risk more than allowed at the full stop: the stop is tightened to fit,
+            // down to the tightest stop that still leaves the trade room; a day that would need a tighter one is skipped.
+            double perPrice = sym.PipSize > 0 ? sym.PipValue / sym.PipSize : 0.0;
+            double minUnits = MinTradableVolume(m);
+            double maxRisk = BotEquity() * MaxMinVolumeRiskPercent / 100.0;
+            if (FixedLots <= 0 && perPrice > 0 && minUnits * (dist * perPrice + m.CommissionPerUnit) > maxRisk + 1e-9)
+            {
+                double fit = (maxRisk / minUnits - m.CommissionPerUnit) / perPrice;
+                if (fit < IndexMinStopSd * halfHourSd * price)
+                {
+                    m.IdxNote += " | signal " + (side > 0 ? "BUY" : "SELL") + " skipped: the minimum volume would risk more than " + F(MaxMinVolumeRiskPercent, 1) + "% of the budget";
+                    LogM(m, "LHH SKIP: signal " + (side > 0 ? "BUY" : "SELL") + " (" + why + ") - the minimum " + Lots(m, minUnits) + " would risk more than "
+                         + F(MaxMinVolumeRiskPercent, 1) + "% of the budget even at a stop of " + F(IndexMinStopSd, 1) + " sd (" + P(m, IndexMinStopSd * halfHourSd * price) + ")");
+                    return;
+                }
+                stopNote = F(fit / (halfHourSd * price), 2) + " half-hour sd (tightened to fit " + F(MaxMinVolumeRiskPercent, 1) + "% of the budget)";
+                dist = fit;
+            }
+            double slPips = dist / sym.PipSize;
+            string sizing;
+            double marginEstimate;
+            double volume = ComputeVolume(m, type, slPips, out sizing, out marginEstimate);
+            if (volume <= 0)
+            {
+                m.IdxNote += " | signal " + (side > 0 ? "BUY" : "SELL") + " skipped: " + sizing;
+                LogM(m, "LHH SKIP: signal " + (side > 0 ? "BUY" : "SELL") + " (" + why + ") - " + sizing);
+                return;
+            }
+            string comment = "QAI|" + IndexSetup + "|v=" + F(vol, 3) + "|m=" + F(moveSd, 2);
+            TradeResult result = SendMarketOrder(m, type, volume, slPips, null, comment);
+            if (result == null || !result.IsSuccessful || result.Position == null)
+            {
+                m.IdxNote += " | order failed";
+                LogM(m, "LHH ORDER FAILED: " + (result != null && result.Error.HasValue ? result.Error.Value.ToString() : "no position returned") + " | " + sizing);
+                return;
+            }
+            Position p = result.Position;
+            var st = new TradeState();
+            st.PositionId = p.Id;
+            st.SymbolName = m.Name;
+            st.Setup = IndexSetup;
+            st.IsLong = side > 0;
+            st.EntryTime = p.EntryTime;
+            st.RiskDist = p.StopLoss.HasValue ? Math.Abs(p.EntryPrice - p.StopLoss.Value) : dist;
+            st.InitialVolume = p.VolumeInUnits;
+            st.MarginAtEntry = marginEstimate * (volume > 0 ? p.VolumeInUnits / volume : 1.0);
+            _trades[p.Id] = st;
+            _tradesToday++;
+            if (!p.StopLoss.HasValue)
+            {
+                double slPrice = Math.Round(side > 0 ? p.EntryPrice - dist : p.EntryPrice + dist, sym.Digits);
+                TradeResult fix = p.ModifyStopLossPrice(slPrice);
+                if (!fix.IsSuccessful)
+                {
+                    st.CloseReason = "NO STOP";
+                    LogM(m, "PROTECTION #" + p.Id + ": stop loss could not be attached (" + fix.Error + ") -> closing the position");
+                    ClosePosition(p);
+                    return;
+                }
+                st.RiskDist = Math.Abs(p.EntryPrice - slPrice);
+            }
+            double loss = st.RiskDist * perPrice * p.VolumeInUnits + m.CommissionPerUnit * p.VolumeInUnits;
+            DateTime exitUtc = NewYorkTime.ToUtc(ny.Date.AddMinutes(IndexExitMinuteNy));
+            _lastEvent = m.Name + " ENTRY " + IndexSetup + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice);
+            m.IdxNote = ny.ToString("dd.MM", Inv) + " " + (side > 0 ? "BUY" : "SELL") + " #" + p.Id + " until 15:59 New York";
+            LogM(m, "ENTRY " + IndexSetup + " " + (side > 0 ? "BUY" : "SELL") + " #" + p.Id + " " + Lots(m, p.VolumeInUnits) + " @" + P(m, p.EntryPrice) + " | SL " + P(m, p.StopLoss)
+                 + " (" + stopNote + ") | exit 15:59 New York = " + exitUtc.ToString("HH:mm", Inv) + " UTC | cost " + F(costSd, 2) + " sd | " + why);
+            LogM(m, "  " + sizing);
+            LogM(m, "  PLAN #" + p.Id + ": stop " + P(m, p.StopLoss) + " = -" + F(loss, 2) + " " + _ccy + " (" + F(loss / Math.Max(BotEquity(), 1e-9) * 100.0, 2)
+                 + "% of the budget) | no target: closed at 15:59 New York whatever the result");
+        }
+
+        /// <summary>One STATUS line: what the last half hour would do today, or what it holds.</summary>
+        private string IndexStatus(Market m, DateTime now)
+        {
+            DateTime ny = NewYorkTime.FromUtc(now);
+            Position[] held = Positions.FindAll(BotLabel, m.Name);
+            if (held.Length > 0)
+                return "holding #" + held[0].Id + " " + (held[0].TradeType == TradeType.Buy ? "BUY" : "SELL") + " " + Signed(held[0].NetProfit, 2) + " " + _ccy + ", exit 15:59 New York";
+            if (m.ManageOnly || !IndexEnabled)
+                return "manage-only";
+            DateTime nextNy = ny.Date.AddMinutes(IndexEntryMinuteNy);
+            if (ny.Hour * 60 + ny.Minute > IndexEntryMinuteNy || ny.DayOfWeek == DayOfWeek.Saturday || ny.DayOfWeek == DayOfWeek.Sunday)
+            {
+                nextNy = nextNy.AddDays(1);
+                while (nextNy.DayOfWeek == DayOfWeek.Saturday || nextNy.DayOfWeek == DayOfWeek.Sunday)
+                    nextNy = nextNy.AddDays(1);
+            }
+            string preview = "";
+            if (m.Symbol.Bid > 0 && m.Symbol.Ask > 0)
+            {
+                double vol, move, moveSd;
+                string why;
+                IndexSignal(m, nextNy.Date, (m.Symbol.Bid + m.Symbol.Ask) / 2.0, out vol, out move, out moveSd, out why);
+                preview = " | now: " + why.Replace("no trade: ", "");
+            }
+            return "next check " + nextNy.ToString("ddd HH:mm", Inv) + " New York = " + NewYorkTime.ToUtc(nextNy).ToString("HH:mm", Inv) + " UTC" + preview
+                   + (m.IdxNote.Length > 0 ? " | last: " + m.IdxNote : "");
+        }
+
+        #endregion
+
         #region Budget, sizing and margin
 
         /// <summary>Equity the bot sizes and limits itself by: the account equity, or the budget moved by the bot's own result.</summary>
@@ -2067,8 +2425,8 @@ namespace cAlgo.Robots
         {
             foreach (Position p in Positions.FindAll(BotLabel))
             {
-                Market m;
-                if (!_bySymbol.TryGetValue(p.SymbolName, out m) || !(p.VolumeInUnits > 0))
+                Market m = FindMarket(p.SymbolName);
+                if (m == null || !(p.VolumeInUnits > 0))
                     continue;
                 double margin = p.Margin;
                 if (!(margin > 0) || !Valid(margin))
@@ -2595,6 +2953,11 @@ namespace cAlgo.Robots
         {
             foreach (Position p in Positions.FindAll(BotLabel))
             {
+                if (IsIndexPosition(p))
+                {
+                    RecoverIndexPosition(p);
+                    continue;
+                }
                 Market m;
                 if (!_bySymbol.TryGetValue(p.SymbolName, out m))
                 {
@@ -2618,8 +2981,7 @@ namespace cAlgo.Robots
                 if (p.Label != BotLabel)
                     return;
 
-                Market m;
-                _bySymbol.TryGetValue(p.SymbolName, out m);
+                Market m = FindMarket(p.SymbolName);
                 TradeState st;
                 _trades.TryGetValue(p.Id, out st);
                 _trades.Remove(p.Id);
@@ -2685,7 +3047,7 @@ namespace cAlgo.Robots
                     + " " + _ccy + " | budget equity " + F(BotEquity(), 2) + " | loss streak " + (m != null ? m.ConsecLosses : 0));
 
                 // Trend following lives on the rare big winner that follows a run of small losses: it takes every signal.
-                if (m != null && MaxConsecutiveLosses > 0 && !TrendMode && m.ConsecLosses >= MaxConsecutiveLosses)
+                if (m != null && !m.IsIndex && MaxConsecutiveLosses > 0 && !TrendMode && m.ConsecLosses >= MaxConsecutiveLosses)
                 {
                     m.PauseUntil = Server.Time.AddMinutes(LossStreakPauseMinutes);
                     m.ConsecLosses = 0;
@@ -2704,6 +3066,8 @@ namespace cAlgo.Robots
                 return st.CloseReason;
             if (reason == PositionCloseReason.StopLoss)
             {
+                if (st != null && st.Setup == IndexSetup)
+                    return "STOP LOSS";
                 if (st != null && st.Setup == TrendSetup)
                     return st.TrailMoves > 0 ? "CHANNEL STOP" : "STOP LOSS";
                 if (st != null && st.Tp1Done)
@@ -3232,6 +3596,8 @@ namespace cAlgo.Robots
                 if (quiet.Count > 0)
                     Log("quiet (no setup): " + string.Join(", ", quiet));
             }
+            foreach (Market m in _indexMarkets)
+                Log(m.Name + " last half hour | " + IndexStatus(m, now));
             if (closed.Count > 0)
                 Log("market closed: " + string.Join(", ", closed));
 
@@ -3530,6 +3896,11 @@ namespace cAlgo.Robots
                   + "-bar channel, timeframes " + TrendTimeFrames + " (cost/ATR <= " + F(TrendMaxCostToAtr, 2) + "), " + (TrendHoldThroughBreaks ? "held through breaks" : "flat before breaks")
                   + "; AI, tick filter, TP1, break-even and time exit are not used | status every " + StatusMinutes() + " min"
                 : "SCALPER - micro-impulse setups (settings below)"));
+            Log("PARAMS last half hour: " + (IndexEnabled
+                ? "[" + IndexSymbols + "] 15:30 -> 15:59 New York in the direction of the move since the previous 16:00 close, when the 20-day volatility >= "
+                  + F(IndexMinVolatility, 0) + "% a year and the move >= " + F(IndexMinMoveSd, 1) + " daily sd | stop " + F(IndexStopSd, 1)
+                  + " half-hour sd, tightened down to " + F(IndexMinStopSd, 1) + " sd to keep the minimum volume within " + F(MaxMinVolumeRiskPercent, 1) + "% of the budget"
+                : "off"));
             if (TrendMode)
                 return;
             Log("PARAMS exits: SL " + F(SlAtrMultiplier, 2) + " x ATR(" + AtrPeriod + ") | TP1 " + F(Tp1AtrMultiplier, 2) + " x ATR closes " + F(Tp1ClosePercent, 0)
@@ -3756,6 +4127,109 @@ namespace cAlgo.Robots
     }
 
     /// <summary>Everything the bot tracks for one traded symbol.</summary>
+    /// <summary>New York local time from UTC by the US rules since 2007: daylight time from the second Sunday of March 02:00 to the first Sunday of November 02:00.</summary>
+    internal static class NewYorkTime
+    {
+        public static bool IsDaylight(DateTime utc)
+        {
+            int y = utc.Year;
+            DateTime start = NthSunday(y, 3, 2).AddHours(2 + 5);   // 02:00 EST = 07:00 UTC
+            DateTime end = NthSunday(y, 11, 1).AddHours(2 + 4);    // 02:00 EDT = 06:00 UTC
+            return utc >= start && utc < end;
+        }
+
+        public static DateTime FromUtc(DateTime utc)
+        {
+            DateTime u = DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
+            return u.AddHours(IsDaylight(utc) ? -4 : -5);
+        }
+
+        /// <summary>UTC time of a New York local time (for the rare hour that exists twice in November, the daylight one).</summary>
+        public static DateTime ToUtc(DateTime ny)
+        {
+            DateTime asDaylight = DateTime.SpecifyKind(ny, DateTimeKind.Unspecified).AddHours(4);
+            return IsDaylight(asDaylight) ? asDaylight : asDaylight.AddHours(1);
+        }
+
+        private static DateTime NthSunday(int year, int month, int n)
+        {
+            var first = new DateTime(year, month, 1);
+            int offset = ((int)DayOfWeek.Sunday - (int)first.DayOfWeek + 7) % 7;
+            return first.AddDays(offset + 7 * (n - 1));
+        }
+    }
+
+    /// <summary>The arithmetic of the last half hour, kept apart so it can be tested without a platform.</summary>
+    internal static class LastHalfHour
+    {
+        public const double TradingDays = 252.0;
+        public const double HalfHoursPerDay = 13.0;   // 09:30-16:00 New York
+
+        /// <summary>
+        /// The 16:00 New York closes of the last trading days before nyDate, oldest first: the close of every closed bar that
+        /// ends exactly at 16:00 New York. Bars are read from the newest back until enough are found.
+        /// </summary>
+        public static List<double> DailyCloses(Func<int, DateTime> openTime, Func<int, double> close, int count, int barMinutes, DateTime nyDate, int needed)
+        {
+            var result = new List<double>();
+            for (int i = count - 1; i >= 0 && result.Count < needed; i--)
+            {
+                DateTime ny = NewYorkTime.FromUtc(openTime(i).AddMinutes(barMinutes));
+                if (ny.Hour != 16 || ny.Minute != 0 || ny.Date >= nyDate.Date)
+                    continue;
+                double c = close(i);
+                if (c > 0)
+                    result.Add(c);
+            }
+            result.Reverse();
+            return result;
+        }
+
+        /// <summary>Annualized volatility of the daily returns between the closes (population standard deviation).</summary>
+        public static double Volatility(IList<double> closes)
+        {
+            int n = closes.Count - 1;
+            if (n < 2)
+                return 0.0;
+            double sum = 0.0, sumSq = 0.0;
+            for (int i = 1; i < closes.Count; i++)
+            {
+                double r = closes[i] / closes[i - 1] - 1.0;
+                sum += r;
+                sumSq += r * r;
+            }
+            double mean = sum / n;
+            double var = Math.Max(0.0, sumSq / n - mean * mean);
+            return Math.Sqrt(var) * Math.Sqrt(TradingDays);
+        }
+
+        /// <summary>Standard deviation of a half hour as a share of the price, from the annualized volatility.</summary>
+        public static double HalfHourSd(double vol)
+        {
+            return vol / Math.Sqrt(TradingDays) / Math.Sqrt(HalfHoursPerDay);
+        }
+
+        /// <summary>
+        /// +1 buy, -1 sell, 0 no trade: the direction of the move since the last close, when the volatility of the closes is
+        /// at least minVol and the move is at least minMoveSd daily standard deviations.
+        /// </summary>
+        public static int Signal(IList<double> closes, double price, double minVol, double minMoveSd, out double vol, out double move, out double moveSd)
+        {
+            vol = Volatility(closes);
+            move = 0.0;
+            moveSd = 0.0;
+            if (closes.Count < 2 || !(price > 0))
+                return 0;
+            double prev = closes[closes.Count - 1];
+            move = price / prev - 1.0;
+            double daySd = vol / Math.Sqrt(TradingDays);
+            moveSd = daySd > 0 ? Math.Abs(move) / daySd : 0.0;
+            if (vol < minVol || !(daySd > 0) || moveSd < minMoveSd || move == 0.0)
+                return 0;
+            return move > 0 ? 1 : -1;
+        }
+    }
+
     internal sealed class Market
     {
         public string Name;
@@ -3771,6 +4245,11 @@ namespace cAlgo.Robots
         public double ObservedMarginPerUnit;
         public double ObservedMarginPrice;
         public bool MarginFromPosition;   // the observed margin came from a real position, not from a rejected order
+        public bool IsIndex;              // traded by the last half hour only, outside the trend/scalper pipeline
+        public Bars Hourly;               // last half hour: hourly bars that give the 16:00 New York closes
+        public DateTime IdxCheckedDay = DateTime.MinValue;
+        public DateTime IdxLastExitTry = DateTime.MinValue;
+        public string IdxNote = "";
 
         public List<TimeFrame> Candidates = new List<TimeFrame>();
         public int TfIndex;

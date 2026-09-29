@@ -32,6 +32,7 @@ namespace Harness
             SpreadTests();
             CommissionTests();
             TrendTests();
+            LastHalfHourTests();
             VersionTests();
             VolumeTests();
             SqueezeTests();
@@ -438,6 +439,54 @@ namespace Harness
             return null;
         }
 
+
+        /// <summary>The last half hour: New York time across both clock changes, the 16:00 closes, the volatility and the signal.</summary>
+        private static void LastHalfHourTests()
+        {
+            Func<string, DateTime> U = x => DateTime.SpecifyKind(DateTime.Parse(x, System.Globalization.CultureInfo.InvariantCulture), DateTimeKind.Utc);
+            // reference values: Python zoneinfo America/New_York
+            string[,] ny =
+            {
+                { "2026-03-08 06:59", "2026-03-08 01:59" }, { "2026-03-08 07:00", "2026-03-08 03:00" }, { "2026-11-01 05:59", "2026-11-01 01:59" },
+                { "2026-11-01 06:00", "2026-11-01 01:00" }, { "2026-07-15 19:30", "2026-07-15 15:30" }, { "2026-01-15 20:30", "2026-01-15 15:30" },
+                { "2027-03-14 07:00", "2027-03-14 03:00" }, { "2025-11-02 06:00", "2025-11-02 01:00" }
+            };
+            for (int i = 0; i < ny.GetLength(0); i++)
+            {
+                string got = NewYorkTime.FromUtc(U(ny[i, 0])).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+                Check(got == ny[i, 1], "New York time of " + ny[i, 0] + " UTC is " + ny[i, 1] + " (" + got + ")");
+            }
+            Check(NewYorkTime.ToUtc(new DateTime(2026, 7, 15, 15, 30, 0)) == U("2026-07-15 19:30"), "15:30 New York in July is 19:30 UTC");
+            Check(NewYorkTime.ToUtc(new DateTime(2026, 1, 15, 15, 59, 0)) == U("2026-01-15 20:59"), "15:59 New York in January is 20:59 UTC");
+
+            // hourly bars of three days around the March change; the bar that ends at 16:00 New York carries the close
+            var times = new List<DateTime>(); var closes = new List<double>();
+            foreach (string day in new[] { "2026-03-05", "2026-03-06", "2026-03-09", "2026-03-10" })
+                for (int h = 0; h < 24; h++)
+                {
+                    DateTime t = U(day + " 00:00").AddHours(h);
+                    times.Add(t);
+                    DateTime endNy = NewYorkTime.FromUtc(t.AddHours(1));
+                    closes.Add(endNy.Hour == 16 ? 1000 + t.Day : 1.0);
+                }
+            List<double> dc = LastHalfHour.DailyCloses(i => times[i], i => closes[i], times.Count, 60, new DateTime(2026, 3, 10), 5);
+            Check(dc.Count == 3 && dc[0] == 1005 && dc[1] == 1006 && dc[2] == 1009, "daily closes are the 16:00 New York bars before the day, across the clock change (" + string.Join(",", dc) + ")");
+
+            // volatility: +1% / -1% alternating = population sd 1% a day = 15.87% a year
+            var alt = new List<double> { 100.0 };
+            for (int i = 0; i < 20; i++) alt.Add(alt[alt.Count - 1] * (i % 2 == 0 ? 1.01 : 0.99));
+            double vol = LastHalfHour.Volatility(alt);
+            Check(Math.Abs(vol - 0.01 * Math.Sqrt(252)) < 1e-9, "volatility of +/-1% days is 1% x sqrt(252) (" + vol.ToString("F4") + ")");
+            Check(Math.Abs(LastHalfHour.HalfHourSd(vol) - 0.01 / Math.Sqrt(13)) < 1e-12, "half-hour sd is the daily sd / sqrt(13)");
+            double v, move, msd;
+            double last = alt[alt.Count - 1];
+            Check(LastHalfHour.Signal(alt, last * 1.006, 0.15, 0.5, out v, out move, out msd) == 1 && Math.Abs(msd - 0.6) < 1e-6, "a rise of 0.6 sd on a volatile market buys (" + msd.ToString("F3") + " sd)");
+            Check(LastHalfHour.Signal(alt, last * 0.994, 0.15, 0.5, out v, out move, out msd) == -1, "a fall of 0.6 sd sells");
+            Check(LastHalfHour.Signal(alt, last * 1.004, 0.15, 0.5, out v, out move, out msd) == 0, "a move of 0.4 sd is too small");
+            Check(LastHalfHour.Signal(alt, last * 1.006, 0.16, 0.5, out v, out move, out msd) == 0, "a market calmer than the minimum volatility is left alone");
+            Check(LastHalfHour.Signal(new List<double> { 100.0 }, 101.0, 0.0, 0.0, out v, out move, out msd) == 0, "no signal without history");
+        }
+
         /// <summary>
         /// Every change is a new version: the version in the code, the cBot name, the assembly name (cTrader names an
         /// installed cBot after it), the newest changelog entry and the release file must all carry the same number.
@@ -446,7 +495,7 @@ namespace Harness
         {
             var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
             string version = (string)typeof(QuantAI_Scalper_24x7_V3).GetField("BotVersion", flags).GetRawConstantValue();
-            string expected = "QuantAI_Trend_24x7_V" + version.Replace('.', '_');
+            string expected = "QuantAI_TrendIntraday_24x7_V" + version.Replace('.', '_');
             Check(QuantAI_Scalper_24x7_V3.BotName == expected, "the cBot name carries the version " + version + " (" + QuantAI_Scalper_24x7_V3.BotName + ")");
             var robot = (cAlgo.API.RobotAttribute)Attribute.GetCustomAttribute(typeof(QuantAI_Scalper_24x7_V3), typeof(cAlgo.API.RobotAttribute));
             // The name comes from the class and the assembly (see the release checks below); the attribute's name constructor is obsolete.
@@ -503,9 +552,11 @@ namespace Harness
             Check(groups.Count > 0 && groups[0] == "1. Main" && byName["Strategy"] == "1. Main" && byName["BotBudget"] == "1. Main", "Strategy and Bot Budget open the panel");
             string[] trend = { "TrendTimeFrames", "TrendEntryBars", "TrendExitBars", "TrendStopAtr", "AtrPeriod", "BreakoutBufferPips", "TrendMaxCostToAtr", "TrendHoldThroughBreaks", "TrendIncludeForex" };
             Check(trend.All(n => byName[n] == "2. Trend (Daily Breakout)"), "every setting the trend's rules read is in group 2");
+            string[] index = { "IndexEnabled", "IndexSymbols", "IndexMinVolatility", "IndexMinMoveSd", "IndexStopSd", "IndexMinStopSd" };
+            Check(index.All(n => byName[n] == "3. US500 Last Half Hour"), "every setting of the last half hour is in group 3");
             string[] shared = { "CryptoSymbols", "FxSymbols", "MaxOpenPositions", "RiskPercent", "FixedLots", "MaxMinVolumeRiskPercent", "DailyMaxLossPercent",
                                 "MaxSlippagePips", "CryptoIgnoresSession", "UseSessionFilter", "SessionStartHour", "SessionEndHour", "CooldownSeconds", "BotLabel" };
-            Check(shared.Concat(trend).All(n => !byName[n].StartsWith("S")), "no setting the trend reads is in a Scalper Only group");
+            Check(shared.Concat(trend).Concat(index).All(n => !byName[n].StartsWith("S")), "no setting the trend or the last half hour reads is in a Scalper Only group");
             Check(byName.Values.Where(g => g.StartsWith("S")).All(g => g.StartsWith("S") && g.Contains("Scalper Only")), "the S groups say Scalper Only");
         }
 

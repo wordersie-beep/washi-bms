@@ -106,6 +106,7 @@ namespace Sim
         public readonly List<double> O = new List<double>(), H = new List<double>(), L = new List<double>(), C = new List<double>(), V = new List<double>();
         public bool Bursty;                  // ticks crowd into the bar's big legs (fast moves come with many ticks)
         public double TicksPerBar = 120;     // at the median volume
+        public int MinTicks = 20;            // per bar; 4 is enough to pass through open, extremes and close (long minute replays)
         private readonly List<DateTime> _runStart = new List<DateTime>(), _runEnd = new List<DateTime>();
         private double _medianVolume = 1;
 
@@ -175,7 +176,7 @@ namespace Sim
         public int TickCount(int i)
         {
             int n = (int)Math.Round(TicksPerBar * Math.Max(0.1, V[i] / _medianVolume));
-            return Math.Max(20, Math.Min(600, n));
+            return Math.Max(MinTicks, Math.Min(600, n));
         }
 
         public List<(DateTime Time, double Price)> TicksOf(int i, Random rng, int digits)
@@ -1527,6 +1528,14 @@ namespace Sim
                                  Base = "LTC", Quote = "USD", TickRate = 0.6, SigmaMinute = 0.089, SwapLongPerYear = -0.20, SwapShortPerYear = -0.075 });
         }
 
+
+        /// <summary>An S&amp;P 500 CFD like Pepperstone's US500: 0.1 lot minimum, 1:20, spread 0.4; sigma sets how volatile the synthetic market is.</summary>
+        private static Spec Us500(double sigmaMinute)
+        {
+            return new Spec { Name = "US500", Crypto = false, Price = 7745, Pip = 0.1, Digits = 2, Lot = 1, VMin = 0.1, VStep = 0.1, VMax = 1000, Spread = 0.4, Leverage = 20,
+                              Base = "SPX", Quote = "USD", TickRate = 2.0, SigmaMinute = sigmaMinute };
+        }
+
         /// <summary>
         /// Moves every parameter of the "Scalper Only" groups (S1-S5) to another valid value and returns what changed:
         /// the trend mode must trade exactly the same with them (scenario T).
@@ -1622,6 +1631,14 @@ namespace Sim
                 if (parts.Length < 2)
                     continue;
                 string sym = parts[1].Trim().Split(' ')[0];
+                if (line.Contains(" ENTRY LHH "))
+                {
+                    // the last half hour states its cost in half-hour standard deviations; the bot skips above 0.2
+                    var ms = System.Text.RegularExpressions.Regex.Match(line, @"\| cost ([0-9.]+) sd");
+                    if (!ms.Success) w.Violations.Add("ENTRY without a cost: " + line);
+                    else if (double.Parse(ms.Groups[1].Value, CultureInfo.InvariantCulture) > 0.2 + 0.005) w.Violations.Add(sym + " last-half-hour entry cost above 0.2 sd: " + line);
+                    continue;
+                }
                 var mc = System.Text.RegularExpressions.Regex.Match(line, @"\| cost ([0-9.]+) ATR");
                 if (!mc.Success)
                 {
@@ -2089,10 +2106,112 @@ namespace Sim
             return 0;
         }
 
+
+        /// <summary>
+        /// The last half hour on real index minutes: the bot trades only the index (no trend markets), every entry and exit is
+        /// checked against the rules, and the trades are written for comparison with the reference study.
+        /// Arguments: replay-index &lt;budget&gt; &lt;dir&gt; &lt;m1 csv&gt; [spread share of the price] [from yyyy-MM-dd] [to yyyy-MM-dd]
+        /// </summary>
+        private static int RunIndexReplay(string[] args)
+        {
+            double budget = double.Parse(args[1], CultureInfo.InvariantCulture);
+            string dir = args[2];
+            Directory.CreateDirectory(dir);
+            ReplayData data = ReplayData.LoadCsv(args[3]);
+            data.TicksPerBar = 4;
+            data.MinTicks = 4;
+            double spreadRel = args.Length > 4 ? double.Parse(args[4], CultureInfo.InvariantCulture) : 0.0001;
+            DateTime from = args.Length > 5 ? DateTime.SpecifyKind(DateTime.Parse(args[5], CultureInfo.InvariantCulture), DateTimeKind.Utc) : data.T[0].AddDays(40);
+            DateTime to = args.Length > 6 ? DateTime.SpecifyKind(DateTime.Parse(args[6], CultureInfo.InvariantCulture), DateTimeKind.Utc) : data.T[data.T.Count - 1];
+            if (from < data.T[0].AddDays(40)) from = data.T[0].AddDays(40);   // 21 trading days of history first
+            int i0 = Math.Max(0, data.T.FindIndex(x => x >= from));
+            var spec = new Spec
+            {
+                Name = "US500", Crypto = false, Pip = 0.1, Digits = 2, Lot = 1, VMin = 0.1, VStep = 0.1, VMax = 1000, Leverage = 20,
+                Base = "SPX", Quote = "USD", TickRate = 1, SigmaMinute = 1, Replay = data, SpreadRel = spreadRel, Price = data.O[i0]
+            };
+            spec.Spread = spec.Price * spreadRel;
+            var w = new World(61);
+            w.AddSymbol(spec);
+            w.ChartSymbol = "US500";
+            w.Balance = w.StartBalance = 49092.50;
+            w.InvariantEverySeconds = 3600;
+            w.StepSeconds = 60;
+            w.TotalHistoryBars = 1200;
+            var bot = new QuantAI_Scalper_24x7_V3();
+            w.Wire(bot);
+            w.Configure = b =>
+            {
+                b.CryptoSymbols = "";
+                b.FxSymbols = "";
+                b.IndexSymbols = "US500";
+                b.BotBudget = budget;
+                b.ShowHud = false;
+                b.LogSkipReasons = false;
+                b.StatusEveryMinutes = 0;
+            };
+            w.Configure(bot);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            w.Run(from, to - from);
+            sw.Stop();
+            string tag = budget.ToString("F0", CultureInfo.InvariantCulture);
+            System.IO.File.WriteAllLines(Path.Combine(dir, "index-" + tag + ".txt"), w.Log);
+
+            var trades = w.Hist.Where(x => x.Label == "QuantAI_M1").GroupBy(x => x.PositionId)
+                          .Select(g => new { Id = g.Key, Long = g.First().Type == TradeType.Buy, In = g.Min(x => x.EntryTime), Out = g.Max(x => x.Time), Net = g.Sum(x => x.Net),
+                                             Vol = g.First().Vol, Comment = g.First().Comment })
+                          .OrderBy(x => x.In).ToList();
+            // entry and exit prices from the log (ENTRY line) and the fills
+            var entryPx = new Dictionary<int, double>();
+            var riskPct = new Dictionary<int, double>();
+            foreach (string line in w.Log)
+            {
+                var me = System.Text.RegularExpressions.Regex.Match(line, @"ENTRY LHH (?:BUY|SELL) #(\d+) \S+ lot \([^)]*\) @([0-9.]+)");
+                if (me.Success) entryPx[int.Parse(me.Groups[1].Value)] = double.Parse(me.Groups[2].Value, CultureInfo.InvariantCulture);
+                var mp = System.Text.RegularExpressions.Regex.Match(line, @"PLAN #(\d+): stop \S+ = -([0-9.]+) \S+ \(([0-9.]+)% of the budget\)");
+                if (mp.Success) riskPct[int.Parse(mp.Groups[1].Value)] = double.Parse(mp.Groups[3].Value, CultureInfo.InvariantCulture);
+            }
+            var problems = new List<string>();
+            var csv = new List<string> { "id,side,opened_utc,closed_utc,opened_ny,closed_ny,net_eur,ret_pct,risk_pct" };
+            foreach (var t in trades)
+            {
+                DateTime inNy = NewYorkTime.FromUtc(t.In), outNy = NewYorkTime.FromUtc(t.Out);
+                int inMin = inNy.Hour * 60 + inNy.Minute, outMin = outNy.Hour * 60 + outNy.Minute;
+                if (inMin != 15 * 60 + 30) problems.Add("#" + t.Id + " opened at " + inNy.ToString("HH:mm") + " New York");
+                if (outNy.Date != inNy.Date) problems.Add("#" + t.Id + " held overnight (" + inNy.ToString("yyyy-MM-dd") + " -> " + outNy.ToString("yyyy-MM-dd HH:mm") + ")");
+                else if (outMin > 15 * 60 + 59 + 1) problems.Add("#" + t.Id + " closed at " + outNy.ToString("HH:mm") + " New York");
+                double rk = riskPct.TryGetValue(t.Id, out double rr) ? rr : double.NaN;
+                if (rk > 3.0 + 1e-6) problems.Add("#" + t.Id + " risked " + rk.ToString("F2") + "% of the budget");
+                double notional = t.Vol * (entryPx.TryGetValue(t.Id, out double ep) ? ep : double.NaN) / 1.17;
+                double ret = t.Net / notional * 100.0;
+                csv.Add(t.Id + "," + (t.Long ? "BUY" : "SELL") + "," + t.In.ToString("yyyy-MM-dd HH:mm:ss") + "," + t.Out.ToString("yyyy-MM-dd HH:mm:ss") + ","
+                        + inNy.ToString("yyyy-MM-dd HH:mm") + "," + outNy.ToString("yyyy-MM-dd HH:mm") + "," + t.Net.ToString("F4", CultureInfo.InvariantCulture) + ","
+                        + ret.ToString("F5", CultureInfo.InvariantCulture) + "," + (double.IsNaN(rk) ? "" : rk.ToString("F2", CultureInfo.InvariantCulture)));
+            }
+            System.IO.File.WriteAllLines(Path.Combine(dir, "index-" + tag + ".csv"), csv);
+            double gw = trades.Where(x => x.Net > 0).Sum(x => x.Net), gl = -trades.Where(x => x.Net < 0).Sum(x => x.Net);
+            double eq = budget, peak = budget, dd = 0;
+            foreach (var t in trades.OrderBy(x => x.Out)) { eq += t.Net; peak = Math.Max(peak, eq); dd = Math.Max(dd, peak - eq); }
+            Console.WriteLine("INDEX budget " + budget + " EUR | " + from.ToString("yyyy-MM-dd") + " .. " + to.ToString("yyyy-MM-dd") + " | " + trades.Count + " trades, "
+                              + trades.Count(x => x.Net > 0) + " won | net " + trades.Sum(x => x.Net).ToString("+0.00;-0.00") + " EUR (" + (trades.Sum(x => x.Net) / budget * 100).ToString("+0.0;-0.0")
+                              + "%) | PF " + (gl > 0 ? (gw / gl).ToString("F2") : "n/a") + " | max DD " + dd.ToString("F2") + " EUR | stops " + w.Log.Count(x => x.Contains("by STOP LOSS"))
+                              + " | skips: min volume " + w.Log.Count(x => x.Contains("would risk more than")) + ", closed " + w.Log.Count(x => x.Contains("market closed at 15:30"))
+                              + " | rule breaks " + problems.Count + " | violations " + w.Violations.Count + " | errors " + w.Log.Count(x => x.Contains("ERROR in") || x.Contains("FATAL"))
+                              + " | " + sw.Elapsed.TotalSeconds.ToString("F0") + " s");
+            foreach (var g in trades.GroupBy(x => x.In.Year))
+                Console.WriteLine("    " + g.Key + ": " + g.Count() + " trades, " + g.Count(x => x.Net > 0) + " won, net " + g.Sum(x => x.Net).ToString("+0.00;-0.00") + " EUR");
+            foreach (var x in problems.Take(10)) Console.WriteLine("  RULE " + x);
+            foreach (var x in w.Violations.Distinct().Take(5)) Console.WriteLine("  X " + x);
+            foreach (var x in w.Log.Where(l => l.Contains("ERROR in") || l.Contains("FATAL")).Take(5)) Console.WriteLine("  E " + x);
+            return problems.Count == 0 && w.Violations.Count == 0 ? 0 : 1;
+        }
+
         public static int Main(string[] args)
         {
             if (args.Length > 3 && args[0] == "replay-portfolio")
                 return RunPortfolioReplay(args);
+            if (args.Length > 3 && args[0] == "replay-index")
+                return RunIndexReplay(args);
             if (args.Length > 1 && args[0] == "replay-trend")
                 return RunTrendReplay(args);
             if (args.Length > 0 && args[0] == "replay")
@@ -2422,6 +2541,51 @@ namespace Sim
             if (!tSame) tw.Violations.Add("a Scalper Only setting changed the trend's trades");
             if (sTrades.Count < 2) tw.Violations.Add("scenario S made no trade to compare");
 
+            // 21. The defaults with US500 added on a volatile week (about 22% a year): the last half hour trades beside the trend -
+            // entries only at 15:30 New York, closed by 15:59 the same day or by the stop, the stop tightened to keep the minimum
+            // volume within 3% of the budget, the trend still trading.
+            World uw = Scenario("U: installed as is + US500 on a volatile week", 30, sStart, TimeSpan.FromDays(5),
+                     null, 197.95, Path.Combine(dir, "logU.txt"), specs => { RealCryptoSpecs(specs); specs.Add(Us500(2.4)); }, chart: DefaultChart);
+            var uEntries = uw.Hist.Where(x => x.Label == "QuantAI_M1" && x.Sym == "US500").GroupBy(x => x.PositionId).Select(g => g.First()).ToList();
+            int uBadIn = uEntries.Count(x => { DateTime n = NewYorkTime.FromUtc(x.EntryTime); return n.Hour != 15 || n.Minute != 30; });
+            int uBadOut = uEntries.Count(x => { DateTime a = NewYorkTime.FromUtc(x.EntryTime), b = NewYorkTime.FromUtc(x.Time); return b.Date != a.Date || b.Hour * 60 + b.Minute > 15 * 60 + 59; });
+            bool uHeldNow = uw.Open.Any(x => x.Sym.S.Name == "US500" && NewYorkTime.FromUtc(uw.Now).Date > NewYorkTime.FromUtc(x.EntryTime).Date);
+            var uRisk = uw.Log.Select(x => System.Text.RegularExpressions.Regex.Match(x, @"US500 +PLAN #\d+: stop \S+ = -[0-9.]+ \S+ \(([0-9.]+)% of the budget\)"))
+                          .Where(x => x.Success).Select(x => double.Parse(x.Groups[1].Value, CultureInfo.InvariantCulture)).ToList();
+            int uTight = uw.Log.Count(x => x.Contains("ENTRY LHH") && x.Contains("tightened to fit"));
+            int uTrend = uw.Log.Count(x => x.Contains(" ENTRY TRD "));
+            Console.WriteLine("U last-half-hour trades " + uEntries.Count + " (entry not at 15:30 " + uBadIn + ", exit late/overnight " + uBadOut + ") | tightened stops " + uTight
+                              + " | max risk " + (uRisk.Count > 0 ? uRisk.Max().ToString("F2") : "n/a") + "% | trend entries " + uTrend);
+            if (uEntries.Count < 1) uw.Violations.Add("the last half hour opened no trade on a volatile week");
+            if (uBadIn > 0) uw.Violations.Add(uBadIn + " last-half-hour entries not at 15:30 New York");
+            if (uBadOut > 0 || uHeldNow) uw.Violations.Add("a last-half-hour position was held past 15:59 New York");
+            if (uRisk.Any(x => x > 3.0 + 1e-6)) uw.Violations.Add("a last-half-hour trade risked more than 3% of the budget");
+            if (uTrend < 1) uw.Violations.Add("the trend stopped trading next to the last half hour");
+
+            // 22. A restart with a last-half-hour position: recovered and closed at 15:59 New York; one from yesterday closes at once.
+            World vw = Scenario("V: restart with a last-half-hour position (today and yesterday)", 31, new DateTime(2026, 9, 29, 19, 40, 0, DateTimeKind.Utc), TimeSpan.FromMinutes(40),
+                     null, 197.95, Path.Combine(dir, "logV.txt"), specs => { RealCryptoSpecs(specs); specs.Add(Us500(1.0)); }, null,
+                     w =>
+                     {
+                         w.Now = new DateTime(2026, 9, 29, 19, 31, 0, DateTimeKind.Utc);   // 15:31 New York
+                         w.Execute(TradeType.Sell, "US500", 0.1, "QuantAI_M1", new RelativeStopLossProtection(1000.0), null, "QAI|LHH|v=0.250|m=0.80");
+                     }, DefaultChart);
+            var vClose = vw.Hist.FirstOrDefault(x => x.Sym == "US500");
+            bool vOk = vClose != null && vClose.Time.Hour == 19 && vClose.Time.Minute == 59 && vw.Log.Any(x => x.Contains("RECOVER: #") && x.Contains("last-half-hour"))
+                       && vw.Log.Any(x => x.Contains("US500 CLOSED #") && x.Contains("by 15:59 NEW YORK"));
+            World ww = Scenario("W: a last-half-hour position left from yesterday", 32, new DateTime(2026, 9, 29, 14, 0, 0, DateTimeKind.Utc), TimeSpan.FromMinutes(10),
+                     null, 197.95, Path.Combine(dir, "logW.txt"), specs => { RealCryptoSpecs(specs); specs.Add(Us500(1.0)); }, null,
+                     w =>
+                     {
+                         w.Now = new DateTime(2026, 9, 28, 19, 31, 0, DateTimeKind.Utc);   // yesterday 15:31 New York
+                         w.Execute(TradeType.Buy, "US500", 0.1, "QuantAI_M1", new RelativeStopLossProtection(1000.0), null, "QAI|LHH|v=0.250|m=0.80");
+                     }, DefaultChart);
+            var wClose = ww.Hist.FirstOrDefault(x => x.Sym == "US500");
+            bool wOk = wClose != null && (wClose.Time - new DateTime(2026, 9, 29, 14, 0, 0, DateTimeKind.Utc)).TotalMinutes <= 1 && ww.Log.Any(x => x.Contains("by LATE EXIT"));
+            Console.WriteLine("V closed at " + (vClose != null ? vClose.Time.ToString("HH:mm") + " UTC" : "-") + " ok " + vOk + " | W closed at " + (wClose != null ? wClose.Time.ToString("HH:mm") + " UTC" : "-") + " ok " + wOk);
+            if (!vOk) vw.Violations.Add("a recovered last-half-hour position was not closed at 15:59 New York");
+            if (!wOk) ww.Violations.Add("a last-half-hour position from yesterday was not closed at once");
+
             string[] checks =
             {
                 "Выходные, бюджет 50 EUR: только крипта, выбор таймфрейма, суточный и субботний перерывы",
@@ -2443,7 +2607,10 @@ namespace Sim
                 "Тренд на форексе (включён вручную): позиции держатся через выходные, swap списывается",
                 "Бюджет 50 EUR, реальные минимальные лоты: торгуются монеты с мелким лотом, риск сделки не больше 3 %",
                 "Установка как есть: график XRPUSD D1, все настройки по умолчанию, счёт 197.95 EUR, реальные минимальные лоты",
-                "То же, но все настройки групп «Scalper Only» изменены: сделки тренда совпадают до цента"
+                "То же, но все настройки групп «Scalper Only» изменены: сделки тренда совпадают до цента",
+                "Как установлено + US500 на волатильной неделе: последние полчаса рядом с трендом, вход 15:30, выход 15:59 Нью-Йорка",
+                "Перезапуск с позицией последнего получаса: подхвачена и закрыта в 15:59 Нью-Йорка",
+                "Позиция последнего получаса со вчерашнего дня: закрыта сразу"
             };
             string[] notes =
             {
@@ -2473,12 +2640,16 @@ namespace Sim
                     + (rRisks.Count > 0 ? rRisks.Max(x => x.Pct).ToString("F2", CultureInfo.InvariantCulture) : "—") + " %, пропусков из-за крупного минимального лота: " + rTooRisky,
                 "график " + sw.ChartSymbol + " " + sw.ChartTimeFrame.ShortName + ", бюджет 200 → 197.95 EUR, входов: " + sEntries + ", наибольший риск сделки "
                     + (sRisks.Count > 0 ? sRisks.Max().ToString("F2", CultureInfo.InvariantCulture) : "—") + " %, последняя дневная свеча XRP " + sXrpBar.ToString("dd.MM", CultureInfo.InvariantCulture),
-                "изменено настроек: " + tChanged.Count + ", сделок S/T: " + (sTrades.Count - 1) + "/" + (tTrades.Count - 1) + ", совпадают: " + (tSame ? "да" : "нет")
+                "изменено настроек: " + tChanged.Count + ", сделок S/T: " + (sTrades.Count - 1) + "/" + (tTrades.Count - 1) + ", совпадают: " + (tSame ? "да" : "нет"),
+                "сделок US500: " + uEntries.Count + ", стоп сужен под бюджет: " + uTight + ", наибольший риск " + (uRisk.Count > 0 ? uRisk.Max().ToString("F2", CultureInfo.InvariantCulture) : "—")
+                    + " %, входов тренда: " + uTrend,
+                "закрыта в " + (vClose != null ? vClose.Time.ToString("HH:mm", CultureInfo.InvariantCulture) : "—") + " UTC (15:59 Нью-Йорка = 19:59 UTC)",
+                "закрыта в " + (wClose != null ? wClose.Time.ToString("HH:mm", CultureInfo.InvariantCulture) : "—") + " UTC, при старте в 14:00"
             };
-            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw };
-            // Scenario order in Rows follows the calls: A B C D E F H G I J K L M N O P Q R S T.
-            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T" };
-            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T" };
+            World[] worlds = { a, bw, c, d, e, f, h, g, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw, uw, vw, ww };
+            // Scenario order in Rows follows the calls: A B C D E F H G I J K L M N O P Q R S T U V W.
+            string[] order = { "A", "B", "C", "D", "E", "F", "H", "G", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W" };
+            string[] letters = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W" };
             for (int k = 0; k < Rows.Count && k < order.Length; k++)
             {
                 int idx = Array.IndexOf(letters, order[k]);
@@ -2492,7 +2663,7 @@ namespace Sim
             Console.WriteLine();
             Console.WriteLine("Unknown API members used by the bot (not mocked):");
             foreach (var kv in Mk.Unknown.OrderByDescending(k => k.Value)) Console.WriteLine("  " + kv.Key + " x" + kv.Value);
-            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
+            bool ok = new[] { a, bw, c, d, e, f, g, h, i9, j, kw, lw, mw, nw, ow, pw, qw, rw, sw, tw, uw, vw, ww }.All(w => w.Violations.Count == 0 && !w.Log.Any(l => l.Contains("ERROR in") || l.Contains("FATAL")));
             Console.WriteLine(ok ? "SIMULATION OK" : "SIMULATION FOUND PROBLEMS");
             return ok ? 0 : 1;
         }
